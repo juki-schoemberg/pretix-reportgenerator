@@ -21,7 +21,7 @@ class PluginApp(PluginConfig):
 
     class PretixPluginMeta:
         name = _("Custom Reports")
-        author = "Tobias Berndt"
+        author = "JuKi Schömberg e.V."
         description = _(
             "Define your own reports on orders and order positions in a graphical "
             "editor, save them, reuse them, schedule them and share them as "

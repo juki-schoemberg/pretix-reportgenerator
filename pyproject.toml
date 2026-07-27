@@ -10,11 +10,14 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ["pretix", "reports", "export"]
+# No e-mail address on purpose: none was specified for the association and an
+# invented contact address is worse than none. To be completed by the integrator
+# before release, together with [project.urls].
 authors = [
-    {name = "Tobias Berndt", email = "claude.tobi@die-wg.vodka"},
+    {name = "JuKi Schömberg e.V."},
 ]
 maintainers = [
-    {name = "Tobias Berndt", email = "claude.tobi@die-wg.vodka"},
+    {name = "JuKi Schömberg e.V."},
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",

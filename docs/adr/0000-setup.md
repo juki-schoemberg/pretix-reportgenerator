@@ -119,6 +119,14 @@ Cookiecutter bietet „Apache" oder „pretix Enterprise" an. Gewählt:
 (Volltext per URL referenziert). `MANIFEST.in` nimmt die Datei ins sdist auf,
 `check-manifest` verlangt sie.
 
+**Rechteinhaber und Autor: „JuKi Schömberg e.V."** — vom Auftraggeber
+festgelegt. Eingetragen in `LICENSE` (Copyright), `pyproject.toml`
+(`authors`/`maintainers`) und `PretixPluginMeta.author` in `apps.py`; letzteres
+ist der Name, den pretix in der Plugin-Übersicht anzeigt. **Ohne
+E-Mail-Adresse**, weil keine genannt wurde und eine erfundene Kontaktadresse in
+Paketmetadaten schlechter ist als gar keine — vom `integrator` beim Release
+nachzutragen, zusammen mit `[project.urls]` (Abschnitt 3).
+
 Das ist eine Paketierungs-, keine Contract-Frage — daher hier entschieden und
 nicht eskaliert. Widerspruch bitte über `handoff/requests/`.
 
