@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"}
+  ],
+  "sorting": [
+    {"field": "order.datetime", "direction": "desc"},
+    {"field": "order.datetime", "direction": "asc"}
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "base": "orderposition",
+  "columns": [
+    {"field": "order.datetime"},
+    {"field": "order.code"},
+    {"field": "position.positionid"},
+    {"field": "item.internal_name"},
+    {"field": "position.attendee_name"},
+    {"field": "subevent.date_from"}
+  ],
+  "sorting": [
+    {"field": "subevent.date_from", "direction": "asc"},
+    {"field": "order.datetime", "direction": "desc"},
+    {"field": "order.code", "direction": "asc"},
+    {"field": "position.positionid", "direction": "asc"},
+    {"field": "item.internal_name", "direction": "asc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

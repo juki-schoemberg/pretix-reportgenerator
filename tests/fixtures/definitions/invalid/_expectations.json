@@ -1,0 +1,105 @@
+{
+  "_comment": [
+    "Owner: contract-architect. Machine-readable expectations for every file in",
+    "this directory. Files whose name starts with an underscore are metadata and",
+    "are not fixtures.",
+    "",
+    "stage=structure  -> contracts.validate_definition() must raise",
+    "                   DefinitionValidationError, and every code listed in",
+    "                   'codes' must appear in err.codes.",
+    "stage=registry   -> validate_definition() must SUCCEED (the document is",
+    "                   structurally fine) and the named error must be raised by",
+    "                   the query compiler / registry stage, i.e. by",
+    "                   StubQueryCompiler.compile() with the default stub",
+    "                   registry. That split is the whole point of ADR 0001",
+    "                   section 4: structure and field resolution are two",
+    "                   separate passes."
+  ],
+  "fixtures": {
+    "malformed_field_key.json": {
+      "stage": "structure",
+      "codes": ["invalid_field_key"],
+      "note": "Key grammar: no spaces, no punctuation, must have a namespace, must not be empty."
+    },
+    "smuggled_orm_path.json": {
+      "stage": "structure",
+      "codes": ["invalid_field_key", "unknown_key"],
+      "note": "The attack this contract is built against: a double underscore in a key and an extra 'orm_path' member on a column. Both are rejected before anything reaches the ORM."
+    },
+    "unknown_operator.json": {
+      "stage": "structure",
+      "codes": ["unknown_operator"],
+      "note": "'regex' is not in the Operator enum. Operators are a closed set."
+    },
+    "wrong_schema_version.json": {
+      "stage": "structure",
+      "codes": ["unsupported_schema_version"],
+      "note": "Refuse to guess what a future document means."
+    },
+    "filter_value_type_mismatch.json": {
+      "stage": "structure",
+      "codes": ["value_shape_mismatch"],
+      "note": "relative_last_days needs a whole number of days, not a string. This is as far as type checking gets without a registry."
+    },
+    "filter_value_wrong_shape.json": {
+      "stage": "structure",
+      "codes": ["value_shape_mismatch", "empty"],
+      "note": "between wants exactly two values, in wants a non-empty list, is_empty wants no value at all."
+    },
+    "filters_too_deep.json": {
+      "stage": "structure",
+      "codes": ["too_deep"],
+      "note": "Exactly one level of nesting (SPEC.md F6)."
+    },
+    "duplicate_sorting.json": {
+      "stage": "structure",
+      "codes": ["duplicate"],
+      "note": "The second stage on the same field can never have an effect."
+    },
+    "unknown_base.json": {
+      "stage": "structure",
+      "codes": ["unknown_base"],
+      "note": "Only 'order' and 'orderposition' exist."
+    },
+    "unknown_top_level_key.json": {
+      "stage": "structure",
+      "codes": ["unknown_key"],
+      "note": "Strict allow-list at every level, including inside 'options'. Unknown members are rejected, never ignored."
+    },
+    "empty_columns.json": {
+      "stage": "structure",
+      "codes": ["empty"],
+      "note": "A report without columns can only ever produce an empty export."
+    },
+    "unknown_aggregate.json": {
+      "stage": "structure",
+      "codes": ["unknown_aggregate"],
+      "note": "'median' is not in the Aggregate enum."
+    },
+    "ambiguous_filter_node.json": {
+      "stage": "structure",
+      "codes": ["ambiguous_node"],
+      "note": "A filter node is a group or a condition, never both and never neither."
+    },
+    "unknown_field_key.json": {
+      "stage": "registry",
+      "error": "FieldResolutionError",
+      "note": "Structurally impeccable keys that simply do not exist. 'answer.question-that-was-renamed' is the realistic case: Question.identifier can be changed by the user at any time (docs/pretix-api-notes.md section 6.4)."
+    },
+    "field_type_conflict.json": {
+      "stage": "registry",
+      "error": "CompilationError",
+      "note": "'contains' on a money field. Only the registry knows order.total is money, so this cannot be caught structurally."
+    },
+    "sort_not_sortable.json": {
+      "stage": "registry",
+      "error": "CompilationError",
+      "note": "Sorting by an aggregated value is out of scope for v1; the registry marks position.price as not sortable on base 'order'."
+    },
+    "missing_aggregate_on_order.json": {
+      "stage": "registry",
+      "error": "CompilationError",
+      "note": "Position-level fields on an order-based report must carry an aggregate (SPEC.md F3, ADR 0001 section 7)."
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "base": "orderposition",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.status"},
+    {"field": "order.datetime"},
+    {"field": "order.email"},
+    {"field": "position.positionid"},
+    {"field": "item.name"},
+    {"field": "item.category"},
+    {"field": "variation.value"},
+    {"field": "position.attendee_name"},
+    {"field": "position.attendee_email"},
+    {"field": "position.price", "format": {"number_style": "currency"}},
+    {"field": "position.tax_rate"},
+    {"field": "position.tax_value", "format": {"number_style": "currency"}},
+    {"field": "subevent.name"},
+    {"field": "subevent.date_from", "format": {"date_style": "short"}},
+    {"field": "seat.zone_name"},
+    {"field": "seat.row_name"},
+    {"field": "seat.seat_number"},
+    {"field": "voucher.code"},
+    {"field": "position.canceled", "format": {"boolean_style": "yes_no"}}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "order.status", "operator": "exact", "value": "p"}
+    ]
+  },
+  "sorting": [
+    {"field": "order.code", "direction": "asc"},
+    {"field": "position.positionid", "direction": "asc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

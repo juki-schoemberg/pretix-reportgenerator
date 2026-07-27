@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "base": "orderposition",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.status"},
+    {"field": "position.attendee_name"},
+    {"field": "item.name"},
+    {"field": "item.category"},
+    {"field": "position.price", "format": {"number_style": "currency"}},
+    {"field": "position.country"},
+    {"field": "invoice_address.country"}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "order.status", "operator": "in", "value": ["p", "n"]},
+      {
+        "op": "or",
+        "children": [
+          {"field": "item.name", "operator": "contains", "value": "Ticket"},
+          {"field": "item.category", "operator": "exact", "value": "Workshops"}
+        ]
+      },
+      {
+        "op": "or",
+        "children": [
+          {"field": "position.country", "operator": "in", "value": ["DE", "AT"]},
+          {"field": "invoice_address.country", "operator": "in", "value": ["CH"]}
+        ]
+      },
+      {"field": "position.price", "operator": "gte", "value": "10.00"},
+      {"field": "position.attendee_email", "operator": "is_not_empty"}
+    ]
+  },
+  "sorting": [
+    {"field": "order.code", "direction": "asc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

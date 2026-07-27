@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.status"},
+    {"field": "order.datetime", "format": {"date_style": "medium"}},
+    {"field": "order.expires", "format": {"date_style": "date_only"}},
+    {"field": "order.email"},
+    {"field": "order.phone"},
+    {"field": "order.locale"},
+    {"field": "order.sales_channel"},
+    {"field": "order.testmode", "format": {"boolean_style": "yes_no"}},
+    {"field": "order.require_approval", "format": {"boolean_style": "true_false"}},
+    {"field": "order.total", "label": "Gross total", "format": {"number_style": "currency"}},
+    {"field": "order.pending_sum", "format": {"number_style": "currency"}},
+    {"field": "payment.sum_confirmed", "format": {"number_style": "currency"}},
+    {"field": "refund.sum_done", "format": {"number_style": "currency"}},
+    {"field": "payment.providers"},
+    {"field": "order.position_count"},
+    {"field": "checkin.count"},
+    {"field": "checkin.first_datetime", "format": {"date_style": "iso"}},
+    {"field": "invoice_address.name"},
+    {"field": "invoice_address.company"},
+    {"field": "invoice_address.street"},
+    {"field": "invoice_address.zipcode"},
+    {"field": "invoice_address.city"},
+    {"field": "invoice_address.country"},
+    {"field": "invoice_address.state"},
+    {"field": "invoice_address.vat_id"},
+    {"field": "invoice_address.is_business", "format": {"boolean_style": "one_zero"}},
+    {"field": "invoice_address.internal_reference"},
+    {"field": "item.name", "label": "Products", "aggregate": "join", "format": {"separator": " | "}},
+    {"field": "position.price", "label": "Sum of positions", "aggregate": "sum"},
+    {"field": "order.comment", "hidden": true}
+  ],
+  "sorting": [
+    {"field": "order.datetime", "direction": "desc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

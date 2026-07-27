@@ -1,0 +1,7 @@
+{
+  "schema_version": 99,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"}
+  ]
+}

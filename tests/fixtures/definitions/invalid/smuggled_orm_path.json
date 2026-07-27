@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.event__organizer__slug"},
+    {"field": "order.code", "orm_path": "event__organizer__slug"}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "order.event__settings__secret", "operator": "exact", "value": "x"}
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "order.code", "operator": "regex", "value": "^A.*"}
+    ]
+  }
+}

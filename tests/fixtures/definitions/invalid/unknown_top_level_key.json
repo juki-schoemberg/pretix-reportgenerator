@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "raw_sql": "SELECT * FROM pretixbase_order",
+  "columns": [
+    {"field": "order.code"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "row_limit": 100,
+    "shell_command": "rm -rf /"
+  }
+}

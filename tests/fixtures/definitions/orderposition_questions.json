@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "base": "orderposition",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "position.attendee_name"},
+    {"field": "position.attendee_email"},
+    {"field": "item.name"},
+    {"field": "answer.tshirt-size", "label": "Shirt"},
+    {"field": "answer.arrival-date", "format": {"date_style": "date_only"}},
+    {"field": "answer.newsletter", "format": {"boolean_style": "yes_no"}}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "answer.tshirt-size", "operator": "in", "value": ["L", "XL"]},
+      {"field": "answer.newsletter", "operator": "exact", "value": true},
+      {"field": "answer.arrival-date", "operator": "is_not_empty"}
+    ]
+  },
+  "sorting": [
+    {"field": "answer.arrival-date", "direction": "asc"},
+    {"field": "position.attendee_name", "direction": "asc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

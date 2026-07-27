@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.does_not_exist"},
+    {"field": "answer.question-that-was-renamed"}
+  ]
+}

@@ -1,0 +1,180 @@
+{
+  "_comment": [
+    "Owner: contract-architect (wave 0c). Frozen together with contracts/.",
+    "",
+    "These are the golden fixtures every agent tests against. Files whose name",
+    "starts with an underscore are metadata, not fixtures. Files directly in",
+    "this directory are report DEFINITIONS and must pass",
+    "contracts.validate_definition(). Files in portable/ are export ENVELOPES",
+    "and must pass contracts.validate_portable_document(). Files in invalid/",
+    "must fail, see invalid/_expectations.json.",
+    "",
+    "None of the valid fixtures contains an ORM path, a lookup or anything else",
+    "the query compiler could take literally. They only contain registry keys.",
+    "That is deliberate: a golden fixture doubles as a demonstration of what a",
+    "stored definition may legitimately look like."
+  ],
+
+  "contract": {
+    "schema_version": 1,
+    "validator": "pretix_custom_reports.contracts.validate_definition",
+    "envelope_validator": "pretix_custom_reports.contracts.validate_portable_document",
+    "stub_registry": "pretix_custom_reports.contracts.stubs.stub_registry",
+    "stub_compiler": "pretix_custom_reports.contracts.stubs.stub_compiler"
+  },
+
+  "fixtures": {
+    "minimal_order.json": {
+      "base": "order",
+      "purpose": "Smallest document that validates: one column, everything else defaulted. Use it to check that optional members really are optional."
+    },
+    "wide_order.json": {
+      "base": "order",
+      "purpose": "31 columns across every group, all three format families, a label override, a hidden column. The performance and rendering workhorse."
+    },
+    "order_with_aggregates.json": {
+      "base": "order",
+      "purpose": "SPEC.md F3: position-level data on an order-based report. Covers count, sum, min, max, avg, count_distinct and join, including the same field used four times with different aggregates."
+    },
+    "orderposition_basic.json": {
+      "base": "orderposition",
+      "purpose": "The classic attendee list: order data, position data, product, variation, subevent, seat, voucher."
+    },
+    "orderposition_questions.json": {
+      "base": "orderposition",
+      "purpose": "Question fields (answer.<identifier>) as columns, filters and sorting. The portability case: these keys may stop resolving."
+    },
+    "relative_date_filters.json": {
+      "base": "order",
+      "purpose": "All six relative date operators. Essential for scheduled exports (SPEC.md F6/F8) -- these are the filters that must keep making sense on every run."
+    },
+    "filters_and_or.json": {
+      "base": "orderposition",
+      "purpose": "AND across groups, OR inside a group -- the exact nesting SPEC.md F6 allows, and no more."
+    },
+    "multi_level_sorting.json": {
+      "base": "orderposition",
+      "purpose": "Five sorting stages in a defined order (SPEC.md F7)."
+    },
+    "plugin_and_meta_fields.json": {
+      "base": "order",
+      "purpose": "Third-party plugin namespace (SPEC.md F5) and event meta properties. Needs the stub registry or a real plugin providing plugin.pretix_demo.demo_value."
+    },
+    "options_full.json": {
+      "base": "orderposition",
+      "purpose": "Every option set to a non-default value, including row_limit and canceled positions."
+    },
+    "portable/report_export.json": {
+      "kind": "envelope",
+      "purpose": "Import/export file format (SPEC.md F9): envelope metadata plus an inner definition. 'meta' is free-form and owned by portability-dev."
+    }
+  },
+
+  "required_field_keys": {
+    "_comment": [
+      "Every key used by a valid fixture. The real registry MUST provide these",
+      "under exactly these names, otherwise the shared fixtures stop being",
+      "shared. Adding fields is free; renaming one of these is a contract",
+      "change and goes through handoff/blockers.md."
+    ],
+    "core": [
+      "order.code",
+      "order.status",
+      "order.datetime",
+      "order.expires",
+      "order.cancellation_date",
+      "order.email",
+      "order.phone",
+      "order.locale",
+      "order.sales_channel",
+      "order.testmode",
+      "order.require_approval",
+      "order.comment",
+      "order.total",
+      "order.pending_sum",
+      "order.position_count",
+      "payment.sum_confirmed",
+      "payment.providers",
+      "refund.sum_done",
+      "checkin.count",
+      "checkin.first_datetime",
+      "invoice_address.name",
+      "invoice_address.company",
+      "invoice_address.street",
+      "invoice_address.zipcode",
+      "invoice_address.city",
+      "invoice_address.country",
+      "invoice_address.state",
+      "invoice_address.vat_id",
+      "invoice_address.is_business",
+      "invoice_address.internal_reference",
+      "position.positionid",
+      "position.price",
+      "position.tax_rate",
+      "position.tax_value",
+      "position.attendee_name",
+      "position.attendee_email",
+      "position.country",
+      "position.canceled",
+      "item.name",
+      "item.internal_name",
+      "item.category",
+      "variation.value",
+      "subevent.name",
+      "subevent.date_from",
+      "seat.zone_name",
+      "seat.row_name",
+      "seat.seat_number",
+      "voucher.code"
+    ],
+    "questions": {
+      "_comment": "Present only if the event has a question with this identifier. Test factories should create exactly these.",
+      "identifiers": ["tshirt-size", "arrival-date", "newsletter"],
+      "types": {
+        "tshirt-size": "choice",
+        "arrival-date": "date",
+        "newsletter": "boolean"
+      }
+    },
+    "meta_properties": {
+      "_comment": "Event meta property names, present only if the organizer defines them.",
+      "event": ["campaign"]
+    },
+    "plugin": {
+      "_comment": "Stub only. No real plugin is expected to provide this; the fixture exists so the plugin namespace is exercised end to end.",
+      "keys": ["plugin.pretix_demo.demo_value"]
+    }
+  },
+
+  "base_rules": {
+    "_comment": [
+      "What the registry must arrange so that the valid fixtures compile.",
+      "These follow from ADR 0001 section 7."
+    ],
+    "order": {
+      "direct": [
+        "order.*",
+        "invoice_address.*",
+        "payment.*",
+        "refund.*",
+        "checkin.*",
+        "meta.*"
+      ],
+      "aggregate_required": [
+        "position.*",
+        "item.*",
+        "variation.*",
+        "subevent.*",
+        "seat.*",
+        "voucher.*",
+        "answer.*"
+      ],
+      "not_sortable": "everything that requires an aggregate on this base"
+    },
+    "orderposition": {
+      "direct": ["all of the above"],
+      "aggregate_required": [],
+      "not_sortable": ["payment.providers"]
+    }
+  }
+}

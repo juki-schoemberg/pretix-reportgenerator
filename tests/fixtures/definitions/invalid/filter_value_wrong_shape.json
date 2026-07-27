@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "order.total", "operator": "between", "value": 5},
+      {"field": "order.status", "operator": "in", "value": []},
+      {"field": "order.code", "operator": "is_empty", "value": "unexpected"}
+    ]
+  }
+}

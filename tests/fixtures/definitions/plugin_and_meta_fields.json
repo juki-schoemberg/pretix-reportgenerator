@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.status"},
+    {"field": "meta.event.campaign", "label": "Campaign"},
+    {"field": "plugin.pretix_demo.demo_value", "label": "Value from another plugin"}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "meta.event.campaign", "operator": "is_not_empty"},
+      {"field": "plugin.pretix_demo.demo_value", "operator": "contains", "value": "abc"}
+    ]
+  },
+  "sorting": [
+    {"field": "plugin.pretix_demo.demo_value", "direction": "asc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"op": "or", "field": "order.code", "operator": "exact", "value": "A"},
+      {"nothing": "useful"}
+    ]
+  }
+}

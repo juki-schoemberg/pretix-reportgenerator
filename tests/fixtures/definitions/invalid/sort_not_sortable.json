@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "position.price", "aggregate": "sum"}
+  ],
+  "sorting": [
+    {"field": "position.price", "direction": "desc"}
+  ]
+}

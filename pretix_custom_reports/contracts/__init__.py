@@ -2,10 +2,275 @@
 
 Owner from wave 0c on: contract-architect (ORCHESTRIERUNG.md section 5).
 
-Created empty in wave 0a. Everything in this package is frozen once
-``handoff/contracts-freigegeben.md`` exists; changes go through
-``handoff/blockers.md``, never silently (CLAUDE.md rule 7).
+Everything in this package is **frozen** once ``handoff/contracts-freigegeben.md``
+exists. Nobody edits it afterwards: a change request goes into
+``handoff/blockers.md``, work stops, the orchestrator decides (CLAUDE.md rule 7).
+A silently adjusted contract makes the parallel work of the other agents
+worthless.
 
-Keep this file free of imports so that parallel agents can add modules
-without touching a shared file.
+Reading order for a new agent:
+
+1. :mod:`~pretix_custom_reports.contracts.fields` -- what a field is, how keys
+   are named, which operators and aggregates exist
+2. :mod:`~pretix_custom_reports.contracts.definition` -- the stored JSON and
+   its structural validator
+3. :mod:`~pretix_custom_reports.contracts.protocols` -- the registry and query
+   compiler interfaces, plus the shared constants (log action types, the
+   exporter's form key, chunk sizes)
+4. :mod:`~pretix_custom_reports.contracts.stubs` -- working implementations to
+   develop against before the real ones exist
+5. ``docs/adr/0001-contracts.md`` -- why it looks like this
+
+This package imports **only the standard library**. It works without configured
+Django settings, without a database, without the registry and without the query
+compiler, so ``python -c "from pretix_custom_reports.contracts import *"``
+succeeds in any environment. Django and pretix types appear under
+``typing.TYPE_CHECKING`` only.
+
+Note on ADR 0000 section 9 bullet 3, which asks package ``__init__`` files to
+stay import-free: the reason given there is that re-exports turn an ``__init__``
+into a shared write target for several agents. That reason does not apply here
+-- this package has exactly one owner and is frozen -- and the flat namespace is
+what the other four agents import from. The deviation is deliberate and
+documented in docs/adr/0001-contracts.md section 6.
 """
+
+from pretix_custom_reports.contracts.definition import (
+    MAX_COLUMNS,
+    MAX_FILTER_CONDITIONS,
+    MAX_FILTER_GROUPS,
+    MAX_GROUP_CHILDREN,
+    MAX_LABEL_LENGTH,
+    MAX_ROW_LIMIT,
+    MAX_SEPARATOR_LENGTH,
+    MAX_SORT_ENTRIES,
+    MAX_STRING_VALUE_LENGTH,
+    MAX_VALUE_ITEMS,
+    PREVIEW_ROW_LIMIT,
+    SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+    BooleanStyle,
+    BoolOp,
+    Column,
+    ColumnFormat,
+    DateStyle,
+    ErrorCode,
+    FieldReference,
+    FieldUsage,
+    FilterCondition,
+    FilterGroup,
+    NumberStyle,
+    PortableReport,
+    ReportDefinition,
+    ReportOptions,
+    SortEntry,
+    ValidationIssue,
+    empty_definition,
+    validate_definition,
+    validate_definition_json,
+    validate_portable_document,
+)
+from pretix_custom_reports.contracts.errors import (
+    CompilationError,
+    ContractError,
+    DefinitionValidationError,
+    FieldContractError,
+    FieldResolutionError,
+    ReportNotFoundError,
+)
+from pretix_custom_reports.contracts.fields import (
+    AGGREGATES_FOR_DATATYPE,
+    ALL_NAMESPACES,
+    DEFAULT_OPERATORS,
+    GROUP_ANSWERS,
+    GROUP_CHECKIN,
+    GROUP_INVOICE_ADDRESS,
+    GROUP_ITEM,
+    GROUP_META,
+    GROUP_ORDER,
+    GROUP_PAYMENT,
+    GROUP_POSITION,
+    GROUP_SEAT,
+    GROUP_SUBEVENT,
+    GROUP_VOUCHER,
+    IDENTIFIER_MAX_LENGTH,
+    IDENTIFIER_RE,
+    KEY_MAX_LENGTH,
+    KEY_RE,
+    KEY_SEPARATOR,
+    NS_ANSWER,
+    NS_CHECKIN,
+    NS_COMPUTED,
+    NS_DISCOUNT,
+    NS_INVOICE_ADDRESS,
+    NS_ITEM,
+    NS_META,
+    NS_ORDER,
+    NS_PAYMENT,
+    NS_PLUGIN,
+    NS_POSITION,
+    NS_REFUND,
+    NS_SEAT,
+    NS_SUBEVENT,
+    NS_VARIATION,
+    NS_VOUCHER,
+    OPERATOR_SPECS,
+    ORM_PATH_RE,
+    PROVIDER_CORE,
+    RESERVED_NAMESPACES,
+    Aggregate,
+    Base,
+    DataType,
+    FieldContext,
+    Operator,
+    OperatorSpec,
+    ReportField,
+    SortDirection,
+    ValueKind,
+    ValueScope,
+    is_plugin_key,
+    meta_field_key,
+    plugin_field_key,
+    question_field_key,
+    split_key,
+    validate_identifier,
+    validate_key,
+)
+from pretix_custom_reports.contracts.protocols import (
+    DEFAULT_CHUNK_SIZE,
+    EXPORT_FORM_REPORT_KEY,
+    LOG_ACTION_ADDED,
+    LOG_ACTION_CHANGED,
+    LOG_ACTION_DELETED,
+    LOG_ACTION_EXECUTED,
+    LOG_ACTION_EXPORTED,
+    LOG_ACTION_IMPORTED,
+    LOG_ACTION_PREFIX,
+    LOG_ACTION_TEMPLATE_APPLIED,
+    REGISTER_FIELDS_SIGNAL_NAME,
+    CompiledColumn,
+    CompiledReport,
+    FieldRegistry,
+    QueryCompiler,
+    RowRenderer,
+    find_unresolved_fields,
+)
+
+__all__ = [
+    # errors
+    "CompilationError",
+    "ContractError",
+    "DefinitionValidationError",
+    "FieldContractError",
+    "FieldResolutionError",
+    "ReportNotFoundError",
+    # fields
+    "AGGREGATES_FOR_DATATYPE",
+    "ALL_NAMESPACES",
+    "Aggregate",
+    "Base",
+    "DEFAULT_OPERATORS",
+    "DataType",
+    "FieldContext",
+    "GROUP_ANSWERS",
+    "GROUP_CHECKIN",
+    "GROUP_INVOICE_ADDRESS",
+    "GROUP_ITEM",
+    "GROUP_META",
+    "GROUP_ORDER",
+    "GROUP_PAYMENT",
+    "GROUP_POSITION",
+    "GROUP_SEAT",
+    "GROUP_SUBEVENT",
+    "GROUP_VOUCHER",
+    "IDENTIFIER_MAX_LENGTH",
+    "IDENTIFIER_RE",
+    "KEY_MAX_LENGTH",
+    "KEY_RE",
+    "KEY_SEPARATOR",
+    "NS_ANSWER",
+    "NS_CHECKIN",
+    "NS_COMPUTED",
+    "NS_DISCOUNT",
+    "NS_INVOICE_ADDRESS",
+    "NS_ITEM",
+    "NS_META",
+    "NS_ORDER",
+    "NS_PAYMENT",
+    "NS_PLUGIN",
+    "NS_POSITION",
+    "NS_REFUND",
+    "NS_SEAT",
+    "NS_SUBEVENT",
+    "NS_VARIATION",
+    "NS_VOUCHER",
+    "OPERATOR_SPECS",
+    "ORM_PATH_RE",
+    "Operator",
+    "OperatorSpec",
+    "PROVIDER_CORE",
+    "RESERVED_NAMESPACES",
+    "ReportField",
+    "SortDirection",
+    "ValueKind",
+    "ValueScope",
+    "is_plugin_key",
+    "meta_field_key",
+    "plugin_field_key",
+    "question_field_key",
+    "split_key",
+    "validate_identifier",
+    "validate_key",
+    # definition
+    "BoolOp",
+    "BooleanStyle",
+    "Column",
+    "ColumnFormat",
+    "DateStyle",
+    "ErrorCode",
+    "FieldReference",
+    "FieldUsage",
+    "FilterCondition",
+    "FilterGroup",
+    "MAX_COLUMNS",
+    "MAX_FILTER_CONDITIONS",
+    "MAX_FILTER_GROUPS",
+    "MAX_GROUP_CHILDREN",
+    "MAX_LABEL_LENGTH",
+    "MAX_ROW_LIMIT",
+    "MAX_SEPARATOR_LENGTH",
+    "MAX_SORT_ENTRIES",
+    "MAX_STRING_VALUE_LENGTH",
+    "MAX_VALUE_ITEMS",
+    "NumberStyle",
+    "PREVIEW_ROW_LIMIT",
+    "PortableReport",
+    "ReportDefinition",
+    "ReportOptions",
+    "SCHEMA_VERSION",
+    "SUPPORTED_SCHEMA_VERSIONS",
+    "SortEntry",
+    "ValidationIssue",
+    "empty_definition",
+    "validate_definition",
+    "validate_definition_json",
+    "validate_portable_document",
+    # protocols and shared constants
+    "CompiledColumn",
+    "CompiledReport",
+    "DEFAULT_CHUNK_SIZE",
+    "EXPORT_FORM_REPORT_KEY",
+    "FieldRegistry",
+    "LOG_ACTION_ADDED",
+    "LOG_ACTION_CHANGED",
+    "LOG_ACTION_DELETED",
+    "LOG_ACTION_EXECUTED",
+    "LOG_ACTION_EXPORTED",
+    "LOG_ACTION_IMPORTED",
+    "LOG_ACTION_PREFIX",
+    "LOG_ACTION_TEMPLATE_APPLIED",
+    "QueryCompiler",
+    "REGISTER_FIELDS_SIGNAL_NAME",
+    "RowRenderer",
+    "find_unresolved_fields",
+]

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.status"},
+    {"field": "order.total", "format": {"number_style": "currency"}},
+    {"field": "position.positionid", "label": "Positions", "aggregate": "count"},
+    {"field": "position.price", "label": "Position sum", "aggregate": "sum"},
+    {"field": "position.price", "label": "Cheapest position", "aggregate": "min"},
+    {"field": "position.price", "label": "Most expensive position", "aggregate": "max"},
+    {"field": "position.price", "label": "Average position", "aggregate": "avg"},
+    {"field": "item.name", "label": "Products", "aggregate": "join"},
+    {"field": "item.category", "label": "Distinct categories", "aggregate": "count_distinct"},
+    {"field": "position.attendee_name", "label": "Attendees", "aggregate": "join", "format": {"separator": "; "}},
+    {"field": "answer.tshirt-size", "label": "T-shirt sizes", "aggregate": "join"},
+    {"field": "checkin.count"}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "order.status", "operator": "in", "value": ["p", "n"]}
+    ]
+  },
+  "sorting": [
+    {"field": "order.code", "direction": "asc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

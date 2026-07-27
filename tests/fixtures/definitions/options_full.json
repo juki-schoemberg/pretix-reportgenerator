@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "base": "orderposition",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.testmode", "format": {"boolean_style": "yes_no"}},
+    {"field": "position.positionid"},
+    {"field": "position.canceled", "format": {"boolean_style": "yes_no"}},
+    {"field": "position.price", "format": {"number_style": "raw"}}
+  ],
+  "filters": {
+    "op": "or",
+    "children": [
+      {"field": "position.canceled", "operator": "exact", "value": true},
+      {"field": "order.testmode", "operator": "exact", "value": true}
+    ]
+  },
+  "sorting": [
+    {"field": "order.code", "direction": "asc"}
+  ],
+  "options": {
+    "include_canceled_positions": true,
+    "include_testmode_orders": true,
+    "row_limit": 5000
+  }
+}

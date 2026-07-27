@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "base": "order",
+  "columns": [
+    {"field": "order.code"},
+    {"field": "order.datetime", "format": {"date_style": "medium"}},
+    {"field": "order.expires", "format": {"date_style": "date_only"}},
+    {"field": "order.total", "format": {"number_style": "currency"}}
+  ],
+  "filters": {
+    "op": "and",
+    "children": [
+      {"field": "order.datetime", "operator": "relative_last_days", "value": 30},
+      {"field": "order.datetime", "operator": "relative_since_event_start"},
+      {
+        "op": "or",
+        "children": [
+          {"field": "order.expires", "operator": "relative_next_days", "value": 7},
+          {"field": "order.cancellation_date", "operator": "relative_current_month"},
+          {"field": "order.datetime", "operator": "relative_current_year"},
+          {"field": "subevent.date_from", "operator": "relative_today"}
+        ]
+      }
+    ]
+  },
+  "sorting": [
+    {"field": "order.datetime", "direction": "desc"}
+  ],
+  "options": {
+    "include_canceled_positions": false,
+    "include_testmode_orders": false,
+    "row_limit": null
+  }
+}

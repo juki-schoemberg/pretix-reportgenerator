@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "Attendee list per position",
+  "description": "Exported from event DUMMY. Uses one question field, which may not resolve in the target event.",
+  "exported_at": "2026-07-27T12:00:00+02:00",
+  "generator": "pretix-custom-reports 0.1.0",
+  "source": "dummy/dummy",
+  "meta": {
+    "pretix_version": "2026.6.0",
+    "created_by": "dummy@example.org"
+  },
+  "definition": {
+    "schema_version": 1,
+    "base": "orderposition",
+    "columns": [
+      {"field": "order.code"},
+      {"field": "position.attendee_name"},
+      {"field": "item.name"},
+      {"field": "answer.tshirt-size", "label": "Shirt"}
+    ],
+    "filters": {
+      "op": "and",
+      "children": [
+        {"field": "order.status", "operator": "in", "value": ["p", "n"]}
+      ]
+    },
+    "sorting": [
+      {"field": "order.code", "direction": "asc"}
+    ],
+    "options": {
+      "include_canceled_positions": false,
+      "include_testmode_orders": false,
+      "row_limit": null
+    }
+  }
+}
