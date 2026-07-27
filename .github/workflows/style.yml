@@ -1,0 +1,68 @@
+# Owner from wave 1 on: integrator (see ORCHESTRIERUNG.md section 5)
+#
+# Adapted from pretix-plugin-cookiecutter (HEAD 9ef6054). Deviations, all
+# justified in docs/adr/0000-setup.md:
+#   * pretix pinned to the exact target version instead of "pip3 install pretix"
+#   * action versions bumped to non-deprecated majors
+#   * one job with all four linters instead of four jobs (the install of pretix
+#     dominates the runtime)
+name: Code Style
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'pretix_custom_reports/locale/**'
+      - 'pretix_custom_reports/static/**'
+      - 'handoff/**'
+  pull_request:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'pretix_custom_reports/locale/**'
+      - 'pretix_custom_reports/static/**'
+      - 'handoff/**'
+
+jobs:
+  style:
+    name: flake8 / isort / black / docformatter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pretix
+        run: pip3 install "pretix==2026.6.0"
+      - name: Install dependencies
+        run: pip3 install flake8 isort black docformatter -Ue .
+      - name: Run flake8
+        run: flake8 .
+      - name: Run isort
+        run: isort -c .
+      - name: Run black
+        run: black --check .
+      - name: Run docformatter
+        run: docformatter --check --diff .
+
+  packaging:
+    name: packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pretix
+        run: pip3 install "pretix==2026.6.0"
+      - name: Install dependencies
+        run: pip3 install twine check-manifest pretix-plugin-build setuptools build -Ue .
+      - name: Run check-manifest
+        run: check-manifest .
+      - name: Build package
+        run: python setup.py sdist
+      - name: Check package
+        run: twine check dist/*

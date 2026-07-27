@@ -1,0 +1,4 @@
+[plugin]
+package = "pretix-custom-reports"
+modules = [ "pretix_custom_reports" ]
+marketplace_name = "custom-reports"

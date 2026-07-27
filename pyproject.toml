@@ -1,0 +1,84 @@
+# Owner from wave 1 on: integrator (see ORCHESTRIERUNG.md section 5)
+# Created in wave 0a by bootstrap-dev. Structure follows pretix-plugin-cookiecutter
+# (HEAD 9ef6054) and pretix-passbook. See docs/adr/0000-setup.md.
+[project]
+name = "pretix-custom-reports"
+dynamic = ["version"]
+description = "Freely configurable reports on orders and order positions for pretix"
+readme = "README.rst"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["pretix", "reports", "export"]
+authors = [
+    {name = "Tobias Berndt", email = "claude.tobi@die-wg.vodka"},
+]
+maintainers = [
+    {name = "Tobias Berndt", email = "claude.tobi@die-wg.vodka"},
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+]
+
+# Intentionally empty: the plugin must not require anything pretix does not ship
+# already (see docs/adr/0000-setup.md).
+dependencies = [
+]
+
+[project.entry-points."pretix.plugin"]
+pretix_custom_reports = "pretix_custom_reports:PretixPluginMeta"
+
+[project.entry-points."distutils.commands"]
+build = "pretix_plugin_build.build:CustomBuild"
+
+[build-system]
+requires = [
+    "setuptools",
+    "pretix-plugin-build",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "pretix_custom_reports.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["pretix*"]
+namespaces = false
+
+# --- Formatters -------------------------------------------------------------
+# black and docformatter only read pyproject.toml. flake8, isort, pytest,
+# coverage and check-manifest are configured in setup.cfg, like in the
+# cookiecutter and in pretix core.
+#
+# The excludes below keep the repo-wide gate commands from touching files owned
+# by other agents (scripts/** belongs to env-setup) or agent metadata.
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+extend-exclude = '''
+/(
+    \.claude
+  | \.git
+  | build
+  | dist
+  | scripts
+  | pretix_custom_reports/migrations
+)/
+'''
+
+# docformatter is NOT part of the pretix ecosystem (neither pretix core nor the
+# cookiecutter use it) and it is NOT part of the DoD gate command
+# `flake8 . && isort -c . && black --check .`. It is configured here because the
+# bootstrap brief asks for it. Both wrap widths are 0 on purpose: with wrapping
+# enabled docformatter reflows prose and destroys reST tables in module
+# docstrings. See docs/adr/0000-setup.md.
+[tool.docformatter]
+recursive = true
+wrap-summaries = 0
+wrap-descriptions = 0
+exclude = [".claude", ".git", "build", "dist", "scripts", "pretix_custom_reports/migrations"]

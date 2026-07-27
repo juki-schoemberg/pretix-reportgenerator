@@ -1,0 +1,11 @@
+{% extends "pretixcontrol/event/base.html" %}
+{% load i18n %}
+{% block title %}{% trans "Exports" %}{% endblock %}
+{% block content %}
+    <h1>{% trans "Exports" %}</h1>
+    <div class="alert alert-info" id="customreports-placeholder">
+        {% blocktrans trimmed %}
+            Still empty. Custom reports are not implemented yet.
+        {% endblocktrans %}
+    </div>
+{% endblock %}

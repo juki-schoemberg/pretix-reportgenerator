@@ -1,0 +1,63 @@
+# Owner from wave 1 on: integrator (see ORCHESTRIERUNG.md section 5)
+#
+# Adapted from pretix-plugin-cookiecutter (HEAD 9ef6054). Deviations, all
+# justified in docs/adr/0000-setup.md:
+#   * pretix pinned to the exact target version
+#   * action versions bumped to non-deprecated majors
+#   * performance tests deselected here; test-engineer runs them separately
+#
+# Note: pretix.testutils.settings disables migrations unless GITHUB_WORKFLOW is
+# set. In CI that variable exists, so real migrations run -- which is exactly the
+# extra coverage we want for persistence-dev's migrations from wave 1 on.
+name: Tests
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'pretix_custom_reports/locale/**'
+      - 'handoff/**'
+  pull_request:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'pretix_custom_reports/locale/**'
+      - 'handoff/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install system dependencies
+        run: sudo apt update && sudo apt install -y gettext
+      - name: Install pretix
+        run: pip3 install "pretix==2026.6.0"
+      - name: Install dependencies
+        run: pip3 install pytest pytest-django -Ue .
+      - name: Run tests
+        run: pytest tests -m "not performance"
+
+  migrations:
+    runs-on: ubuntu-latest
+    name: Missing migrations
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pretix
+        run: pip3 install "pretix==2026.6.0"
+      - name: Install dependencies
+        run: pip3 install -Ue .
+      - name: Check for missing migrations
+        run: python -m pretix makemigrations --check --dry-run
+        env:
+          DJANGO_SETTINGS_MODULE: pretix.testutils.settings
