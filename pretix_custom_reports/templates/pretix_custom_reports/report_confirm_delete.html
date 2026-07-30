@@ -1,0 +1,32 @@
+{% extends "pretixcontrol/event/base.html" %}
+{% comment %}
+Owner from wave 1 on: persistence-dev (see ORCHESTRIERUNG.md section 5).
+{% endcomment %}
+{% load i18n %}
+{% block title %}{% trans "Delete report" %}{% endblock %}
+{% block content %}
+    <h1>{% trans "Delete report" %}</h1>
+    <form action="" method="post" class="form-horizontal">
+        {% csrf_token %}
+        <p>
+            {% blocktrans trimmed with name=report.name %}
+                Are you sure you want to delete the report <strong>{{ name }}</strong>?
+            {% endblocktrans %}
+        </p>
+        <div class="alert alert-warning">
+            {% blocktrans trimmed with identifier=report.identifier %}
+                Scheduled exports that reference the identifier
+                <code>{{ identifier }}</code> will start failing.
+            {% endblocktrans %}
+        </div>
+        <div class="form-group submit-group">
+            <a href="{% url "plugins:pretix_custom_reports:event.reports" organizer=request.event.organizer.slug event=request.event.slug %}"
+               class="btn btn-default btn-cancel">
+                {% trans "Cancel" %}
+            </a>
+            <button type="submit" class="btn btn-danger btn-save">
+                {% trans "Delete" %}
+            </button>
+        </div>
+    </form>
+{% endblock %}

@@ -1,0 +1,67 @@
+{# Owner: frontend-dev (ORCHESTRIERUNG.md section 5) #}
+{#
+    The live preview table, rendered on the server (SPEC.md F2) and returned as
+    the "html" member of POST api/preview/. Cell values are already display
+    strings; Django's autoescaping is what keeps order data from turning into
+    markup, so never mark anything in here as safe.
+#}
+{% load i18n %}
+<div class="pcr-preview-table-wrapper">
+    {% if columns %}
+        <table class="table table-condensed table-bordered table-hover pcr-preview-table">
+            <thead>
+                <tr>
+                    <th class="pcr-preview-rownum"><span class="sr-only">{% trans "Row" %}</span></th>
+                    {% for column in columns %}
+                        <th title="{{ column.key }}">
+                            {{ column.label }}
+                            {% if column.aggregate %}
+                                <span class="pcr-preview-aggregate">({{ column.aggregate }})</span>
+                            {% endif %}
+                        </th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                    <tr>
+                        <td class="pcr-preview-rownum">{{ forloop.counter }}</td>
+                        {% for cell in row %}
+                            {% if cell %}
+                                <td>{{ cell }}</td>
+                            {% else %}
+                                <td class="pcr-preview-empty"><span class="sr-only">{% trans "empty" %}</span>—</td>
+                            {% endif %}
+                        {% endfor %}
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="{{ columns|length|add:1 }}" class="text-muted">
+                            {% trans "No order matches this report." %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <p class="help-block pcr-preview-footer">
+            {% if total is None %}
+                {% blocktrans trimmed count counter=row_count %}
+                    {{ counter }} row shown.
+                {% plural %}
+                    {{ counter }} rows shown.
+                {% endblocktrans %}
+            {% else %}
+                {% blocktrans trimmed with shown=row_count total=total %}
+                    {{ shown }} of {{ total }} rows shown.
+                {% endblocktrans %}
+            {% endif %}
+            {% if truncated %}
+                {% blocktrans trimmed with limit=limit %}
+                    The preview never loads more than {{ limit }} rows.
+                {% endblocktrans %}
+            {% endif %}
+        </p>
+    {% else %}
+        <p class="text-muted">{% trans "Add a column to see a preview." %}</p>
+    {% endif %}
+</div>

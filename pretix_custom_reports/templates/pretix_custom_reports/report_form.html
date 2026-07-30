@@ -1,0 +1,42 @@
+{% extends "pretixcontrol/event/base.html" %}
+{% comment %}
+Owner from wave 1 on: persistence-dev (see ORCHESTRIERUNG.md section 5).
+
+The JSON textarea is on purpose: this is the storage form, the graphical editor
+is frontend-dev's editor*.html. Both post into the same model, so both get the
+same structural validation.
+{% endcomment %}
+{% load i18n %}
+{% load bootstrap3 %}
+{% block title %}
+    {% if form.instance.pk %}{% trans "Change report" %}{% else %}{% trans "Create report" %}{% endif %}
+{% endblock %}
+{% block content %}
+    <h1>
+        {% if form.instance.pk %}
+            {% blocktrans trimmed with name=form.instance.name %}
+                Report: {{ name }}
+            {% endblocktrans %}
+        {% else %}
+            {% trans "Create a new report" %}
+        {% endif %}
+    </h1>
+    <form action="" method="post" class="form-horizontal">
+        {% csrf_token %}
+        {% bootstrap_form_errors form %}
+        {% bootstrap_field form.name layout="horizontal" %}
+        {% bootstrap_field form.description layout="horizontal" %}
+        {% bootstrap_field form.identifier layout="horizontal" %}
+        {% bootstrap_field form.base layout="horizontal" %}
+        {% bootstrap_field form.definition layout="horizontal" %}
+        <div class="form-group submit-group">
+            <a href="{% url "plugins:pretix_custom_reports:event.reports" organizer=request.event.organizer.slug event=request.event.slug %}"
+               class="btn btn-default btn-cancel">
+                {% trans "Cancel" %}
+            </a>
+            <button type="submit" class="btn btn-primary btn-save">
+                {% trans "Save" %}
+            </button>
+        </div>
+    </form>
+{% endblock %}

@@ -1,0 +1,96 @@
+{% extends "pretixcontrol/event/base.html" %}
+{% comment %}
+Owner from wave 1 on: persistence-dev (see ORCHESTRIERUNG.md section 5).
+
+Deliberately plain: the graphical editor is built by frontend-dev. Permission
+checks in the template use ``can_change`` from the view rather than
+``request.eventpermset`` directly, so the same template works outside the
+control middleware.
+{% endcomment %}
+{% load i18n %}
+{% block title %}{% trans "Reports" %}{% endblock %}
+{% block content %}
+    <h1>{% trans "Reports" %}</h1>
+    {% if reports %}
+        {% if can_change %}
+            <p>
+                <a href="{% url "plugins:pretix_custom_reports:event.reports.add" organizer=request.event.organizer.slug event=request.event.slug %}"
+                   class="btn btn-default">
+                    <span class="fa fa-plus"></span> {% trans "Create a new report" %}
+                </a>
+            </p>
+        {% endif %}
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>{% trans "Name" %}</th>
+                        <th>{% trans "Internal identifier" %}</th>
+                        <th>{% trans "Report base" %}</th>
+                        <th>{% trans "Created from template" %}</th>
+                        <th class="action-col-2"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for report in reports %}
+                        <tr>
+                            <td>
+                                {% if can_change %}
+                                    <strong><a href="{% url "plugins:pretix_custom_reports:event.reports.edit" organizer=request.event.organizer.slug event=request.event.slug report=report.pk %}">{{ report.name }}</a></strong>
+                                {% else %}
+                                    <strong>{{ report.name }}</strong>
+                                {% endif %}
+                                {% if report.description %}
+                                    <br><small class="text-muted">{{ report.description }}</small>
+                                {% endif %}
+                            </td>
+                            <td><code>{{ report.identifier }}</code></td>
+                            <td>{{ report.get_base_display }}</td>
+                            <td>
+                                {% if report.source_template %}
+                                    {{ report.source_template.name }}
+                                {% else %}
+                                    &ndash;
+                                {% endif %}
+                            </td>
+                            <td class="text-right flip">
+                                {% if can_change %}
+                                    <a href="{% url "plugins:pretix_custom_reports:event.reports.edit" organizer=request.event.organizer.slug event=request.event.slug report=report.pk %}"
+                                       class="btn btn-default btn-sm" title="{% trans "Edit" %}" data-toggle="tooltip">
+                                        <span class="fa fa-edit"></span>
+                                    </a>
+                                    <form class="form-inline" style="display: inline-block" method="post"
+                                          action="{% url "plugins:pretix_custom_reports:event.reports.duplicate" organizer=request.event.organizer.slug event=request.event.slug report=report.pk %}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="btn btn-default btn-sm" title="{% trans "Duplicate" %}" data-toggle="tooltip">
+                                            <span class="fa fa-copy"></span>
+                                        </button>
+                                    </form>
+                                    <a href="{% url "plugins:pretix_custom_reports:event.reports.delete" organizer=request.event.organizer.slug event=request.event.slug report=report.pk %}"
+                                       class="btn btn-danger btn-sm" title="{% trans "Delete" %}" data-toggle="tooltip">
+                                        <span class="fa fa-trash"></span>
+                                    </a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% include "pretixcontrol/pagination.html" %}
+    {% else %}
+        <div class="empty-collection">
+            <p>
+                {% blocktrans trimmed %}
+                    You have not created any reports yet.
+                {% endblocktrans %}
+            </p>
+            {% if can_change %}
+                <a href="{% url "plugins:pretix_custom_reports:event.reports.add" organizer=request.event.organizer.slug event=request.event.slug %}"
+                   class="btn btn-primary btn-lg">
+                    <span class="fa fa-plus"></span> {% trans "Create a new report" %}
+                </a>
+            {% endif %}
+        </div>
+    {% endif %}
+{% endblock %}
