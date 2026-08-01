@@ -1,0 +1,30 @@
+{% extends "pretixcontrol/organizers/base.html" %}
+{% comment %}
+Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
+{% endcomment %}
+{% load i18n %}
+{% block title %}{% trans "Delete template" %}{% endblock %}
+{% block inner %}
+    <h1>{% trans "Delete report template" %}</h1>
+    <form action="" method="post" class="form-horizontal">
+        {% csrf_token %}
+        <p>
+            {% blocktrans trimmed with name=template.name %}
+                Are you sure you want to delete the template <strong>{{ name }}</strong>?
+            {% endblocktrans %}
+        </p>
+        <div class="alert alert-info">
+            {% blocktrans trimmed %}
+                Reports that were created from this template stay in their events.
+                They only lose the note that says where they came from.
+            {% endblocktrans %}
+        </div>
+        <div class="form-group submit-group">
+            <a href="{% url "plugins:pretix_custom_reports:organizer.templates" organizer=request.organizer.slug %}"
+               class="btn btn-default btn-cancel">
+                {% trans "Cancel" %}
+            </a>
+            <button type="submit" class="btn btn-danger btn-save">{% trans "Delete" %}</button>
+        </div>
+    </form>
+{% endblock %}

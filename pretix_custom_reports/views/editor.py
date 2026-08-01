@@ -22,14 +22,18 @@ Sortable.js, select2, Font Awesome -- is already shipped and self-hosted by
 from typing import Any, Dict, Optional
 
 from django.http import Http404
-from django.urls import re_path, reverse
+from django.urls import NoReverseMatch, re_path, reverse
 from django.utils.translation import gettext
 from django.views.generic import TemplateView
 from pretix.control.permissions import EventPermissionRequiredMixin
 
 from ..contracts import SCHEMA_VERSION, Base, empty_definition
+from ..models import ReportDefinition
 from ..signals import URL_NAMESPACE, VIEW_PERMISSION
-from .api import PluginActiveMixin, mock_available
+from .api import PluginActiveMixin
+from .crud import CHANGE_PERMISSION, URL_NAME_ADD, URL_NAME_EDIT
+from .portability import URL_NAME_EXPORT, URL_NAME_IMPORT
+from .templates import URL_NAME_EVENT_PICK as URL_NAME_TEMPLATES
 
 __all__ = ["ReportEditorView", "editor_urlpatterns"]
 
@@ -39,13 +43,16 @@ class ReportEditorView(PluginActiveMixin, EventPermissionRequiredMixin, Template
 
     Permission: :data:`~pretix_custom_reports.signals.VIEW_PERMISSION`. The
     editor shows real order data in its preview, so it is gated exactly like the
-    preview endpoint. Saving will be gated more strictly by ``persistence-dev``
-    (see ``handoff/requests/frontend-dev-an-integrator-urls.md``).
+    preview endpoint. *Saving* is gated more strictly, by ``persistence-dev``'s
+    CRUD views (``event.settings.general:write``); a user who may look but not
+    change gets the editor without a save target, see :meth:`save_url`.
 
-    Wave 1: the ``identifier`` route argument resolves against the golden
-    fixtures, because the model that will hold stored reports does not exist
-    yet. Wave 2 replaces :meth:`load_definition` with a database lookup; the
-    template and the JavaScript do not change.
+    The ``identifier`` route argument is the stable
+    :attr:`~pretix_custom_reports.models.ReportDefinition.identifier`, not the
+    primary key: this URL ends up in bookmarks and in documentation, and the
+    identifier survives an event copy (ADR 0001 section 5). The CRUD routes use
+    the primary key; both are reachable from here, the difference is documented
+    in ``handoff/requests/frontend-dev-an-integrator-urls.md`` section 1.
     """
 
     permission = VIEW_PERMISSION
@@ -53,65 +60,149 @@ class ReportEditorView(PluginActiveMixin, EventPermissionRequiredMixin, Template
 
     # -- data -------------------------------------------------------------
 
-    def load_definition(self) -> Optional[Dict[str, Any]]:
-        """The definition the editor opens with, or ``None`` for a new report.
+    def get_report(self) -> Optional[ReportDefinition]:
+        """The stored report this URL addresses, or ``None`` for a new one.
 
-        WAVE 1 -> WAVE 2 SWAP POINT. In wave 2 this becomes::
-
-            report = get_object_or_404(
-                Report, event=self.request.event, identifier=identifier
-            )
-            return report.definition
-
-        Until then an identifier is looked up among the golden fixtures, which
-        is what makes "load every golden fixture into the editor" testable
-        before persistence exists.
+        The queryset goes through ``event.custom_reports``, so a report of
+        another event answers 404 even for a user who has permission in both
+        (CLAUDE.md rule 4). Organizer templates have ``event=None`` and are
+        therefore invisible here by construction, not by a filter someone has
+        to remember.
         """
+        if getattr(self, "_report_loaded", False):
+            return self._report
         identifier = self.kwargs.get("identifier")
-        if not identifier:
-            example = self.request.GET.get("example")
-            if not example:
-                return None
-            identifier = example
+        report = None
+        if identifier:
+            report = (
+                self.request.event.custom_reports.by_identifier(identifier)
+                .order_by("pk")
+                .first()
+            )
+            if report is None:
+                raise Http404("The requested report does not exist.")
+        self._report = report
+        self._report_loaded = True
+        return report
 
-        from .api import _load_mock  # local: wave-1 only, see api.py
+    def load_definition(self) -> Optional[Dict[str, Any]]:
+        """The definition document the editor opens with.
 
-        if not mock_available():
-            raise Http404("Stored reports are not available yet.")
-        return _load_mock(identifier)
+        Straight out of the database: the model canonicalises on save, so what
+        comes back here is exactly what the round trip has to reproduce.
+        Deliberately *not* validated again -- an old report whose structure no
+        longer validates must still be openable, otherwise it can never be
+        repaired. The browser normalises on load and the ``api/validate/``
+        endpoint reports what is wrong with it.
+        """
+        report = self.get_report()
+        return report.definition if report is not None else None
+
+    # -- urls -------------------------------------------------------------
+
+    def may_change(self) -> bool:
+        """Whether this user may store reports at all.
+
+        The editor itself hangs on ``event.orders:read`` because its preview
+        shows real order data; creating and changing needs
+        ``event.settings.general:write`` (views/crud.py, views/portability.py,
+        views/templates.py all agree on that string). Anything that writes is
+        hidden rather than rendered into a 403.
+        """
+        request = self.request
+        return request.user.has_event_permission(
+            request.organizer, request.event, CHANGE_PERMISSION, request=request
+        )
+
+    def save_url(self, report: Optional[ReportDefinition]) -> Optional[str]:
+        """Where the editor's form posts to, or ``None`` if it must not.
+
+        ``None`` in two cases, and the template explains both: the user may read
+        but not change reports, or the CRUD routes are not wired into
+        ``urls.py`` yet (that file belongs to the integrator, wave 4). Returning
+        ``None`` rather than rendering a dead action is what keeps the save
+        button honest.
+        """
+        if not self.may_change():
+            return None
+        if report is None:
+            return self.url_or_none(URL_NAME_ADD)
+        return self.url_or_none(URL_NAME_EDIT, report=report.pk)
+
+    def portability_urls(self, report: Optional[ReportDefinition]) -> Dict[str, Any]:
+        """Links into portability-dev's views: export, import, templates.
+
+        Same rules as :meth:`save_url`, for the same reasons:
+
+        * ``export`` needs a stored report -- there is nothing to download for a
+          report that was never saved, and the URL is built from its primary
+          key. It exports what is **in the database**, not what is currently in
+          the editor; the template says so and the JavaScript asks before
+          leaving with unsaved changes.
+        * ``import`` and ``templates`` write, so they follow
+          :meth:`may_change`. ``export`` only reads and is offered to anyone who
+          may open the editor.
+        * every one of them is ``None`` while ``urls.py`` does not carry the
+          routes yet (integrator, wave 4). The names themselves are contract,
+          see handoff/requests/portability-dev-an-integrator-urls.md section 2.
+        """
+        writable = self.may_change()
+        return {
+            "export": (
+                self.url_or_none(URL_NAME_EXPORT, report=report.pk)
+                if report is not None
+                else None
+            ),
+            "import": self.url_or_none(URL_NAME_IMPORT) if writable else None,
+            "templates": self.url_or_none(URL_NAME_TEMPLATES) if writable else None,
+        }
+
+    def url(self, name: str, **extra: Any) -> str:
+        return reverse(
+            f"{URL_NAMESPACE}:{name}",
+            kwargs={
+                "organizer": self.request.organizer.slug,
+                "event": self.request.event.slug,
+                **extra,
+            },
+        )
+
+    def url_or_none(self, name: str, **extra: Any) -> Optional[str]:
+        """:meth:`url`, but ``None`` for a route that is not wired up.
+
+        Deliberately not a ``{% url %}`` tag in the template: that raises, and a
+        half-wired ``urls.py`` would then take down the whole editor instead of
+        one button (the API and CRUD routes come from three different handoff
+        requests, and they will not all land in the same commit).
+        """
+        try:
+            return self.url(name, **extra)
+        except NoReverseMatch:
+            return None
 
     # -- context ----------------------------------------------------------
 
     def get_context_data(self, **kwargs: Any) -> Dict[str, Any]:
         ctx = super().get_context_data(**kwargs)
-        request = self.request
-        url_kwargs = {
-            "organizer": request.organizer.slug,
-            "event": request.event.slug,
-        }
-
-        def url(name: str) -> str:
-            return reverse(f"{URL_NAMESPACE}:{name}", kwargs=url_kwargs)
-
+        report = self.get_report()
         definition = self.load_definition() or empty_definition(Base.ORDER)
 
-        ctx["mock_mode"] = mock_available()
-        ctx["examples_url"] = url("api.examples") if ctx["mock_mode"] else None
-        # Saving belongs to persistence-dev's CRUD view. Until that route
-        # exists, the form has no action and the button explains why.
-        ctx["save_url"] = None
+        ctx["report"] = report
+        ctx["report_name"] = report.name if report is not None else ""
+        ctx["report_description"] = report.description if report is not None else ""
+        # Posted back unchanged when editing. Without it the ModelForm would
+        # clean an empty identifier and the model would generate a fresh one on
+        # every save -- silently breaking every scheduled export that refers to
+        # the report by its stable identifier.
+        ctx["report_identifier"] = report.identifier if report is not None else ""
+        ctx["save_url"] = self.save_url(report)
+        ctx["portability"] = self.portability_urls(report)
         ctx["config"] = {
             "schema_version": SCHEMA_VERSION,
             "urls": {
-                "fields": url("api.fields"),
-                "preview": url("api.preview"),
-                "validate": url("api.validate"),
-                "examples": url("api.examples") if ctx["mock_mode"] else None,
-                # The JS interpolates %(slug)s; reverse() cannot build a URL
-                # with a placeholder that the pattern rejects.
-                "example": (
-                    (url("api.examples") + "%(slug)s/") if ctx["mock_mode"] else None
-                ),
+                "fields": self.url("api.fields"),
+                "preview": self.url("api.preview"),
+                "validate": self.url("api.validate"),
             },
             "initial": definition,
             "i18n": self.js_strings(),
@@ -164,6 +255,7 @@ class ReportEditorView(PluginActiveMixin, EventPermissionRequiredMixin, Template
             ),
             "days": gettext("days"),
             "drag": gettext("Drag to reorder"),
+            "drop_here": gettext("Drop a field here to add it as a column."),
             "errors_title": gettext("The report is not valid yet."),
             "event_values_note": gettext(
                 "The values of this field are specific to this event and are "
@@ -202,6 +294,13 @@ class ReportEditorView(PluginActiveMixin, EventPermissionRequiredMixin, Template
             "issue_too_many_columns": gettext("Too many columns."),
             "issue_too_many_sorting": gettext("Too many sorting stages."),
             "issue_too_many_values": gettext("Too many values in one filter."),
+            "leave_unsaved": gettext(
+                "This page has unsaved changes that will be lost. Continue?"
+            ),
+            "leave_unsaved_export": gettext(
+                "This page has unsaved changes. The file will contain the saved "
+                "version, not your current changes. Continue?"
+            ),
             "library_empty": gettext("No field matches your search."),
             "load_failed": gettext("The editor could not be loaded."),
             "move_down": gettext("Move down"),

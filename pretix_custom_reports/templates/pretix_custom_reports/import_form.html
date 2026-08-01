@@ -1,0 +1,52 @@
+{% extends "pretixcontrol/event/base.html" %}
+{% comment %}
+Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
+
+Step one of the import: upload a file or paste a JSON block (SPEC.md F9).
+Nothing is written by this page.
+{% endcomment %}
+{% load i18n %}
+{% block title %}{% trans "Import a report" %}{% endblock %}
+{% block content %}
+    <h1>{% trans "Import a report" %}</h1>
+
+    {% if definition_issues %}
+        <div class="alert alert-danger">
+            <p><strong>{% trans "This file is not a valid report definition:" %}</strong></p>
+            <ul>
+                {% for path, message in definition_issues %}
+                    <li>{% if path %}<code>{{ path }}</code>: {% endif %}{{ message }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+
+    <form action="" method="post" enctype="multipart/form-data" class="form-horizontal">
+        {% csrf_token %}
+        <div class="form-group">
+            <label class="col-md-3 control-label" for="pcr-import-file">{% trans "Report file" %}</label>
+            <div class="col-md-9">
+                <input type="file" name="file" id="pcr-import-file" accept="application/json,.json">
+                <p class="help-block">
+                    {% blocktrans trimmed with kib=max_kib %}
+                        A JSON file exported from this or another event, at most {{ kib }} KiB.
+                    {% endblocktrans %}
+                </p>
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="col-md-3 control-label" for="pcr-import-text">{% trans "or paste the definition" %}</label>
+            <div class="col-md-9">
+                <textarea name="text" id="pcr-import-text" class="form-control" rows="14"
+                          spellcheck="false">{{ document_text|default:"" }}</textarea>
+                <p class="help-block">
+                    {% trans "Both an exported file and a plain definition from the editor's JSON panel are accepted." %}
+                </p>
+            </div>
+        </div>
+        <div class="form-group submit-group">
+            <a href="{{ cancel_url }}" class="btn btn-default btn-cancel">{% trans "Cancel" %}</a>
+            <button type="submit" class="btn btn-primary btn-save">{% trans "Check this file" %}</button>
+        </div>
+    </form>
+{% endblock %}

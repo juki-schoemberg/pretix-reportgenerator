@@ -1,24 +1,20 @@
 # Owner: frontend-dev (ORCHESTRIERUNG.md section 5)
 """JSON endpoints behind the graphical report editor.
 
-Wave 1 status
+Wave 2 status
 -------------
 
-Every endpoint in here is already the *real* endpoint: same URL, same request
-body, same response shape, same permission check, same CSRF requirement. Only
-two things are stand-ins, and both sit behind the two functions in the section
-marked ``WAVE 1 -> WAVE 2 SWAP POINT``:
+Nothing in here is a stand-in any more. The two seams that used to hold the
+wave-1 stubs, :func:`get_registry` and :func:`get_compiler`, now return the real
+field registry and the real query compiler. Both function bodies changed and
+nothing else did: no template, no stylesheet and no line of JavaScript was
+touched for the swap, which is the property the two functions existed to prove
+(docs/adr/0005-editor.md section 2).
 
-* :func:`get_registry` returns
-  :class:`~pretix_custom_reports.contracts.stubs.StubFieldRegistry` instead of
-  ``pretix_custom_reports.registry``
-* :func:`get_compiler` returns
-  :class:`~pretix_custom_reports.contracts.stubs.StubQueryCompiler` instead of
-  ``pretix_custom_reports.query``
-
-Wave 2 replaces those two function bodies and nothing else. If the browser side
-has to change as well, the contract was wrong and that belongs in
-``handoff/blockers.md`` (see the note in ``.claude/agents/frontend-dev.md``).
+They stay as functions rather than becoming module-level imports for two
+reasons: the import stays lazy, so importing this module does not drag the whole
+registry in at URLconf time, and a test can still substitute a deliberately
+broken registry or compiler in one place.
 
 Security rules that are *not* negotiable in here
 ------------------------------------------------
@@ -28,7 +24,10 @@ Security rules that are *not* negotiable in here
    data leak, not a cosmetic bug.
 2. Every mutating/expensive endpoint is ``POST`` and therefore CSRF protected by
    Django's middleware. Nothing in here is ``csrf_exempt``.
-3. The preview is *never* executed without a row limit. The limit is
+3. The preview is *never* executed without a row limit, and since wave 2 that
+   limit is applied twice: ``compile(..., preview=True)`` puts a hard ``LIMIT``
+   into the SQL (query/report.py) and :meth:`PreviewView._rows` caps the
+   iteration on top of it. The limit is
    :data:`~pretix_custom_reports.contracts.definition.PREVIEW_ROW_LIMIT`; a
    client may ask for fewer rows, never for more.
 4. Nothing from the request body is ever used as an ORM path, a lookup or a
@@ -44,8 +43,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import datetime
 import decimal
 import json
-import pathlib
-import re
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import Http404, JsonResponse
@@ -98,6 +95,7 @@ from ..contracts import (
     Operator,
     ReportDefinition,
     SortDirection,
+    ValueScope,
     validate_definition,
 )
 from ..contracts.definition import MAX_DAY_COUNT
@@ -105,8 +103,6 @@ from ..signals import VIEW_PERMISSION
 
 __all__ = [
     "FieldLibraryView",
-    "MockDefinitionListView",
-    "MockDefinitionView",
     "PluginActiveMixin",
     "PreviewView",
     "ValidateView",
@@ -117,34 +113,39 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# WAVE 1 -> WAVE 2 SWAP POINT
+# The two seams: registry and compiler
 # ---------------------------------------------------------------------------
 
 
 def get_registry():
     """The field registry the editor is served from.
 
-    Wave 1: the frozen stub from ``contracts.stubs``. Wave 2: replace the body
-    with ``from ..registry import registry; return registry``. Nothing else in
-    this module knows the difference -- it only ever calls ``get_fields()`` and
-    ``resolve()`` from :class:`~pretix_custom_reports.contracts.protocols.FieldRegistry`.
-    """
-    from ..contracts.stubs import stub_registry
+    The real one since wave 2. Everything in this module talks to it through
+    :class:`~pretix_custom_reports.contracts.protocols.FieldRegistry` only --
+    ``get_fields()`` and ``resolve()`` -- so the editor never depends on
+    anything the protocol does not promise.
 
-    return stub_registry()
+    Note for callers: the registry reads scoped models (``Question``,
+    ``EventMetaProperty``) and deliberately does not open a scope of its own
+    (registry/library.py). Inside the control panel that is fine, pretix'
+    middleware has one open; a management command or a task would have to.
+    """
+    from ..registry.library import field_registry
+
+    return field_registry()
 
 
 def get_compiler():
     """The query compiler the preview is executed with.
 
-    Wave 1: the frozen stub, which fabricates deterministic rows and performs
-    the registry-stage checks but does *not* filter or sort. Wave 2: replace the
-    body with the real compiler. The stub honours ``limit`` in ``iter_rows()``,
-    so the "never preview without a limit" rule is testable already.
+    The real one since wave 2. It needs the registry as a constructor argument
+    on purpose: which allow-list a definition is resolved against is the single
+    most security-relevant fact about a compile, and the compiler refuses to
+    guess it (query/compiler.py).
     """
-    from ..contracts.stubs import stub_compiler
+    from ..query.compiler import ReportQueryCompiler
 
-    return stub_compiler()
+    return ReportQueryCompiler(get_registry())
 
 
 # ---------------------------------------------------------------------------
@@ -566,11 +567,7 @@ class FieldLibraryView(_ApiView):
     def _field_payload(
         self, key: str, per_base: Dict[str, Dict[str, Any]], event
     ) -> Optional[Dict[str, Any]]:
-        sample = None
-        for base in Base:
-            if key in per_base[base.value]:
-                sample = per_base[base.value][key]
-                break
+        sample = self._sample(key, per_base)
         if sample is None:  # pragma: no cover - defensive
             return None
         if sample.deprecated:
@@ -607,10 +604,82 @@ class FieldLibraryView(_ApiView):
             "datatype": sample.datatype.value,
             "help_text": str(sample.help_text) if sample.help_text else None,
             "provider": sample.provider,
-            "value_scope": sample.value_scope.value,
-            "choices": self._field_choices(sample, event),
+            "value_scope": self._value_scope(key, per_base),
+            "choices": self._choices_across_bases(key, per_base, event),
             "bases": bases,
         }
+
+    # -- one key, two variants --------------------------------------------
+    #
+    # The same key can be two different ReportField objects, one per base --
+    # the registry builds them separately because base support, aggregates and
+    # allowed operators differ (registry/questions.py is the clearest case: on
+    # base "orderposition" a question is a filterable, sortable column with its
+    # options as choices, on base "order" it is an aggregate without filters).
+    #
+    # Everything base-dependent already lives in the per-base block. The three
+    # helpers below decide what the *shared* half of the payload says, and they
+    # exist because taking "whatever variant came first" silently turned a
+    # choice question into a free-text filter box (SPEC.md F6 asks for the
+    # opposite).
+
+    @staticmethod
+    def _sample(key: str, per_base: Dict[str, Dict[str, Any]]):
+        """The variant a field is described from.
+
+        The first one that stands on its own, i.e. that does not need an
+        aggregate on its own base -- that is the variant carrying the field's
+        real label, help text and choices. Falls back to the first variant
+        found, so a field that is aggregate-only everywhere still gets a
+        payload.
+        """
+        fallback = None
+        for base in Base:
+            field = per_base[base.value].get(key)
+            if field is None:
+                continue
+            if fallback is None:
+                fallback = field
+            if not field.needs_aggregate_on(base):
+                return field
+        return fallback
+
+    def _choices_across_bases(
+        self, key: str, per_base: Dict[str, Dict[str, Any]], event
+    ) -> Optional[List[Dict[str, Any]]]:
+        """The value list of a field, from whichever variant declares one.
+
+        Which values a field can hold does not depend on the report base, so a
+        variant that omits the choices is missing information rather than
+        describing a different domain.
+        """
+        for base in Base:
+            field = per_base[base.value].get(key)
+            if field is None or field.choices is None:
+                continue
+            resolved = self._field_choices(field, event)
+            if resolved:
+                return resolved
+        return None
+
+    @staticmethod
+    def _value_scope(key: str, per_base: Dict[str, Dict[str, Any]]) -> str:
+        """``event`` if *any* variant says so, otherwise ``global``.
+
+        The strict answer has to win: this flag is what tells import that the
+        stored filter values have to be remapped for the target event. Guessing
+        ``global`` for a field that is in fact event specific would silently
+        import references to another event's objects.
+        """
+        scope = None
+        for base in Base:
+            field = per_base[base.value].get(key)
+            if field is None:
+                continue
+            if field.value_scope is not ValueScope.GLOBAL:
+                return field.value_scope.value
+            scope = field.value_scope
+        return (scope or ValueScope.GLOBAL).value
 
     @staticmethod
     def _field_choices(field, event) -> Optional[List[Dict[str, Any]]]:
@@ -787,7 +856,10 @@ class PreviewView(_ApiView):
         want_total = data.get("total", True) is not False
 
         try:
-            compiled = get_compiler().compile(definition, request.event)
+            # preview=True is what puts the LIMIT into the SQL. Without it the
+            # database would materialise the full result set and the row cap
+            # would be a Python-side illusion (query/report.py::build_report).
+            compiled = get_compiler().compile(definition, request.event, preview=True)
         except FieldResolutionError as e:
             return self.fail(
                 "fields",
@@ -986,117 +1058,6 @@ def _format_number(value: Any, style: Any, datatype: Any, event: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# WAVE 1 ONLY: the golden fixtures as a stand-in for stored reports
-# ---------------------------------------------------------------------------
-#
-# Delete this whole section in wave 2. It exists so the editor can be loaded,
-# edited and round-tripped against every golden fixture before persistence-dev's
-# CRUD views exist. It is inert in an installed copy of the plugin: the fixture
-# directory lives under tests/, which pyproject.toml does not package, so
-# MOCK_AVAILABLE is False there and both views 404.
-
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
-
-
-def _fixture_dir() -> pathlib.Path:
-    return (
-        pathlib.Path(__file__).resolve().parent.parent.parent
-        / "tests"
-        / "fixtures"
-        / "definitions"
-    )
-
-
-def mock_available() -> bool:
-    """True if the golden fixtures are on disk next to the plugin."""
-    return _fixture_dir().is_dir()
-
-
-def _mock_slugs() -> List[str]:
-    directory = _fixture_dir()
-    if not directory.is_dir():
-        return []
-    return sorted(
-        p.stem
-        for p in directory.glob("*.json")
-        if not p.name.startswith("_") and _SLUG_RE.match(p.stem)
-    )
-
-
-def _load_mock(slug: str) -> Dict[str, Any]:
-    if not _SLUG_RE.match(slug) or slug not in _mock_slugs():
-        raise Http404("Unknown example report.")
-    path = _fixture_dir() / f"{slug}.json"
-    with path.open("r", encoding="utf-8") as fp:
-        return json.load(fp)
-
-
-def _mock_index() -> Dict[str, Any]:
-    path = _fixture_dir() / "_index.json"
-    if not path.is_file():
-        return {}
-    try:
-        with path.open("r", encoding="utf-8") as fp:
-            return json.load(fp).get("fixtures", {})
-    except ValueError:  # pragma: no cover - defensive
-        return {}
-
-
-class MockDefinitionListView(_ApiView):
-    """``GET`` the list of golden fixtures the editor offers as examples."""
-
-    def get(self, request, *args, **kwargs) -> JsonResponse:
-        if not mock_available():
-            raise Http404("No example reports available in this installation.")
-        index = _mock_index()
-        return self.json(
-            {
-                "ok": True,
-                "api_version": self.api_version,
-                "definitions": [
-                    {
-                        "slug": slug,
-                        "name": slug.replace("_", " "),
-                        "purpose": index.get(f"{slug}.json", {}).get("purpose"),
-                        "base": index.get(f"{slug}.json", {}).get("base"),
-                    }
-                    for slug in _mock_slugs()
-                ],
-            }
-        )
-
-
-class MockDefinitionView(_ApiView):
-    """``GET`` one golden fixture, exactly as it is stored on disk.
-
-    Deliberately *not* normalised: several fixtures leave optional members out
-    entirely, and feeding that to the editor is the harsher test. The editor
-    normalises on load and must emit the canonical form again.
-    """
-
-    def get(self, request, *args, **kwargs) -> JsonResponse:
-        if not mock_available():
-            raise Http404("No example reports available in this installation.")
-        slug = kwargs["slug"]
-        raw = _load_mock(slug)
-        payload: Dict[str, Any] = {
-            "ok": True,
-            "api_version": self.api_version,
-            "slug": slug,
-            "name": slug.replace("_", " "),
-            "definition": raw,
-        }
-        try:
-            definition = validate_definition(raw)
-        except DefinitionValidationError as e:
-            payload["errors"] = [i.as_dict() for i in e.issues]
-        else:
-            payload["canonical"] = definition.as_dict()
-            payload["warnings"] = registry_warnings(definition, request.event)
-        return self.json(payload)
-
-
-# ---------------------------------------------------------------------------
 # URLs
 # ---------------------------------------------------------------------------
 #
@@ -1126,16 +1087,5 @@ api_urlpatterns = [
         _EVENT_PREFIX + r"api/preview/$",
         PreviewView.as_view(),
         name="api.preview",
-    ),
-    # Wave 1 only, see the MOCK section above.
-    re_path(
-        _EVENT_PREFIX + r"api/examples/$",
-        MockDefinitionListView.as_view(),
-        name="api.examples",
-    ),
-    re_path(
-        _EVENT_PREFIX + r"api/examples/(?P<slug>[a-z0-9][a-z0-9_.-]*)/$",
-        MockDefinitionView.as_view(),
-        name="api.example",
     ),
 ]

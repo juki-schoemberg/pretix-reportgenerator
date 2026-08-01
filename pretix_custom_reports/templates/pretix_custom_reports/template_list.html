@@ -1,0 +1,75 @@
+{% extends "pretixcontrol/organizers/base.html" %}
+{% comment %}
+Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
+
+Organizer-level template management (SPEC.md F10). Extends the organizer base
+template, which fills ``{% block inner %}`` -- not ``content`` like the
+event-level pages.
+{% endcomment %}
+{% load i18n %}
+{% block title %}{% trans "Report templates" %}{% endblock %}
+{% block inner %}
+    <h1>{% trans "Report templates" %}</h1>
+    <p>
+        {% blocktrans trimmed %}
+            Templates are report definitions kept at organizer level. Loading one
+            in an event creates an editable copy; the template itself is not
+            changed by that copy and does not change it later.
+        {% endblocktrans %}
+    </p>
+    <p>
+        <a href="{% url "plugins:pretix_custom_reports:organizer.templates.add" organizer=request.organizer.slug %}"
+           class="btn btn-default">
+            <span class="fa fa-plus"></span> {% trans "Create a new template" %}
+        </a>
+    </p>
+    {% if templates %}
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>{% trans "Name" %}</th>
+                        <th>{% trans "Internal identifier" %}</th>
+                        <th>{% trans "Report base" %}</th>
+                        <th>{% trans "Used in events" %}</th>
+                        <th class="action-col-2"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for template in templates %}
+                        <tr>
+                            <td>
+                                <strong><a href="{% url "plugins:pretix_custom_reports:organizer.templates.edit" organizer=request.organizer.slug template=template.pk %}">{{ template.name }}</a></strong>
+                                {% if template.description %}
+                                    <br><small class="text-muted">{{ template.description }}</small>
+                                {% endif %}
+                            </td>
+                            <td><code>{{ template.identifier }}</code></td>
+                            <td>{{ template.get_base_display }}</td>
+                            <td>{{ template.instances.count }}</td>
+                            <td class="text-right flip">
+                                <a href="{% url "plugins:pretix_custom_reports:organizer.templates.edit" organizer=request.organizer.slug template=template.pk %}"
+                                   class="btn btn-default btn-sm" title="{% trans "Edit" %}" data-toggle="tooltip">
+                                    <span class="fa fa-edit"></span>
+                                </a>
+                                <a href="{% url "plugins:pretix_custom_reports:organizer.templates.export" organizer=request.organizer.slug template=template.pk %}"
+                                   class="btn btn-default btn-sm" title="{% trans "Export" %}" data-toggle="tooltip">
+                                    <span class="fa fa-download"></span>
+                                </a>
+                                <a href="{% url "plugins:pretix_custom_reports:organizer.templates.delete" organizer=request.organizer.slug template=template.pk %}"
+                                   class="btn btn-danger btn-sm" title="{% trans "Delete" %}" data-toggle="tooltip">
+                                    <span class="fa fa-trash"></span>
+                                </a>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% include "pretixcontrol/pagination.html" %}
+    {% else %}
+        <div class="empty-collection">
+            <p>{% trans "There are no report templates yet." %}</p>
+        </div>
+    {% endif %}
+{% endblock %}

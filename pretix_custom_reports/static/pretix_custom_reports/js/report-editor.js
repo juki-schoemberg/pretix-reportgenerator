@@ -32,6 +32,10 @@
     var fieldsByKey = {};
     var previewTimer = null;
     var previewToken = 0;
+    /* The canonical JSON as it was loaded. Everything that leaves the editor --
+     * import, templates, the export download -- compares against this, because
+     * none of those destinations knows about the unsaved state in here. */
+    var savedJson = null;
 
     /* --------------------------------------------------------------- utils */
 
@@ -117,6 +121,17 @@
                     select.options.length > 8 && select.isConnected
                 ) {
                     $(select).select2({ width: "100%", dropdownAutoWidth: true });
+                    /* select2 announces a choice with jQuery's .trigger("change"),
+                     * and jQuery only runs handlers it registered itself -- a
+                     * listener added with addEventListener never sees it. Every
+                     * widget in here uses addEventListener, so without this
+                     * bridge a field picked from a select2 dropdown would be
+                     * shown as selected and silently ignored. Bound to the
+                     * select2 events rather than to "change", which would
+                     * re-enter through the event dispatched here. */
+                    $(select).on("select2:select select2:unselect select2:clear", function () {
+                        select.dispatchEvent(new Event("change", { bubbles: true }));
+                    });
                 }
             } catch (e) {
                 /* plain select it is */
@@ -204,6 +219,7 @@
                     groups: payload.groups
                 });
                 state = model.load(CONFIG.initial || { base: "order", columns: [] });
+                savedJson = JSON.stringify(model.dump(state));
                 bindStaticHandlers();
                 renderAll();
                 syncSaveInput();
@@ -609,9 +625,25 @@
         state.columns.forEach(function (column, index) {
             body.appendChild(columnRow(column, index));
         });
+        if (!state.columns.length) {
+            body.appendChild(dropHintRow());
+        }
         byId("pcr-columns-count").textContent = String(state.columns.length);
         byId("pcr-columns-empty").classList.toggle("hidden", state.columns.length > 0);
         makeColumnsSortable(body);
+    }
+
+    /* An empty <tbody> is zero pixels tall, so there would be nothing to drop a
+     * field onto -- dragging would be impossible exactly while the list is
+     * empty, which is when it is the only way in. This row gives the drop area
+     * a size and says what it is for; it disappears with the first column. */
+    function dropHintRow() {
+        return el("tr", { "class": "pcr-drop-hint" }, [
+            el("td", {
+                colspan: "6",
+                text: t("drop_here", "Drop a field here to add it as a column.")
+            })
+        ]);
     }
 
     function columnRow(column, index) {
@@ -793,6 +825,8 @@
         makeSortable("columns", body, {
             group: { name: "pcr-fields", pull: false, put: true },
             handle: ".pcr-handle",
+            /* The drop hint is a drop *target*, never a draggable item. */
+            filter: ".pcr-drop-hint",
             animation: 120,
             onAdd: function (event) {
                 /* A field was dragged in from the library: take the key off the
@@ -1643,41 +1677,54 @@
             schedulePreview(true);
         });
 
-        var examples = byId("pcr-example-load");
-        if (examples && URLS.examples) {
-            fetchJson(URLS.examples, null, "GET")
-                .then(function (payload) {
-                    var select = byId("pcr-example-select");
-                    (payload.definitions || []).forEach(function (entry) {
-                        var node = option(entry.slug, entry.name + " (" + (entry.base || "?") + ")");
-                        if (entry.purpose) {
-                            node.title = entry.purpose;
-                        }
-                        select.appendChild(node);
-                    });
-                })
-                .catch(function () {
-                    /* examples are a wave-1 convenience, never fatal */
-                });
-            examples.addEventListener("click", function () {
-                var slug = byId("pcr-example-select").value;
-                if (!slug) {
-                    return;
-                }
-                fetchJson(interpolate(URLS.example, { slug: slug }), null, "GET")
-                    .then(function (payload) {
-                        state = model.load(payload.definition);
-                        renderAll();
-                        schedulePreview(true);
-                    })
-                    .catch(showFatal);
+        var form = byId("pcr-form");
+        if (form) {
+            form.addEventListener("submit", function () {
+                syncSaveInput();
+                /* Saving is a full page load; do not ask about the changes we
+                 * are on our way to store. */
+                savedJson = JSON.stringify(model.dump(state));
             });
         }
 
-        var form = byId("pcr-form");
-        if (form) {
-            form.addEventListener("submit", syncSaveInput);
+        bindLeavingLinks();
+    }
+
+    /* Import, "load a template" and the export download all navigate away, and
+     * none of them can see the unsaved state in this page: import and templates
+     * replace it, the export file is built from the stored row. So ask first --
+     * once, and only when there is really something to lose. */
+    function bindLeavingLinks() {
+        Array.prototype.forEach.call(
+            document.querySelectorAll("#pcr-editor a[data-pcr-leave]"),
+            function (link) {
+                link.addEventListener("click", function (event) {
+                    if (!isDirty()) {
+                        return;
+                    }
+                    var message = link.getAttribute("data-pcr-leave") === "export"
+                        ? t(
+                            "leave_unsaved_export",
+                            "This page has unsaved changes. The file will contain "
+                                + "the saved version, not your current changes. Continue?"
+                        )
+                        : t(
+                            "leave_unsaved",
+                            "This page has unsaved changes that will be lost. Continue?"
+                        );
+                    if (!window.confirm(message)) {
+                        event.preventDefault();
+                    }
+                });
+            }
+        );
+    }
+
+    function isDirty() {
+        if (savedJson === null || !model || !state) {
+            return false;
         }
+        return JSON.stringify(model.dump(state)) !== savedJson;
     }
 
     function debounce(fn, delay) {

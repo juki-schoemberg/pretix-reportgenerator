@@ -1,0 +1,42 @@
+{% extends "pretixcontrol/organizers/base.html" %}
+{% comment %}
+Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
+
+Organizer-level counterpart of persistence-dev's report_form.html. Same form
+class, same model, same validation -- only the owner of the row differs
+(organizer instead of event, the XOR from models.py).
+{% endcomment %}
+{% load i18n %}
+{% load bootstrap3 %}
+{% block title %}
+    {% if form.instance.pk %}{% trans "Change template" %}{% else %}{% trans "Create template" %}{% endif %}
+{% endblock %}
+{% block inner %}
+    <h1>
+        {% if form.instance.pk %}
+            {% blocktrans trimmed with name=form.instance.name %}
+                Template: {{ name }}
+            {% endblocktrans %}
+        {% else %}
+            {% trans "Create a new report template" %}
+        {% endif %}
+    </h1>
+    <form action="" method="post" class="form-horizontal">
+        {% csrf_token %}
+        {% bootstrap_form_errors form %}
+        {% bootstrap_field form.name layout="horizontal" %}
+        {% bootstrap_field form.description layout="horizontal" %}
+        {% bootstrap_field form.identifier layout="horizontal" %}
+        {% bootstrap_field form.base layout="horizontal" %}
+        {% bootstrap_field form.definition layout="horizontal" %}
+        <div class="form-group submit-group">
+            <a href="{% url "plugins:pretix_custom_reports:organizer.templates" organizer=request.organizer.slug %}"
+               class="btn btn-default btn-cancel">
+                {% trans "Cancel" %}
+            </a>
+            <button type="submit" class="btn btn-primary btn-save">
+                {% trans "Save" %}
+            </button>
+        </div>
+    </form>
+{% endblock %}

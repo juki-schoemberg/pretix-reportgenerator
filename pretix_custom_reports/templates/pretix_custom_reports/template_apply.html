@@ -1,0 +1,65 @@
+{% extends "pretixcontrol/event/base.html" %}
+{% comment %}
+Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
+
+"Load template" confirmation. Same resolution table as the file import,
+because it is the same resolver (SPEC.md F10: einmal implementieren, zweimal
+nutzen). Nothing is written until the confirm button is pressed.
+{% endcomment %}
+{% load i18n %}
+{% block title %}{% trans "Load a report template" %}{% endblock %}
+{% block content %}
+    <h1>
+        {% blocktrans trimmed with name=template.name %}
+            Load template: {{ name }}
+        {% endblocktrans %}
+    </h1>
+
+    <dl class="dl-horizontal">
+        <dt>{% trans "Organizer" %}</dt><dd>{{ template.organizer.name }}</dd>
+        <dt>{% trans "Report base" %}</dt><dd>{{ template.get_base_display }}</dd>
+        {% if template.description %}
+            <dt>{% trans "Description" %}</dt><dd>{{ template.description }}</dd>
+        {% endif %}
+    </dl>
+
+    {% include "pretix_custom_reports/resolution_report.html" %}
+
+    <form action="" method="post" class="form-horizontal">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="confirm">
+
+        {% if report.missing %}
+            <div class="alert alert-warning">
+                <p>
+                    {% blocktrans trimmed count counter=report.missing|length %}
+                        One reference of this template does not exist in this event.
+                    {% plural %}
+                        {{ counter }} references of this template do not exist in this event.
+                    {% endblocktrans %}
+                </p>
+                <div class="radio">
+                    <label>
+                        <input type="radio" name="strategy" value="abort" {% if strategy != strategy_skip %}checked{% endif %}>
+                        {% trans "Do not load it. I will add the missing questions or products first." %}
+                    </label>
+                </div>
+                <div class="radio">
+                    <label>
+                        <input type="radio" name="strategy" value="skip" {% if strategy == strategy_skip %}checked{% endif %}>
+                        {% trans "Load it without them. The entries listed above will be removed from the copy." %}
+                    </label>
+                </div>
+            </div>
+        {% else %}
+            <input type="hidden" name="strategy" value="{{ strategy }}">
+        {% endif %}
+
+        <div class="form-group submit-group">
+            <a href="{{ cancel_url }}" class="btn btn-default btn-cancel">{% trans "Cancel" %}</a>
+            <button type="submit" class="btn btn-primary btn-save">
+                {% if plan.ok %}{% trans "Create the copy" %}{% else %}{% trans "Apply my choice" %}{% endif %}
+            </button>
+        </div>
+    </form>
+{% endblock %}

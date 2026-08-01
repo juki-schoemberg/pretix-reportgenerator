@@ -1,0 +1,69 @@
+{% extends "pretixcontrol/event/base.html" %}
+{% comment %}
+Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
+
+Step two of the import: the resolution report and the decision (SPEC.md F9).
+Still nothing written. The hidden ``document`` field carries the *original*
+text back, so the confirmation re-runs the whole pipeline instead of trusting
+a resolved definition that came out of a browser.
+{% endcomment %}
+{% load i18n %}
+{% block title %}{% trans "Import a report" %}{% endblock %}
+{% block content %}
+    <h1>{% trans "Import a report" %}</h1>
+
+    <dl class="dl-horizontal">
+        <dt>{% trans "Name" %}</dt><dd>{{ plan.name }}</dd>
+        {% if plan.source.source %}
+            <dt>{% trans "Exported from" %}</dt><dd><code>{{ plan.source.source }}</code></dd>
+        {% endif %}
+        {% if plan.source.exported_at %}
+            <dt>{% trans "Exported at" %}</dt><dd>{{ plan.source.exported_at }}</dd>
+        {% endif %}
+        {% if plan.source.generator %}
+            <dt>{% trans "Created with" %}</dt><dd>{{ plan.source.generator }}</dd>
+        {% endif %}
+        <dt>{% trans "Report base" %}</dt><dd><code>{{ report.base.value }}</code></dd>
+    </dl>
+
+    {% include "pretix_custom_reports/resolution_report.html" %}
+
+    <form action="" method="post" class="form-horizontal">
+        {% csrf_token %}
+        <input type="hidden" name="document" value="{{ document_text }}">
+        <input type="hidden" name="action" value="confirm">
+
+        {% if report.missing %}
+            <div class="alert alert-warning">
+                <p>
+                    {% blocktrans trimmed count counter=report.missing|length %}
+                        One reference cannot be resolved in this event.
+                    {% plural %}
+                        {{ counter }} references cannot be resolved in this event.
+                    {% endblocktrans %}
+                </p>
+                <div class="radio">
+                    <label>
+                        <input type="radio" name="strategy" value="abort" {% if strategy != strategy_skip %}checked{% endif %}>
+                        {% trans "Do not import. I will fix the file or the event first." %}
+                    </label>
+                </div>
+                <div class="radio">
+                    <label>
+                        <input type="radio" name="strategy" value="skip" {% if strategy == strategy_skip %}checked{% endif %}>
+                        {% trans "Import without them. The columns, filters and sorting stages listed above will be removed." %}
+                    </label>
+                </div>
+            </div>
+        {% else %}
+            <input type="hidden" name="strategy" value="{{ strategy }}">
+        {% endif %}
+
+        <div class="form-group submit-group">
+            <a href="{{ cancel_url }}" class="btn btn-default btn-cancel">{% trans "Cancel" %}</a>
+            <button type="submit" class="btn btn-primary btn-save">
+                {% if plan.ok %}{% trans "Import this report" %}{% else %}{% trans "Apply my choice" %}{% endif %}
+            </button>
+        </div>
+    </form>
+{% endblock %}

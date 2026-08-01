@@ -1,5 +1,11 @@
 # frontend-dev → integrator: URLs für Editor und JSON-Endpunkte
 
+> **Stand nach Welle 2 (gelesen: 2026-08-01).** Abschnitt 1 gilt unverändert,
+> **aber ohne** die beiden `api.examples`/`api.example`-Zeilen: die Mock-Views
+> sind gelöscht, die Routen dürfen **nicht** in `urls.py` (sonst
+> `ImportError`). Abschnitt 3 (`save_url`) ist erledigt. Abschnitt 4 ist
+> abgearbeitet und nur noch Historie.
+
 **Welle:** 1 (Routen) → 2 (Save-Verdrahtung)
 **Betrifft:** `pretix_custom_reports/urls.py`
 **Nicht betroffen:** `signals.py`, `apps.py` — der Editor braucht dort keinen
@@ -55,17 +61,22 @@ urlpatterns += [
             ValidateView.as_view(), name="api.validate"),
     re_path(_PREFIX + r"api/preview/$",
             PreviewView.as_view(), name="api.preview"),
-    # Welle 1 only, siehe Abschnitt 4
-    re_path(_PREFIX + r"api/examples/$",
-            MockDefinitionListView.as_view(), name="api.examples"),
-    re_path(_PREFIX + r"api/examples/(?P<slug>[a-z0-9][a-z0-9_.-]*)/$",
-            MockDefinitionView.as_view(), name="api.example"),
 ]
 ```
 
+Fünf Routen, nicht sieben: die zwei `api/examples/`-Zeilen aus Welle 1 sind seit
+Welle 2 **weg** (siehe Abschnitt 4).
+
 Die **Namen sind Vertrag**: `views/editor.py` reverst `api.fields`,
-`api.preview`, `api.validate`, `api.examples` und baut die Editor-URLs für die
-JS-Konfiguration daraus; `tests/test_editor_api.py` reverst alle sieben.
+`api.preview` und `api.validate` und baut die JS-Konfiguration daraus;
+`tests/test_editor_api.py` reverst alle fünf.
+
+Seit Welle 2 reverst `views/editor.py` zusätzlich `event.reports.add` und
+`event.reports.edit` aus `handoff/requests/persistence-dev-an-integrator-urls.md`
+— **in einem `try/except NoReverseMatch`**. Fehlen die CRUD-Routen, bleibt der
+Speichern-Knopf deaktiviert statt die Seite mit einem Fehler zu beenden; der
+Editor funktioniert also auch mit unvollständiger `urls.py`, er kann dann nur
+nicht speichern.
 
 `identifier` ist bewusst der stabile `ReportDefinition.identifier`, nicht der
 Primärschlüssel — anders als bei den CRUD-Routen von `persistence-dev`, die
@@ -83,18 +94,25 @@ Präfix muss also ausgeschrieben werden, genau wie beim bestehenden
 `event.index`-Eintrag und wie in `pretix/plugins/webcheckin/urls.py`. Ein
 `event_patterns`-Eintrag wäre falsch: das ist der Presale-Pfad.
 
-## 3. Welle 2: `save_url` setzen (eine Zeile)
+## 3. `save_url` — erledigt in Welle 2
 
-Der Editor rendert schon ein `<form>` mit `name`, `description` und den
-versteckten Feldern `definition` (JSON-String) und `base` — genau die Felder,
-die `forms.ReportDefinitionForm` erwartet (`identifier` ist dort optional).
-Solange kein Ziel existiert, ist der Speichern-Knopf deaktiviert.
+Der Editor postet auf `event.reports.add` bzw. `event.reports.edit` und schickt
+`name`, `description`, `identifier`, `base` und `definition` (JSON-String) —
+genau die Felder von `forms.ReportDefinitionForm`. `views/crud.py` blieb dabei
+unangetastet.
 
-Sobald die CRUD-Routen stehen, setze ich in `views/editor.py`
-`ctx["save_url"]` auf `event.reports.add` bzw. `event.reports.edit`. **Das ist
-meine Arbeit, nicht deine** — hier steht es nur, damit du weißt, dass der Editor
-kein zweites Speicher-Backend braucht und `views/crud.py` unangetastet bleiben
-kann.
+**Ein Detail, das du beim Verdrahten kennen musst:** `identifier` wird als
+verstecktes Feld **mitgeschickt**, wenn ein bestehender Report bearbeitet wird.
+Das Formularfeld ist optional, ein leerer Wert lässt `ReportDefinition.save()`
+aber einen **neuen** Identifier erzeugen — und damit bricht jeder Scheduled
+Export, der den Report über den stabilen Identifier referenziert. Wer eine
+weitere Ansicht auf dasselbe Formular baut (Vorlagen, Import), muss dasselbe
+tun. Test: `tests/test_editor_api.py::test_editor_posts_the_stable_identifier_back`
+(inklusive Gegenprobe ohne das Feld).
+
+Ohne `event.settings.general:write` ist `save_url` `None` und der Knopf bleibt
+deaktiviert — der Editor selbst hängt an `event.orders:read`, weil die Vorschau
+echte Bestelldaten zeigt.
 
 Offene Abstimmung mit `persistence-dev` (nicht blockierend, Welle 2):
 `ReportCreateView`/`ReportUpdateView` rendern heute `report_form.html` mit dem
@@ -106,15 +124,15 @@ JSON-Textfeld. Zwei Varianten, beide ohne Änderung an `crud.py`:
   Kontext (`config`) mitbauen; das verteilt den Editor auf zwei Eigentümer und
   ist mir lieber nicht.
 
-## 4. Welle 2: zwei Routen wieder ausbauen
+## 4. Zwei Routen sind wieder ausgebaut — erledigt in Welle 2
 
-`api.examples` und `api.example` liefern die Golden Fixtures als Beispiel-Reports
-und existieren nur, damit die UI vor Registry und Persistenz vollständig
-klickbar ist. Sie sind in einer installierten Kopie des Plugins **inert** (das
-Fixture-Verzeichnis liegt unter `tests/`, das `pyproject.toml` nicht paketiert →
-beide Views antworten mit 404), können also gefahrlos stehen bleiben. Sauber ist
-trotzdem: in Welle 2 lösche ich den Mock-Abschnitt in `views/api.py`, und dann
-müssen diese beiden Routen mit raus. Ich melde mich, wenn es soweit ist.
+`api.examples` und `api.example` haben die Golden Fixtures als Beispiel-Reports
+geliefert, damit die UI vor Registry und Persistenz klickbar ist. Der
+Mock-Abschnitt in `views/api.py` ist gelöscht, `MockDefinitionListView` und
+`MockDefinitionView` existieren nicht mehr. **Bitte die beiden Zeilen nicht aus
+einer älteren Fassung dieses Dokuments übernehmen** — sie würden beim Import von
+`urls.py` einen `ImportError` auslösen, also beim Start des Servers, nicht erst
+beim Aufruf.
 
 ## 5. Übersetzungen (Welle 4)
 

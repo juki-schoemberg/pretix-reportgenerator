@@ -23,28 +23,6 @@
 
     <div id="pcr-editor" class="pcr-editor">
 
-        {% if mock_mode %}
-            <div class="alert alert-info" id="pcr-wave1-note">
-                <p>
-                    <strong>{% trans "Development preview" %}</strong>
-                    {% blocktrans trimmed %}
-                        The field library and the preview are served from the golden
-                        fixtures and the stub compiler, not from the real registry.
-                        Rows are fabricated, filters and sorting are not applied yet.
-                    {% endblocktrans %}
-                </p>
-                <div class="form-inline">
-                    <label for="pcr-example-select">{% trans "Load an example report" %}</label>
-                    <select id="pcr-example-select" class="form-control input-sm">
-                        <option value="">{% trans "Choose an example …" %}</option>
-                    </select>
-                    <button type="button" class="btn btn-default btn-sm" id="pcr-example-load">
-                        {% trans "Load" %}
-                    </button>
-                </div>
-            </div>
-        {% endif %}
-
         <div id="pcr-errors" class="hidden"></div>
         <div id="pcr-warnings" class="hidden"></div>
         <div id="pcr-local-issues" class="hidden"></div>
@@ -70,13 +48,19 @@
             </div>
             {#
                 What the CRUD form of persistence-dev expects: "name",
-                "description", "base" and "definition" (a JSON string, which
-                forms.JSONField parses). Both hidden inputs are kept in sync by
-                the editor on every change; see
+                "description", "identifier", "base" and "definition" (a JSON
+                string, which forms.JSONField parses). "definition" and "base"
+                are kept in sync by the editor on every change; "identifier" is
+                posted back unchanged, because an empty one would make the model
+                generate a new one and break every scheduled export that refers
+                to this report. See
                 handoff/requests/frontend-dev-an-integrator-urls.md.
             #}
             <input type="hidden" name="definition" id="pcr-definition-input"/>
             <input type="hidden" name="base" id="pcr-base-input"/>
+            {% if report_identifier %}
+                <input type="hidden" name="identifier" value="{{ report_identifier }}"/>
+            {% endif %}
             <div class="form-group">
                 <button type="submit" class="btn btn-primary" id="pcr-save"
                         {% if not save_url %}disabled{% endif %}>
@@ -86,8 +70,10 @@
                 {% if not save_url %}
                     <span class="help-block">
                         {% blocktrans trimmed %}
-                            Saving is not wired up yet. Copy the JSON from the panel at
-                            the bottom in the meantime.
+                            You cannot save this report: either you may view reports but
+                            not change them, or the report views are not reachable in
+                            this installation. Copy the JSON from the panel at the bottom
+                            in the meantime.
                         {% endblocktrans %}
                     </span>
                 {% endif %}
@@ -308,6 +294,59 @@
                 <button type="button" class="btn btn-default btn-sm" id="pcr-json-apply">
                     {% trans "Apply JSON" %}
                 </button>
+
+                {#
+                    File import/export and templates live in views/portability.py
+                    and views/templates.py (portability-dev). Every one of these
+                    links leaves the editor, so report-editor.js asks first when
+                    there are unsaved changes -- data-pcr-leave marks them, and
+                    "export" gets the sharper warning because the file is built
+                    from the stored row, not from what is on screen.
+                #}
+                {% if portability.export or portability.import or portability.templates %}
+                    <hr/>
+                    <div class="btn-group btn-group-sm" id="pcr-portability">
+                        {% if portability.export %}
+                            <a href="{{ portability.export }}" class="btn btn-default"
+                               id="pcr-export" data-pcr-leave="export">
+                                <span class="fa fa-download" aria-hidden="true"></span>
+                                {% trans "Export as a file" %}
+                            </a>
+                        {% endif %}
+                        {% if portability.import %}
+                            <a href="{{ portability.import }}" class="btn btn-default"
+                               id="pcr-import" data-pcr-leave="page">
+                                <span class="fa fa-upload" aria-hidden="true"></span>
+                                {% trans "Import from a file" %}
+                            </a>
+                        {% endif %}
+                        {% if portability.templates %}
+                            <a href="{{ portability.templates }}" class="btn btn-default"
+                               id="pcr-templates" data-pcr-leave="page">
+                                <span class="fa fa-clone" aria-hidden="true"></span>
+                                {% trans "Load a template" %}
+                            </a>
+                        {% endif %}
+                    </div>
+                    <p class="help-block">
+                        {% if portability.export %}
+                            {% blocktrans trimmed %}
+                                The exported file contains the saved report, not the
+                                changes you have not saved yet.
+                            {% endblocktrans %}
+                        {% else %}
+                            {% blocktrans trimmed %}
+                                Save this report to be able to export it as a file.
+                            {% endblocktrans %}
+                        {% endif %}
+                        {% if portability.import or portability.templates %}
+                            {% blocktrans trimmed %}
+                                Importing a file or loading a template opens a
+                                separate page and replaces what you see here.
+                            {% endblocktrans %}
+                        {% endif %}
+                    </p>
+                {% endif %}
             </div>
         </div>
     </div>

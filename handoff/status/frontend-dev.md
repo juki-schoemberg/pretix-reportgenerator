@@ -179,3 +179,293 @@ Definition of Done geprüft:
 4. Einen Menschen den Editor mit der Maus bedienen lassen: Drag & Drop zwischen
    Bibliothek und Spaltenliste, select2 in den Filterzeilen, Datumsfelder,
    Basiswechsel mit vielen betroffenen Feldern.
+
+---
+
+# Status: frontend-dev — Welle 2
+
+Alle vier Schritte aus dem Plan oben erledigt. Schritte 1, 2 und 4 im ersten
+Durchgang, Schritt 3 (Import/Export- und Vorlagen-Knöpfe) nachgereicht, sobald
+`portability-dev` fertig war.
+
+## Schritt 1 — Registry und Compiler sind echt
+
+`views/api.py`, die zwei Austauschpunkte aus ADR 0005 Abschnitt 2:
+
+```python
+def get_registry():
+    from ..registry.library import field_registry
+    return field_registry()
+
+def get_compiler():
+    from ..query.compiler import ReportQueryCompiler
+    return ReportQueryCompiler(get_registry())
+```
+
+Beide bleiben Funktionen (der Import bleibt lazy, Tests behalten eine Naht). Die
+Vorschau kompiliert jetzt mit `compile(definition, event, preview=True)` — das
+ist kein Kosmetikflag: **ohne** es steht das `LIMIT` nicht in der SQL, und die
+Datenbank materialisiert das volle Ergebnis, bevor Python 20 Zeilen abschneidet
+(`query/report.py::build_report`). Belegt durch
+`test_preview_slices_in_sql_not_in_python`, der das erzeugte SQL liest.
+
+Die Behauptung aus Welle 1 („Sechs-Zeilen-Diff, keine Änderung an Template, CSS
+oder JavaScript") hat **fast** gehalten. Eine Stelle musste doch nach:
+
+**Ein Feld-Key, zwei `ReportField`-Objekte.** Die echte Registry baut je Basis
+ein eigenes Objekt. Bei einer Choice-Frage heißt das: auf `orderposition` trägt
+sie ihre Optionen und `value_scope=event`, auf `order` ist sie ein Aggregat
+**ohne** Optionen und mit `value_scope=global` (`registry/questions.py`). Die
+Feldbibliothek nahm „das erste Objekt, das ich finde", und das ist `order`.
+Ergebnis: eine Choice-Frage hätte im Filterbereich ein **Freitextfeld**
+bekommen statt einer Mehrfachauswahl — genau das Gegenteil von SPEC.md F6. Der
+Stub aus Welle 0c konnte das nicht zeigen, er hat pro Key genau ein Objekt.
+
+Behoben in `FieldLibraryView` (drei kleine Helfer, im Code begründet):
+
+- `_sample()` beschreibt ein Feld aus der Variante, die **ohne Aggregat** auf
+  ihrer Basis steht — das ist die mit Label, Hilfetext und Optionen.
+- `_choices_across_bases()` nimmt die Optionen von der Variante, die welche hat.
+  Welche Werte ein Feld annehmen kann, hängt nicht von der Report-Basis ab.
+- `_value_scope()` antwortet `event`, sobald **eine** Variante das sagt. Die
+  strengere Antwort muss gewinnen, sonst importiert man später stillschweigend
+  Verweise auf die Objekte eines fremden Events.
+
+Test: `test_choice_question_offers_its_options`. Kein Contract berührt, keine
+Zeile JavaScript geändert.
+
+## Schritt 2 — Mocks raus, echtes Speichern dran
+
+- **Mock-Abschnitt gelöscht** (`MockDefinitionListView`, `MockDefinitionView`,
+  `mock_available()`, Fixture-Loader) samt der beiden `api/examples/`-Routen.
+  `handoff/requests/frontend-dev-an-integrator-urls.md` ist entsprechend
+  korrigiert — die zwei Zeilen dürfen **nicht** nach `urls.py`, sie erzeugten
+  dort einen `ImportError` beim Serverstart. Wächter:
+  `test_no_stub_is_left_in_the_editor_views` prüft über den AST, dass keine der
+  beiden View-Dateien `contracts.stubs` importiert.
+- **`load_definition()`** liest aus `event.custom_reports.by_identifier(...)`.
+  Damit sind ein Report eines fremden Events und eine Organizer-Vorlage
+  strukturell unerreichbar (beide 404, je ein Test), nicht durch einen Filter,
+  den jemand vergessen kann. Die Definition wird beim Öffnen **nicht** erneut
+  validiert: ein alter Report, dessen Struktur nicht mehr durchgeht, muss sich
+  öffnen lassen, sonst kann ihn niemand reparieren. Was daran falsch ist, sagt
+  `api/validate/`.
+- **`ctx["save_url"]`** zeigt auf `event.reports.add` bzw. `event.reports.edit`
+  (PK-basiert, `views/crud.py`). Zwei Fälle geben `None` und lassen den Knopf
+  deaktiviert: Nutzer ohne `event.settings.general:write`, und eine `urls.py`
+  ohne die CRUD-Routen (`NoReverseMatch` wird gefangen — der Editor muss auch
+  bei unvollständiger `urls.py` benutzbar bleiben, nur eben ohne Speichern).
+
+**Dabei gefunden, und das wäre teuer geworden:** `ReportDefinitionForm` führt
+`identifier` als optionales Feld. Wird es nicht mitgepostet, ist es nach dem
+Cleanen leer, und `ReportDefinition.save()` erzeugt dann einen **neuen**
+Identifier. Der Editor hätte also bei jedem Speichern den stabilen Identifier
+gewechselt — und damit jeden Scheduled Export gebrochen, der den Report darüber
+referenziert (ADR 0001 Abschnitt 5). Der Editor postet ihn jetzt als verstecktes
+Feld zurück. `test_editor_posts_the_stable_identifier_back` prüft beides: mit
+Feld bleibt er, **ohne** Feld wechselt er wirklich (Gegenprobe, damit die
+Zusicherung nicht aus Versehen grün ist). Für alle, die dasselbe Formular
+benutzen (`portability-dev`, Vorlagen, Import), steht der Hinweis im Request an
+den `integrator`.
+
+**Zur Identifier-vs-PK-Frage** (mein offener Punkt aus Welle 1): unverändert.
+Die Editor-Route benutzt weiter den stabilen `identifier`, die CRUD-Routen den
+Primärschlüssel; beide sind jetzt sauber miteinander verlinkt. Der Wechsel
+bleibt für mich zwei Zeilen, ich mache ihn nicht stillschweigend.
+
+## Schritt 3 — Import, Export und Vorlagen im Editor
+
+Drei Links im JSON-Panel, genau dort, wo `portability-dev` sie in Abschnitt 6
+seines Requests vorgeschlagen hat:
+
+| Knopf | Route | sichtbar wenn |
+|---|---|---|
+| „Export as a file" | `event.reports.export` (`report=<pk>`) | Report ist gespeichert; braucht nur `event.orders:read` |
+| „Import from a file" | `event.reports.import` | `event.settings.general:write` |
+| „Load a template" | `event.reports.templates` | `event.settings.general:write` |
+
+Drei Entscheidungen dahinter, alle im Code begründet:
+
+1. **Export nur für einen gespeicherten Report.** Die URL wird aus dem
+   Primärschlüssel gebaut, den ein ungespeicherter Entwurf nicht hat. Statt
+   eines toten Knopfes steht dort „Save this report to be able to export it as
+   a file."
+2. **Export und Import sind unterschiedlich berechtigt.** `ReportExportView`
+   hängt an `event.orders:read` wie der Editor selbst, `ReportImportView` und
+   `TemplatePickView` an `event.settings.general:write`. Ein Nur-Lese-Nutzer
+   sieht deshalb den Export-Knopf und **keinen** Import-Knopf — ein Link in ein
+   403 wäre schlechter als kein Link.
+   Test: `test_read_only_user_may_export_but_not_import`, der beide Richtungen
+   prüft (Knopf da/weg **und** View 200/403).
+3. **Alle drei verlassen den Editor, keiner kennt den ungespeicherten Stand.**
+   Import und Vorlage ersetzen ihn, und die Exportdatei wird aus der
+   Datenbankzeile gebaut — wer gerade zehn Spalten hinzugefügt hat, bekäme
+   stillschweigend die alte Fassung als Datei. `report-editor.js` merkt sich
+   deshalb beim Laden die kanonische JSON-Fassung (`savedJson`), vergleicht bei
+   jedem Klick auf `a[data-pcr-leave]` und fragt nur dann nach — mit **zwei**
+   Texten: „Änderungen gehen verloren" für Import/Vorlage, „die Datei enthält
+   die gespeicherte Fassung" für den Export. Nach dem Absenden des
+   Speichern-Formulars wird `savedJson` nachgezogen, damit die Frage nicht
+   ausgerechnet beim Speichern kommt.
+   Browser-Test: `test_browser_asks_before_leaving_with_unsaved_changes` — ohne
+   Änderung folgt der Link **ohne** Dialog, nach einer Änderung kommt genau ein
+   Dialog, „Abbrechen" bleibt auf der Seite und die Änderung ist noch da, und
+   der Export-Dialog trägt den anderen Text.
+
+Wie bei `save_url` läuft jeder `reverse()` über `url_or_none()` mit
+`try/except NoReverseMatch`. Die Routen kommen aus drei verschiedenen
+Handoff-Requests und landen nicht in einem Commit; eine halb verdrahtete
+`urls.py` darf einen Knopf kosten, nicht die Seite.
+`test_editor_survives_missing_portability_routes` sperrt genau das ab.
+
+`views/portability.py` und `views/templates.py` blieben unangetastet — ich
+importiere nur ihre URL-Namenskonstanten (`URL_NAME_EXPORT`, `URL_NAME_IMPORT`,
+`URL_NAME_EVENT_PICK`), damit ein umbenannter Name hier einen ImportError gibt
+und keinen stillen toten Knopf.
+
+## Schritt 4 — Der Editor in einem echten Browser
+
+Kein einmaliger Klicktest, sondern sechs automatisierte Browser-Tests am Ende von
+`tests/test_editor_api.py`. Werkzeug: **playwright** (war im venv, nichts
+nachinstalliert) auf dem **Edge, der auf der Maschine liegt**
+(`chromium.launch(channel="msedge")`, also auch kein Browser-Download). Server
+ist `live_server` aus pytest-django mit denselben eingehängten Routen wie die
+übrigen Tests; kein Dev-Server, den jemand starten muss. Ohne Browser
+**skippen** die Tests, sie fallen nicht um.
+
+Der Browser hat drei Dinge gefunden, die kein Python-Test finden konnte:
+
+1. **select2 hat jede Auswahl verschluckt. Der schwerste Fund.**
+   select2 meldet eine Auswahl mit jQuerys `.trigger("change")`, und jQuery ruft
+   nur eigene Handler auf — ein mit `addEventListener` registrierter Listener
+   sieht davon **nichts**. Der Editor benutzt durchgehend `addEventListener`.
+   Konkret: die Feldauswahl in jeder Filterzeile und in jeder Sortierstufe hat
+   mehr als acht Optionen, wird also immer von select2 übernommen. Wer dort ein
+   Feld auswählte, sah es ausgewählt — im Report kam es **nie** an. Gemessen:
+   `select.value` korrekt, `change`-Events: 0.
+   Behoben in `enhanceSelect()`: eine Brücke von `select2:select`/`unselect`/
+   `clear` auf ein natives `change`-Event (bewusst nicht von `change` selbst,
+   das wäre eine Endlosschleife). Danach: 1 Event, die Auswahl kommt an.
+   Test: `test_browser_select2_enhances_the_field_chooser`.
+
+2. **In die leere Spaltenliste konnte man nichts fallen lassen.** Das Drop-Ziel
+   war ein leeres `<tbody>` — null Pixel hoch, also nicht treffbar. Drag & Drop
+   war genau dann unmöglich, wenn es der einzige Weg hinein ist.
+   Behoben: `renderColumns()` legt bei leerer Liste eine Platzhalterzeile an
+   (`.pcr-drop-hint`, gestrichelter Rahmen, ~56 px), Sortable bekommt
+   `filter: ".pcr-drop-hint"`, damit sie Ziel und nie Ware ist. Neuer Text
+   `drop_here` in `js_strings()`.
+   Test: `test_browser_drag_and_drop_adds_a_column` (zwei Felder nacheinander,
+   das zweite landet **neben** dem ersten, nicht statt seiner).
+
+3. **Die Aktionsknöpfe an den Feldern sind bis zum Hover unsichtbar**
+   (`visibility: hidden`, `:hover`/`:focus-within`). Das ist so gewollt und
+   funktioniert auch per Tastatur, ist aber der Grund, warum ein Test ohne
+   `hover()` ewig wartet — steht als Kommentar am Helfer, damit es niemand für
+   einen Fehler hält.
+
+Abgedeckt sind damit die vier verlangten Punkte: Drag & Drop zwischen Bibliothek
+und Spaltenliste, ein select2-Feld, Datumsfelder (`datetime-local` plus die
+sechs relativen Operatoren; Umschalten auf `relative_last_days` gibt ein
+Tagesfeld) und ein Basiswechsel mit vielen betroffenen Feldern
+(`orderposition_basic` → `order`: erst die Liste dessen, was wegfällt, dann
+„Trotzdem wechseln"). Dazu die Live-Vorschau mit echten Zeilen aus der
+Testdatenbank. Jeder Test prüft zusätzlich, dass **keine** JS-Exception
+aufgetreten ist (`page.on("pageerror")`).
+
+Eine Eigenheit der Testumgebung, kein Produktfehler: `pretix.testutils.settings`
+schaltet die django-compressor-Precompiler ab, das SCSS des Control-Panels wird
+also als SCSS ausgeliefert und vom Browser ignoriert. Ohne Bootstrap-Grid
+stapeln sich die beiden Editor-Spalten, und das Drop-Ziel rutscht aus einem
+720-px-Viewport heraus — ein Ziel außerhalb des Viewports bekommt **nie** ein
+`dragover`. Deshalb hat der Browser-Kontext ein Viewport von 1400×2400. Das
+steht so im Code, weil es sonst beim nächsten Mal wieder eine Stunde kostet.
+
+## Nicht erledigt (und warum)
+
+- **`event.reports.templates.apply` verlinke ich bewusst nicht.** Der Editor
+  führt auf die Auswahlseite (`event.reports.templates`); welche Vorlage
+  angewendet wird, entscheidet die Seite von `portability-dev`, die auch die
+  Namensauflösung anzeigt. Ein Direktlink aus dem Editor würde diese Ansicht
+  überspringen.
+- **Choice-Werte in der Vorschau** stehen weiter roh da (`n` statt `pending`).
+  Unverändert die offene Frage aus Welle 1 an `query-dev`/`exporter-dev`: wenn
+  Labels gewünscht sind, gehört die Abbildung in **eine** Stelle (Compiler oder
+  Exporter), nicht in die Vorschau — die darf nicht schöner sein als der Export.
+- **PostgreSQL** nicht gegengeprüft (SQLite-Testumgebung), gleiche Einschränkung
+  wie bei `registry-dev` und `query-dev`.
+
+## Contract-Abweichungen
+
+**KEINE.** `contracts/` und `tests/fixtures/definitions/` sind unangetastet,
+kein Eintrag in `handoff/blockers.md` nötig. Der Contract hat in Welle 2
+gehalten: für den Tausch von Registry und Compiler musste die UI nicht angefasst
+werden. Die eine Server-Änderung (ein Key, zwei Feldvarianten) ist keine
+Contract-Lücke, sondern eine Eigenschaft der echten Registry, die der Stub nicht
+hatte.
+
+## Tests
+
+`pytest tests/test_editor_api.py -q` → **112 passed, 0 failed** (~26 s, davon
+6 Browser- und 4 node-Tests), auch mit zufälliger Reihenfolge.
+
+Neu gegenüber Welle 1, jeweils erst mit echter Registry möglich:
+
+| Was | Test |
+|---|---|
+| Feldbibliothek kommt aus `EventFieldRegistry`, > 80 Felder | `test_field_library_is_served_from_the_real_registry` |
+| Choice-Frage liefert ihre `QuestionOption`s | `test_choice_question_offers_its_options` |
+| Frage eines anderen Events taucht **nicht** auf | `test_question_fields_are_event_specific` |
+| Frage umbenannt → Key wandert, alter Report warnt am richtigen Pfad | `test_renaming_a_question_moves_its_key` |
+| `meta.event.campaign` existiert nur mit `EventMetaProperty` | `test_meta_property_field_only_exists_when_the_organizer_defines_it` |
+| Event ohne die Fragen: öffnen geht mit Warnungen pro Pfad, ausführen nennt alle fehlenden Keys | `test_a_report_using_fields_this_event_does_not_have_is_reported_not_hidden`, `test_preview_of_a_report_with_missing_fields_names_all_of_them` |
+| Vorschau filtert, sortiert und formatiert wirklich | `test_preview_applies_the_filters`, `..._the_sorting`, `..._the_column_format` |
+| Vorschau schneidet in SQL, nicht in Python | `test_preview_slices_in_sql_not_in_python` |
+| Vorschau zeigt nur Daten dieses Events | `test_preview_shows_only_this_events_orders` |
+| Voller Roundtrip Editor-Formular → CreateView → DB → Editor, alle 10 Fixtures | `test_full_round_trip_editor_form_to_database_and_back` |
+| Identifier überlebt das Speichern (mit Gegenprobe) | `test_editor_posts_the_stable_identifier_back` |
+| Nur-Lese-Nutzer: Editor ja, Speichern nein | `test_read_only_user_gets_the_editor_without_a_save_target` |
+
+Aus Schritt 3:
+
+| Was | Test |
+|---|---|
+| Gespeicherter Report zeigt alle drei Knöpfe, richtig markiert | `test_stored_report_offers_export_import_and_templates` |
+| Neuer Report: kein Export, dafür der Hinweis „erst speichern" | `test_a_new_report_cannot_be_exported_yet` |
+| Nur-Lese-Nutzer: Export ja, Import/Vorlagen nein — Knopf **und** View | `test_read_only_user_may_export_but_not_import` |
+| Fehlende Portability-Routen kosten einen Knopf, nicht die Seite | `test_editor_survives_missing_portability_routes` |
+| Der Export-Link liefert wirklich eine importierbare Datei | `test_export_link_serves_the_stored_definition` (gegen `validate_portable_document`) |
+| Nachfrage nur bei ungespeicherten Änderungen, mit zwei Texten | `test_browser_asks_before_leaving_with_unsaved_changes` |
+
+Die Testdaten baut das Modul selbst: drei Fragen, eine Meta-Property, ein
+Beispiel-Plugin über den `__mocked_app`-Haken von pretix und vier Bestellungen
+mit acht Positionen — genau das Event, das
+`tests/fixtures/definitions/_index.json` verspricht.
+
+Gesamtsuite `pytest tests/ -q`: **837 passed, 1 failed**. Der eine Fehlschlag ist
+weiterhin `tests/test_smoke.py::test_no_migration_created_yet` (Welle-0-Gate,
+gehört dem `integrator`, Ersatz liegt im Handoff von `persistence-dev`).
+
+`flake8`, `isort -c` und `black --check` über `views/api.py`, `views/editor.py`
+und `tests/test_editor_api.py`: grün. `node --check` über beide JS-Dateien:
+grün. Kein repo-weiter Formatierlauf, kein `git commit`.
+
+## Nächster Schritt
+
+1. **integrator (Welle 4):** fünf Editor-Routen aus
+   `handoff/requests/frontend-dev-an-integrator-urls.md` (nicht sieben, die zwei
+   Beispiel-Routen sind weg). Der Editor verlinkt jetzt außerdem auf drei
+   Routen von `persistence-dev`/`portability-dev` — fehlen sie in `urls.py`,
+   fehlen nur die jeweiligen Knöpfe, die Seite läuft. Vollständig ist der Editor
+   erst mit `event.reports.add`, `event.reports.edit`, `event.reports.export`,
+   `event.reports.import` und `event.reports.templates`.
+2. **integrator (Welle 4), Übersetzungen:** in `views/editor.py` sind drei neue
+   `js_strings`-Einträge dazugekommen (`drop_here`, `leave_unsaved`,
+   `leave_unsaved_export`), in `editor.html` die Beschriftungen und Hilfetexte
+   der drei Knöpfe. Weiterhin kein `djangojs`-Lauf nötig.
+3. **test-engineer / security-reviewer (Welle 3):** die Browser-Tests laufen nur
+   mit Edge oder Chrome auf der Maschine, sonst skippen sie — auf einem CI ohne
+   Browser fällt die Abdeckung von Drag & Drop, select2 und der
+   Verlassen-Nachfrage also **still** weg. Wer sie dort haben will, braucht
+   `playwright install chromium` im CI-Image; das ist eine
+   Umgebungsentscheidung und deshalb nicht von mir getroffen.

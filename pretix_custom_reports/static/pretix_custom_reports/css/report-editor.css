@@ -96,6 +96,16 @@
     width: 1%;
 }
 
+/* The drop area for the very first column. Without a row in it the <tbody> has
+   no height at all and a dragged field has nothing to land on. */
+.pcr-drop-hint > td {
+    border: 1px dashed #ccc;
+    border-radius: 3px;
+    color: #767676;
+    padding: 18px 8px;
+    text-align: center;
+}
+
 .pcr-handle {
     cursor: grab;
 }

@@ -1,0 +1,86 @@
+{% comment %}
+Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
+
+The resolution report, shared by the file import and by "load template" --
+the two callers of the same resolver, so they show the same table.
+
+Context: ``report`` (portability.resolution.ResolutionReport).
+{% endcomment %}
+{% load i18n %}
+
+{% if report.issues %}
+    <div class="alert alert-danger">
+        <p><strong>{% trans "This report cannot be stored in this event:" %}</strong></p>
+        <ul>
+            {% for issue in report.issues %}<li>{{ issue }}</li>{% endfor %}
+        </ul>
+    </div>
+{% endif %}
+
+<div class="row">
+    <div class="col-md-12">
+        <p>
+            {% blocktrans trimmed with found=report.found|length mapped=report.mapped|length missing=report.missing|length %}
+                {{ found }} reference(s) found, {{ mapped }} matched to a different
+                object, {{ missing }} not found.
+            {% endblocktrans %}
+            {% if report.values_checked %}
+                {% blocktrans trimmed with checked=report.values_checked ok=report.values_ok %}
+                    {{ ok }} of {{ checked }} filter values exist in this event.
+                {% endblocktrans %}
+            {% endif %}
+        </p>
+    </div>
+</div>
+
+<div class="table-responsive">
+    <table class="table table-condensed">
+        <thead>
+            <tr>
+                <th>{% trans "Where" %}</th>
+                <th>{% trans "In the file" %}</th>
+                <th>{% trans "In this event" %}</th>
+                <th>{% trans "Result" %}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in report.entries %}
+                <tr class="{% if entry.status == "missing" or entry.status == "ambiguous" %}danger{% elif entry.status == "mapped" %}warning{% elif entry.status == "unverified" %}info{% endif %}">
+                    <td>
+                        <code>{{ entry.path }}</code>
+                        {% if entry.usage %}<br><small class="text-muted">{{ entry.usage }}</small>{% endif %}
+                    </td>
+                    <td>
+                        <code>{{ entry.source }}</code>
+                        {% if entry.source_label %}<br><small class="text-muted">{{ entry.source_label }}</small>{% endif %}
+                    </td>
+                    <td>
+                        {% if entry.target %}
+                            <code>{{ entry.target }}</code>
+                            {% if entry.target_label %}<br><small class="text-muted">{{ entry.target_label }}</small>{% endif %}
+                        {% else %}
+                            &ndash;
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.status == "found" %}
+                            <span class="label label-success">{% trans "found" %}</span>
+                        {% elif entry.status == "mapped" %}
+                            <span class="label label-warning">{% trans "matched" %}</span>
+                        {% elif entry.status == "missing" %}
+                            <span class="label label-danger">{% trans "not found" %}</span>
+                        {% elif entry.status == "ambiguous" %}
+                            <span class="label label-danger">{% trans "ambiguous" %}</span>
+                        {% elif entry.status == "unverified" %}
+                            <span class="label label-info">{% trans "not verifiable" %}</span>
+                        {% endif %}
+                        {% if entry.dropped %}
+                            <span class="label label-default">{% trans "will be removed" %}</span>
+                        {% endif %}
+                        {% if entry.detail %}<br><small class="text-muted">{{ entry.detail }}</small>{% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>

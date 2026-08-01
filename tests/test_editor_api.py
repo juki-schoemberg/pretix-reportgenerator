@@ -4,12 +4,26 @@
 # CSRF gates, the preview limit and -- the point of the whole exercise -- a full
 # round trip of every golden fixture through the editor's own JavaScript model.
 #
-# Two things in here are unusual and deliberate:
+# Wave 2: everything in here runs against the **real** field registry
+# (registry.library.field_registry) and the **real** query compiler
+# (query.compiler.ReportQueryCompiler). The wave-1 stubs are gone, and so are
+# the two api/examples/ routes that served the golden fixtures as stand-ins for
+# stored reports; a report now comes out of models.ReportDefinition.
+#
+# What that costs, and why it is worth it: the editor's tests now need real
+# event data. A registry is built for one concrete event, so "answer.tshirt-size
+# exists" is a statement about Question rows, "meta.event.campaign exists" one
+# about an EventMetaProperty, and a preview only shows rows if there are orders.
+# The fixtures below build exactly the event tests/fixtures/definitions/_index.json
+# promises, which is what makes the golden fixtures usable end to end.
+#
+# Four things in here are unusual and deliberate:
 #
 # 1. The URLconf. urls.py belongs to the integrator (ORCHESTRIERUNG.md section
-#    5), so the editor's routes are not wired up yet. They live next to their
-#    views (api.api_urlpatterns, editor.editor_urlpatterns) and this module
-#    injects them the same way pretix would: it appends them to the plugin's own
+#    5), so neither the editor routes nor persistence-dev's CRUD routes are
+#    wired up yet. They live next to their views (api.api_urlpatterns,
+#    editor.editor_urlpatterns, crud.event_urlpatterns) and this module injects
+#    them the same way pretix would: it appends them to the plugin's own
 #    urlpatterns and reloads pretix.multidomain.maindomain_urlconf, which builds
 #    the "plugins:<app_label>" namespace at import time. That means these tests
 #    exercise the real namespace, the real prefix and the real middleware chain,
@@ -19,16 +33,46 @@
 #    report-editor-model.js because that is where the browser needs it. Testing
 #    it from Python would test a re-implementation, so the real file is executed
 #    under node instead. Skipped when node is not installed.
+# 3. The example plugin. plugin_and_meta_fields.json needs a field from another
+#    plugin, and a receiver of an EventPluginSignal must belong to an app with
+#    PretixPluginMeta that is enabled for the event. Installing a second
+#    distribution mid-test-run is impossible, so this uses the __mocked_app
+#    escape hatch pretix provides for exactly this
+#    (pretix/base/signals.py:70-71).
+# 4. The compiler doubles. Two tests need a renderer that misbehaves. They wrap
+#    the real compiler and replace the renderers on the compiled columns instead
+#    of substituting a fake compiler, so the query, the event scope and the row
+#    limit stay real.
 """Tests for the graphical report editor and its JSON endpoints."""
 
+import datetime
 import importlib
 import json
 import pathlib
 import pytest
 import shutil
 import subprocess
+from dataclasses import replace
+from decimal import Decimal
 from django.test import Client
 from django.urls import clear_url_caches, reverse
+from django.utils.timezone import now
+from django_scopes import scopes_disabled
+from pretix.base.models import (
+    EventMetaProperty,
+    EventMetaValue,
+    Item,
+    ItemCategory,
+    Order,
+    OrderPayment,
+    OrderPosition,
+    Question,
+    QuestionAnswer,
+    QuestionOption,
+    Team,
+    User,
+)
+from pretix.base.models.orders import InvoiceAddress
 
 import pretix_custom_reports
 from pretix_custom_reports.contracts import (
@@ -38,12 +82,17 @@ from pretix_custom_reports.contracts import (
     DefinitionValidationError,
     Operator,
     validate_definition,
+    validate_portable_document,
 )
+from pretix_custom_reports.models import ReportDefinition
 from pretix_custom_reports.signals import URL_NAMESPACE
 from pretix_custom_reports.views.api import api_urlpatterns
+from pretix_custom_reports.views.crud import event_urlpatterns
 from pretix_custom_reports.views.editor import editor_urlpatterns
+from pretix_custom_reports.views.portability import portability_event_urlpatterns
+from pretix_custom_reports.views.templates import templates_event_urlpatterns
 
-from .conftest import PASSWORD
+from .conftest import PASSWORD, VIEW_PERMISSION
 
 PLUGIN_ROOT = pathlib.Path(pretix_custom_reports.__file__).resolve().parent
 MODEL_JS = (
@@ -56,6 +105,15 @@ FIXTURE_SLUGS = sorted(
     p.stem for p in FIXTURE_DIR.glob("*.json") if not p.name.startswith("_")
 )
 
+#: App label of the example plugin. Matches the key the golden fixture
+#: plugin_and_meta_fields.json expects.
+PLUGIN_APP_LABEL = "pretix_demo"
+
+#: Permission the CRUD views require for saving. Deliberately *not* imported
+#: from views/crud.py: if that string ever changes, the read-only user built
+#: here must stop being read-only in this file too, visibly.
+CHANGE_PERMISSION = "event.settings.general:write"
+
 
 # ---------------------------------------------------------------------------
 # URL wiring
@@ -64,11 +122,15 @@ FIXTURE_SLUGS = sorted(
 
 @pytest.fixture(scope="module", autouse=True)
 def editor_routes():
-    """Add the editor routes to the plugin's urlpatterns for this module.
+    """Add the editor, CRUD and portability routes to the plugin's urlpatterns.
 
     Exactly what ``urls.py`` will do; done here because that file has another
-    owner. Reverting is important: other test modules must see the unmodified
-    URLconf.
+    owner. Since wave 2 the CRUD routes are in here too (the editor's form posts
+    to them) and so are portability-dev's event routes (the editor links to
+    them). The organizer-level template routes are left out on purpose: the
+    editor never links to those.
+
+    Reverting is important: other test modules must see the unmodified URLconf.
     """
     from pretix.multidomain import maindomain_urlconf
 
@@ -76,7 +138,12 @@ def editor_routes():
 
     original = list(plugin_urls.urlpatterns)
     plugin_urls.urlpatterns = (
-        list(editor_urlpatterns) + list(api_urlpatterns) + original
+        list(editor_urlpatterns)
+        + list(api_urlpatterns)
+        + list(event_urlpatterns)
+        + list(portability_event_urlpatterns)
+        + list(templates_event_urlpatterns)
+        + original
     )
     importlib.reload(maindomain_urlconf)
     clear_url_caches()
@@ -106,6 +173,272 @@ def load_invalid(name):
 
 def post_json(client, url, payload):
     return client.post(url, data=json.dumps(payload), content_type="application/json")
+
+
+# ---------------------------------------------------------------------------
+# The event the golden fixtures describe
+# ---------------------------------------------------------------------------
+#
+# _index.json promises three questions, one event meta property and one plugin
+# field. Without them a golden fixture does not resolve against the real
+# registry, and half of these tests would be asserting on an event that no
+# fixture was written for.
+
+
+def _mocked_plugin_app(app_label=PLUGIN_APP_LABEL):
+    class App:
+        name = app_label
+
+        class PretixPluginMeta:
+            name = "Demo plugin"
+            version = "1.0.0"
+
+    return App
+
+
+def demo_receiver(sender, base, **kwargs):
+    """The receiver a third-party plugin would register."""
+    from django.db.models import Value
+    from django.db.models.functions import Concat
+
+    from pretix_custom_reports.contracts import (
+        DataType,
+        Operator as Op,
+        ReportField,
+        plugin_field_key,
+    )
+
+    alias = "pcr_pretix_demo_demo_value"
+    coerced = Base.coerce(base)
+    return [
+        ReportField(
+            key=plugin_field_key(PLUGIN_APP_LABEL, "demo_value"),
+            label="Value from another plugin",
+            group="Demo plugin",
+            datatype=DataType.STRING,
+            bases=(coerced,),
+            orm_path=alias,
+            annotation=lambda ctx: {
+                alias: Concat(
+                    Value("demo-"),
+                    "code" if ctx.base is Base.ORDER else "order__code",
+                )
+            },
+            filter_operators=(Op.EXACT, Op.CONTAINS, Op.IS_NOT_EMPTY),
+            sortable=True,
+            provider=PLUGIN_APP_LABEL,
+        )
+    ]
+
+
+@pytest.fixture
+def demo_plugin(event):
+    """Connect the example plugin and enable it for the event."""
+    from pretix_custom_reports.registry import cache as registry_cache
+    from pretix_custom_reports.registry.signals import register_report_fields
+
+    demo_receiver.__mocked_app = _mocked_plugin_app()
+    register_report_fields.connect(
+        demo_receiver, dispatch_uid="test_editor_demo_plugin", weak=False
+    )
+    active = [name for name in (event.plugins or "").split(",") if name]
+    if PLUGIN_APP_LABEL not in active:
+        active.append(PLUGIN_APP_LABEL)
+        event.plugins = ",".join(active)
+        with scopes_disabled():
+            event.save(update_fields=["plugins"])
+    registry_cache.clear_local_cache()
+    yield demo_receiver
+    register_report_fields.disconnect(
+        demo_receiver, dispatch_uid="test_editor_demo_plugin"
+    )
+    registry_cache.clear_local_cache()
+
+
+@pytest.fixture
+def registry_cache_isolated():
+    """Empty the registry's process-local cache around a test.
+
+    ``field_registry()`` is a process-wide singleton keyed by event primary key,
+    and primary keys repeat across tests.
+    """
+    from pretix_custom_reports.registry import cache as registry_cache
+
+    registry_cache.clear_local_cache()
+    yield
+    registry_cache.clear_local_cache()
+
+
+@pytest.fixture
+def event_data(event, demo_plugin, registry_cache_isolated):
+    """Questions, a meta property and enough orders for a preview.
+
+    The numbers matter for the preview tests: four orders, three of them paid
+    and each with two positions, so a preview limited to two rows really is
+    truncated and a limit of three really returns three rows. One position is
+    canceled and one order is in test mode, which is what
+    ``options_full.json`` selects for.
+    """
+    with scopes_disabled():
+        prop = EventMetaProperty.objects.create(
+            organizer=event.organizer, name="campaign", default=""
+        )
+        EventMetaValue.objects.create(event=event, property=prop, value="summer")
+
+        tshirt = Question.objects.create(
+            event=event,
+            question="T-shirt size",
+            identifier="tshirt-size",
+            type=Question.TYPE_CHOICE,
+            position=0,
+        )
+        for position, label in enumerate(("S", "M", "L", "XL")):
+            QuestionOption.objects.create(
+                question=tshirt, answer=label, position=position
+            )
+        arrival = Question.objects.create(
+            event=event,
+            question="Day of arrival",
+            identifier="arrival-date",
+            type=Question.TYPE_DATE,
+            position=1,
+        )
+        newsletter = Question.objects.create(
+            event=event,
+            question="Newsletter opt-in",
+            identifier="newsletter",
+            type=Question.TYPE_BOOLEAN,
+            position=2,
+        )
+
+        category = ItemCategory.objects.create(event=event, name="Tickets")
+        item = Item.objects.create(
+            event=event,
+            category=category,
+            name="Regular ticket",
+            internal_name="regular",
+            default_price=Decimal("19.00"),
+            admission=True,
+        )
+        channel = event.organizer.sales_channels.get(identifier="web")
+
+        orders = {}
+        # The first order is pinned down to the cent and to the second: the
+        # formatting test filters for its code and asserts on its cells.
+        for index, (code, status, testmode) in enumerate(
+            [
+                ("FMT01", Order.STATUS_PAID, False),
+                ("PAID2", Order.STATUS_PAID, False),
+                ("PAID3", Order.STATUS_PAID, False),
+                ("TEST4", Order.STATUS_PENDING, True),
+            ]
+        ):
+            order = Order.objects.create(
+                event=event,
+                code=code,
+                status=status,
+                testmode=testmode,
+                email=f"{code.lower()}@example.org",
+                sales_channel=channel,
+                datetime=datetime.datetime(
+                    2026, 3, 1, 10, 0, tzinfo=datetime.timezone.utc
+                )
+                + datetime.timedelta(days=index),
+                expires=now() + datetime.timedelta(days=10),
+                total=Decimal("19.00") * 2,
+            )
+            InvoiceAddress.objects.create(
+                order=order, company="ACME", city="Berlin", country="DE"
+            )
+            for positionid in (1, 2):
+                position = OrderPosition.objects.create(
+                    order=order,
+                    item=item,
+                    price=Decimal("19.00"),
+                    tax_rate=Decimal("0.00"),
+                    tax_value=Decimal("0.00"),
+                    positionid=positionid,
+                    attendee_name_parts={"_legacy": f"Attendee {code} {positionid}"},
+                    attendee_email=f"attendee{positionid}@example.org",
+                )
+                QuestionAnswer.objects.create(
+                    orderposition=position, question=tshirt, answer="L"
+                )
+                QuestionAnswer.objects.create(
+                    orderposition=position, question=arrival, answer="2026-09-01"
+                )
+                QuestionAnswer.objects.create(
+                    orderposition=position, question=newsletter, answer="True"
+                )
+            if status == Order.STATUS_PAID:
+                OrderPayment.objects.create(
+                    order=order,
+                    provider="banktransfer",
+                    state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+                    amount=order.total,
+                    payment_date=now(),
+                )
+            orders[code] = order
+
+        # One canceled position, so include_canceled_positions is testable.
+        OrderPosition.all.create(
+            order=orders["PAID3"],
+            item=item,
+            price=Decimal("19.00"),
+            positionid=3,
+            canceled=True,
+        )
+
+    from pretix_custom_reports.registry import cache as registry_cache
+
+    registry_cache.clear_local_cache()
+    return {
+        "orders": orders,
+        "item": item,
+        "questions": {
+            "tshirt-size": tshirt,
+            "arrival-date": arrival,
+            "newsletter": newsletter,
+        },
+        "meta_property": prop,
+    }
+
+
+@pytest.fixture
+def stored_report(event):
+    """Factory for a saved report, the thing the editor now opens."""
+
+    def make(definition, name="Stored report", identifier=""):
+        with scopes_disabled():
+            return ReportDefinition.objects.create(
+                event=event,
+                name=name,
+                identifier=identifier,
+                definition=definition,
+            )
+
+    return make
+
+
+@pytest.fixture
+def user_read_only(organizer):
+    """User who may view reports (and previews) but must not save them."""
+    user = User.objects.create_user("read-only@example.org", PASSWORD)
+    team = Team.objects.create(
+        organizer=organizer,
+        name="Order readers",
+        all_events=True,
+        all_event_permissions=False,
+        limit_event_permissions={VIEW_PERMISSION: True},
+    )
+    team.members.add(user)
+    return user
+
+
+@pytest.fixture
+def client_read_only(client, user_read_only):
+    client.login(email=user_read_only.email, password=PASSWORD)
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -151,12 +484,23 @@ def editor_config(content):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("slug", FIXTURE_SLUGS)
-def test_editor_page_opens_every_golden_fixture(client_with_perms, event, slug):
-    """DoD: every golden fixture can be opened in the editor."""
-    resp = client_with_perms.get(url_for("editor.edit", event, identifier=slug))
+def test_editor_page_opens_every_stored_golden_fixture(
+    client_with_perms, event, stored_report, slug
+):
+    """DoD: every golden fixture can be stored and opened in the editor.
+
+    The model canonicalises on save, so what the editor gets handed is the
+    canonical document -- which is exactly what the round trip has to emit
+    again.
+    """
+    raw = load_fixture(slug)
+    report = stored_report(raw, name=slug)
+    resp = client_with_perms.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    )
     assert resp.status_code == 200
     config = editor_config(resp.content.decode())
-    assert config["initial"] == load_fixture(slug)
+    assert config["initial"] == validate_definition(raw).as_dict()
     assert config["urls"]["fields"]
     assert config["urls"]["preview"]
     assert config["i18n"]["issue_no_columns"]
@@ -166,6 +510,312 @@ def test_editor_page_opens_every_golden_fixture(client_with_perms, event, slug):
 def test_editor_page_unknown_identifier_is_404(client_with_perms, event):
     resp = client_with_perms.get(url_for("editor.edit", event, identifier="nope"))
     assert resp.status_code == 404
+
+
+@pytest.mark.django_db
+def test_editor_page_does_not_open_a_report_of_another_event(
+    client_with_perms, event, organizer
+):
+    """CLAUDE.md rule 4: the queryset is scoped to the event in the URL."""
+    with scopes_disabled():
+        from pretix.base.models import Event
+
+        other = Event.objects.create(
+            organizer=organizer,
+            name="Other",
+            slug="other",
+            date_from=now() + datetime.timedelta(days=30),
+            plugins="pretix_custom_reports",
+            live=True,
+        )
+        foreign = ReportDefinition.objects.create(
+            event=other, name="Foreign", definition=load_fixture("minimal_order")
+        )
+    resp = client_with_perms.get(
+        url_for("editor.edit", event, identifier=foreign.identifier)
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.django_db
+def test_editor_page_does_not_open_an_organizer_template(
+    client_with_perms, event, organizer
+):
+    """Templates have no event and belong to portability-dev's views."""
+    with scopes_disabled():
+        template = ReportDefinition.objects.create(
+            organizer=organizer,
+            name="Template",
+            definition=load_fixture("minimal_order"),
+        )
+    assert template.is_template
+    resp = client_with_perms.get(
+        url_for("editor.edit", event, identifier=template.identifier)
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Saving: the editor form and persistence-dev's CRUD views
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_new_report_posts_to_the_create_view(client_with_perms, event):
+    content = client_with_perms.get(url_for("editor.new", event)).content.decode()
+    assert f'action="{url_for("event.reports.add", event)}"' in content
+    assert 'id="pcr-save"' in content
+    assert "disabled" not in content.split('id="pcr-save"')[1].split(">")[0]
+
+
+@pytest.mark.django_db
+def test_stored_report_posts_to_its_update_view(
+    client_with_perms, event, stored_report
+):
+    report = stored_report(load_fixture("minimal_order"))
+    content = client_with_perms.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    ).content.decode()
+    assert (
+        f'action="{url_for("event.reports.edit", event, report=report.pk)}"' in content
+    )
+
+
+@pytest.mark.django_db
+def test_editor_posts_the_stable_identifier_back(
+    client_with_perms, event, stored_report
+):
+    """Otherwise the model would generate a new identifier on every save.
+
+    ``ReportDefinitionForm`` lists ``identifier``; an absent field cleans to the
+    empty string, and ``ReportDefinition.save()`` then mints a fresh one --
+    breaking every scheduled export that refers to this report by identifier.
+    """
+    report = stored_report(load_fixture("minimal_order"))
+    identifier = report.identifier
+    assert identifier
+    content = client_with_perms.get(
+        url_for("editor.edit", event, identifier=identifier)
+    ).content.decode()
+    assert f'name="identifier" value="{identifier}"' in content
+
+    # And the round trip really keeps it.
+    resp = client_with_perms.post(
+        url_for("event.reports.edit", event, report=report.pk),
+        data={
+            "name": "Renamed",
+            "description": "",
+            "identifier": identifier,
+            "base": "order",
+            "definition": json.dumps(load_fixture("minimal_order")),
+        },
+    )
+    assert resp.status_code == 302
+    with scopes_disabled():
+        report.refresh_from_db()
+    assert report.name == "Renamed"
+    assert report.identifier == identifier
+
+    # The counter-test, so the assertion above cannot pass by accident: without
+    # the field the model really does mint a new identifier.
+    resp = client_with_perms.post(
+        url_for("event.reports.edit", event, report=report.pk),
+        data={
+            "name": "Renamed again",
+            "description": "",
+            "base": "order",
+            "definition": json.dumps(load_fixture("minimal_order")),
+        },
+    )
+    assert resp.status_code == 302
+    with scopes_disabled():
+        report.refresh_from_db()
+    assert report.identifier != identifier
+
+
+@pytest.mark.django_db
+def test_read_only_user_gets_the_editor_without_a_save_target(
+    client_read_only, user_read_only, event, stored_report
+):
+    """The preview is allowed, saving is not -- and the button says so."""
+    assert not user_read_only.has_event_permission(
+        event.organizer, event, CHANGE_PERMISSION
+    )
+    report = stored_report(load_fixture("minimal_order"))
+    resp = client_read_only.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    )
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'action=""' in content
+    assert "disabled" in content.split('id="pcr-save"')[1].split(">")[0]
+    # ... and the CRUD view agrees.
+    assert (
+        client_read_only.post(
+            url_for("event.reports.edit", event, report=report.pk), data={}
+        ).status_code
+        == 403
+    )
+
+
+# ---------------------------------------------------------------------------
+# Import, export and templates (portability-dev's views)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_stored_report_offers_export_import_and_templates(
+    client_with_perms, event, stored_report
+):
+    """The three ways in and out of the editor, all of them portability-dev's."""
+    report = stored_report(load_fixture("minimal_order"))
+    content = client_with_perms.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    ).content.decode()
+
+    assert url_for("event.reports.export", event, report=report.pk) in content
+    assert url_for("event.reports.import", event) in content
+    assert url_for("event.reports.templates", event) in content
+    # Marked for the "you have unsaved changes" guard, and the export link with
+    # the sharper variant: its file comes from the database, not from the page.
+    assert 'data-pcr-leave="export"' in content
+    assert content.count('data-pcr-leave="page"') == 2
+
+
+@pytest.mark.django_db
+def test_a_new_report_cannot_be_exported_yet(client_with_perms, event):
+    """There is nothing to download before the first save, and the page says so."""
+    content = client_with_perms.get(url_for("editor.new", event)).content.decode()
+    assert 'id="pcr-export"' not in content
+    assert "Save this report to be able to export it as a file." in content
+    # Import and templates do not need a stored report.
+    assert url_for("event.reports.import", event) in content
+    assert url_for("event.reports.templates", event) in content
+
+
+@pytest.mark.django_db
+def test_read_only_user_may_export_but_not_import(
+    client_read_only, event, stored_report
+):
+    """Export reads, import and templates write -- and they are gated apart.
+
+    ``ReportExportView`` requires ``event.orders:read`` like the editor itself,
+    ``ReportImportView`` and ``TemplatePickView`` require
+    ``event.settings.general:write``. Offering a link into a 403 would be worse
+    than not offering it.
+    """
+    report = stored_report(load_fixture("minimal_order"))
+    content = client_read_only.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    ).content.decode()
+
+    assert url_for("event.reports.export", event, report=report.pk) in content
+    assert url_for("event.reports.import", event) not in content
+    assert url_for("event.reports.templates", event) not in content
+
+    # ... and the views agree with the buttons, in both directions.
+    assert (
+        client_read_only.get(
+            url_for("event.reports.export", event, report=report.pk)
+        ).status_code
+        == 200
+    )
+    assert (
+        client_read_only.get(url_for("event.reports.import", event)).status_code == 403
+    )
+
+
+@pytest.mark.django_db
+def test_editor_survives_missing_portability_routes(
+    client_with_perms, event, stored_report, monkeypatch
+):
+    """A half-wired urls.py must cost a button, not the page.
+
+    The routes come from three different handoff requests and will not all land
+    in the same commit, so every link is reversed defensively.
+    """
+    from django.urls import NoReverseMatch
+
+    from pretix_custom_reports.views import editor as editor_views
+
+    real_url = editor_views.ReportEditorView.url
+
+    def only_own_routes(self, name, **extra):
+        if name.startswith("event.reports.") and name != "event.reports.edit":
+            raise NoReverseMatch(name)
+        return real_url(self, name, **extra)
+
+    monkeypatch.setattr(editor_views.ReportEditorView, "url", only_own_routes)
+
+    report = stored_report(load_fixture("minimal_order"))
+    resp = client_with_perms.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    )
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'id="pcr-editor"' in content
+    assert 'id="pcr-export"' not in content
+    assert 'id="pcr-import"' not in content
+    assert 'id="pcr-templates"' not in content
+
+
+@pytest.mark.django_db
+def test_export_link_serves_the_stored_definition(
+    client_with_perms, event, stored_report
+):
+    """Following the link really produces the file, from the saved report."""
+    raw = load_fixture("wide_order")
+    report = stored_report(raw, name="Wide")
+    resp = client_with_perms.get(
+        url_for("event.reports.export", event, report=report.pk)
+    )
+    assert resp.status_code == 200
+    assert resp["Content-Type"] == "application/json"
+    assert "attachment;" in resp["Content-Disposition"]
+    document = json.loads(resp.content.decode())
+    # Validated with the contract's own envelope validator, not by poking at
+    # keys: this is the file another installation has to be able to import.
+    envelope = validate_portable_document(document)
+    assert envelope.definition.as_dict() == validate_definition(raw).as_dict()
+    assert envelope.name == "Wide"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("slug", FIXTURE_SLUGS)
+def test_full_round_trip_editor_form_to_database_and_back(
+    client_with_perms, event, slug
+):
+    """DoD, end to end: what the editor posts is what the editor gets back.
+
+    This is the wave-2 version of the round trip -- no longer editor -> endpoint
+    -> editor, but editor form -> persistence-dev's CreateView -> database ->
+    editor page. The definition has to survive unchanged.
+    """
+    raw = load_fixture(slug)
+    canonical = validate_definition(raw)
+    resp = client_with_perms.post(
+        url_for("event.reports.add", event),
+        data={
+            "name": slug,
+            "description": "",
+            "identifier": "",
+            "base": canonical.base.value,
+            # Exactly what the editor's hidden input carries: the canonical
+            # document as a JSON string.
+            "definition": canonical.as_json(),
+        },
+    )
+    assert resp.status_code == 302, resp.content
+
+    with scopes_disabled():
+        report = event.custom_reports.get(name=slug)
+    assert report.definition == canonical.as_dict()
+
+    page = client_with_perms.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    )
+    assert page.status_code == 200
+    assert editor_config(page.content.decode())["initial"] == canonical.as_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -178,15 +828,11 @@ def api_endpoints(event):
         "fields": (url_for("api.fields", event), "get"),
         "validate": (url_for("api.validate", event), "post"),
         "preview": (url_for("api.preview", event), "post"),
-        "examples": (url_for("api.examples", event), "get"),
-        "example": (url_for("api.example", event, slug="minimal_order"), "get"),
     }
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    "name", ["fields", "validate", "preview", "examples", "example"]
-)
+@pytest.mark.parametrize("name", ["fields", "validate", "preview"])
 def test_endpoints_deny_users_without_permission(client_without_perms, event, name):
     """A preview endpoint without a permission check is a data leak."""
     url, method = api_endpoints(event)[name]
@@ -200,9 +846,7 @@ def test_endpoints_deny_users_without_permission(client_without_perms, event, na
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    "name", ["fields", "validate", "preview", "examples", "example"]
-)
+@pytest.mark.parametrize("name", ["fields", "validate", "preview"])
 def test_endpoints_require_login(client, event, name):
     url, method = api_endpoints(event)[name]
     resp = client.get(url) if method == "get" else post_json(client, url, {})
@@ -279,7 +923,7 @@ def test_broken_request_bodies_are_rejected(
 
 
 @pytest.fixture
-def library(client_with_perms, event):
+def library(client_with_perms, event, event_data):
     resp = client_with_perms.get(url_for("api.fields", event))
     assert resp.status_code == 200
     return resp.json()
@@ -300,10 +944,17 @@ def test_field_library_shape(library):
 
 
 @pytest.mark.django_db
+def test_field_library_is_served_from_the_real_registry(library):
+    """Wave 2: no stub anywhere in the response."""
+    assert library["source"] == "EventFieldRegistry"
+    assert len(library["fields"]) > 80
+
+
+@pytest.mark.django_db
 def test_field_library_covers_every_key_the_fixtures_use(library):
     """The library must offer every key ``_index.json`` declares as required.
 
-    In wave 1 this checks the stub feed; in wave 2, with the same assertion, it
+    In wave 1 this checked the stub feed; in wave 2, with the same assertion, it
     checks the real registry. Either way a fixture that cannot be edited is a
     broken editor.
     """
@@ -357,6 +1008,26 @@ def test_choice_fields_offer_choices_not_free_text(library):
 
 
 @pytest.mark.django_db
+def test_choice_question_offers_its_options(library):
+    """The wave-2 version of the same rule, for a field only this event has.
+
+    The registry builds two ReportField objects for one question: on base
+    ``orderposition`` it carries the options and is event scoped, on base
+    ``order`` it is an aggregate without them. The library has to describe the
+    field from the richer variant, otherwise a choice question would get a free
+    text box in the filter area.
+    """
+    fields = {field["key"]: field for field in library["fields"]}
+    tshirt = fields["answer.tshirt-size"]
+    assert tshirt["datatype"] == "choice"
+    assert [c["value"] for c in tshirt["choices"]] == ["S", "M", "L", "XL"]
+    assert tshirt["value_scope"] == "event"
+    assert tshirt["group"] == "answers"
+    assert tshirt["bases"]["orderposition"]["operators"]
+    assert tshirt["bases"]["order"]["requires_aggregate"] is True
+
+
+@pytest.mark.django_db
 def test_date_fields_offer_relative_operators(library):
     """F6/F8: without these, scheduled reports cannot stay meaningful."""
     fields = {field["key"]: field for field in library["fields"]}
@@ -376,20 +1047,150 @@ def test_date_fields_offer_relative_operators(library):
 
 
 @pytest.mark.django_db
+def test_question_fields_are_event_specific(client_with_perms, event, event_data):
+    """A question of another event must not appear in this event's library.
+
+    The registry is built per event; this asserts the property the editor
+    depends on, because the field library is the allow-list the browser offers.
+    """
+    with scopes_disabled():
+        from pretix.base.models import Event
+
+        other = Event.objects.create(
+            organizer=event.organizer,
+            name="Other",
+            slug="other",
+            date_from=now() + datetime.timedelta(days=30),
+            plugins="pretix_custom_reports",
+            live=True,
+        )
+        Question.objects.create(
+            event=other,
+            question="Only over there",
+            identifier="foreign-question",
+            type=Question.TYPE_TEXT,
+        )
+    payload = client_with_perms.get(url_for("api.fields", event)).json()
+    keys = {field["key"] for field in payload["fields"]}
+    assert "answer.tshirt-size" in keys
+    assert "answer.foreign-question" not in keys
+
+
+@pytest.mark.django_db
+def test_renaming_a_question_moves_its_key(
+    client_with_perms, event, event_data, registry_cache_isolated
+):
+    """The realistic way a saved report stops resolving (ADR 0001 section 3.2)."""
+    with scopes_disabled():
+        question = event_data["questions"]["tshirt-size"]
+        question.identifier = "shirt-size"
+        question.save(update_fields=["identifier"])
+
+    payload = client_with_perms.get(url_for("api.fields", event)).json()
+    keys = {field["key"] for field in payload["fields"]}
+    assert "answer.shirt-size" in keys
+    assert "answer.tshirt-size" not in keys
+
+    # A report that still refers to the old key opens, with a warning.
+    warnings = post_json(
+        client_with_perms,
+        url_for("api.validate", event),
+        {"definition": load_fixture("orderposition_questions")},
+    ).json()["warnings"]
+    assert ("columns[4]", "unknown_field") in {(w["path"], w["code"]) for w in warnings}
+
+
+@pytest.mark.django_db
+def test_meta_property_field_only_exists_when_the_organizer_defines_it(
+    client_with_perms, event, registry_cache_isolated
+):
+    """``meta.event.campaign`` is an EventMetaProperty, not a constant."""
+    payload = client_with_perms.get(url_for("api.fields", event)).json()
+    assert "meta.event.campaign" not in {f["key"] for f in payload["fields"]}
+
+    with scopes_disabled():
+        EventMetaProperty.objects.create(
+            organizer=event.organizer, name="campaign", default=""
+        )
+    from pretix_custom_reports.registry import cache as registry_cache
+
+    registry_cache.clear_local_cache()
+
+    payload = client_with_perms.get(url_for("api.fields", event)).json()
+    assert "meta.event.campaign" in {f["key"] for f in payload["fields"]}
+
+
+@pytest.mark.django_db
+def test_a_report_using_fields_this_event_does_not_have_is_reported_not_hidden(
+    client_with_perms, event, registry_cache_isolated
+):
+    """An event without the questions and the meta property: warn per path.
+
+    This is the case wave 1 could not exercise -- the stub registry knew every
+    key of every fixture. Opening such a report has to work, because otherwise
+    it can never be repaired (ADR 0001 section 3.2).
+    """
+    payload = post_json(
+        client_with_perms,
+        url_for("api.validate", event),
+        {"definition": load_fixture("orderposition_questions")},
+    ).json()
+    assert payload["ok"] is True
+    missing = {w["path"]: w["code"] for w in payload["warnings"]}
+    # three question columns, three question filters, one question sort stage
+    assert missing["columns[4]"] == "unknown_field"
+    assert missing["columns[5]"] == "unknown_field"
+    assert missing["columns[6]"] == "unknown_field"
+    assert missing["filters.children[0]"] == "unknown_field"
+    assert missing["sorting[0]"] == "unknown_field"
+    # ... and the definition comes back untouched, ready to be fixed.
+    assert (
+        payload["definition"]
+        == validate_definition(load_fixture("orderposition_questions")).as_dict()
+    )
+
+
+@pytest.mark.django_db
+def test_preview_of_a_report_with_missing_fields_names_all_of_them(
+    client_with_perms, event, registry_cache_isolated
+):
+    """Running it, unlike opening it, fails -- with the full list."""
+    resp = post_json(
+        client_with_perms,
+        url_for("api.preview", event),
+        {"definition": load_fixture("orderposition_questions")},
+    )
+    assert resp.status_code == 400
+    payload = resp.json()
+    assert payload["stage"] == "fields"
+    assert set(payload["missing"]) == {
+        "answer.tshirt-size",
+        "answer.arrival-date",
+        "answer.newsletter",
+    }
+
+
+@pytest.mark.django_db
 def test_deprecated_fields_are_hidden(client_with_perms, event, monkeypatch):
     """A deprecated field still resolves for old reports but leaves the library."""
-    from dataclasses import replace
-
-    from pretix_custom_reports.contracts.stubs import StubFieldRegistry
+    from pretix_custom_reports.registry.library import field_registry
     from pretix_custom_reports.views import api
 
-    class WithDeprecated(StubFieldRegistry):
+    class WithDeprecated:
+        """The real registry with one field marked deprecated."""
+
+        def __init__(self):
+            self.inner = field_registry()
+
         def get_fields(self, event, base):
-            fields = dict(super().get_fields(event, base))
+            fields = dict(self.inner.get_fields(event, base))
             fields["order.code"] = replace(fields["order.code"], deprecated=True)
             return fields
 
-    monkeypatch.setattr(api, "get_registry", lambda: WithDeprecated())
+        def resolve(self, key, event, base):
+            return self.get_fields(event, base).get(key)
+
+    monkeypatch.setattr(api, "get_registry", WithDeprecated)
     payload = client_with_perms.get(url_for("api.fields", event)).json()
     assert "order.code" not in {field["key"] for field in payload["fields"]}
     assert "order.status" in {field["key"] for field in payload["fields"]}
@@ -402,7 +1203,7 @@ def test_deprecated_fields_are_hidden(client_with_perms, event, monkeypatch):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("slug", FIXTURE_SLUGS)
-def test_validate_round_trips_every_fixture(client_with_perms, event, slug):
+def test_validate_round_trips_every_fixture(client_with_perms, event, event_data, slug):
     """DoD: load a fixture, hand it back, get identical canonical JSON."""
     raw = load_fixture(slug)
     resp = post_json(
@@ -483,7 +1284,7 @@ def test_validate_flags_registry_stage_problems_per_path(client_with_perms, even
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("slug", FIXTURE_SLUGS)
-def test_preview_runs_for_every_fixture(client_with_perms, event, slug):
+def test_preview_runs_for_every_fixture(client_with_perms, event, event_data, slug):
     raw = load_fixture(slug)
     definition = validate_definition(raw)
     resp = post_json(
@@ -504,7 +1305,7 @@ def test_preview_runs_for_every_fixture(client_with_perms, event, slug):
 
 
 @pytest.mark.django_db
-def test_preview_never_exceeds_the_row_limit(client_with_perms, event):
+def test_preview_never_exceeds_the_row_limit(client_with_perms, event, event_data):
     """The preview must never load the full data set (SPEC.md section 4)."""
     url = url_for("api.preview", event)
     raw = load_fixture("orderposition_basic")
@@ -526,7 +1327,49 @@ def test_preview_never_exceeds_the_row_limit(client_with_perms, event):
 
 
 @pytest.mark.django_db
-def test_preview_reports_the_estimated_total(client_with_perms, event):
+def test_preview_slices_in_sql_not_in_python(client_with_perms, event, event_data):
+    """``preview=True`` has to reach the compiler, not just the row loop.
+
+    Without it the database would materialise the full result set and the row
+    cap would be cosmetic. Asserted on the generated SQL of the queryset the
+    view compiles, because the response cannot show the difference.
+    """
+    from pretix_custom_reports.views import api
+
+    captured = {}
+    real = api.get_compiler
+
+    def capturing():
+        compiler = real()
+        inner = compiler.compile
+
+        def compile(definition, event, **kwargs):
+            compiled = inner(definition, event, **kwargs)
+            captured["kwargs"] = kwargs
+            captured["limit"] = compiled.effective_limit
+            captured["sql"] = str(compiled.queryset.query)
+            return compiled
+
+        compiler.compile = compile
+        return compiler
+
+    api.get_compiler = capturing
+    try:
+        resp = post_json(
+            client_with_perms,
+            url_for("api.preview", event),
+            {"definition": load_fixture("minimal_order")},
+        )
+    finally:
+        api.get_compiler = real
+    assert resp.status_code == 200
+    assert captured["kwargs"] == {"preview": True}
+    assert captured["limit"] == PREVIEW_ROW_LIMIT
+    assert f"LIMIT {PREVIEW_ROW_LIMIT}" in captured["sql"]
+
+
+@pytest.mark.django_db
+def test_preview_reports_the_estimated_total(client_with_perms, event, event_data):
     url = url_for("api.preview", event)
     raw = load_fixture("minimal_order")
     payload = post_json(client_with_perms, url, {"definition": raw, "limit": 2}).json()
@@ -542,7 +1385,41 @@ def test_preview_reports_the_estimated_total(client_with_perms, event):
 
 
 @pytest.mark.django_db
-def test_preview_drops_hidden_columns(client_with_perms, event):
+def test_preview_applies_the_filters(client_with_perms, event, event_data):
+    """Wave 1 could not test this: the stub compiler ignored filters."""
+    url = url_for("api.preview", event)
+    definition = {
+        "schema_version": 1,
+        "base": "order",
+        "columns": [{"field": "order.code"}],
+        "filters": {
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "FMT01"}
+            ],
+        },
+    }
+    payload = post_json(client_with_perms, url, {"definition": definition}).json()
+    assert payload["rows"] == [["FMT01"]]
+    assert payload["total"] == 1
+
+
+@pytest.mark.django_db
+def test_preview_applies_the_sorting(client_with_perms, event, event_data):
+    url = url_for("api.preview", event)
+    definition = {
+        "schema_version": 1,
+        "base": "order",
+        "columns": [{"field": "order.code"}],
+        "sorting": [{"field": "order.code", "direction": "desc"}],
+    }
+    payload = post_json(client_with_perms, url, {"definition": definition}).json()
+    codes = [row[0] for row in payload["rows"]]
+    assert codes == sorted(codes, reverse=True)
+
+
+@pytest.mark.django_db
+def test_preview_drops_hidden_columns(client_with_perms, event, event_data):
     raw = load_fixture("wide_order")
     assert any(column.get("hidden") for column in raw["columns"])
     payload = post_json(
@@ -552,7 +1429,7 @@ def test_preview_drops_hidden_columns(client_with_perms, event):
 
 
 @pytest.mark.django_db
-def test_preview_applies_the_column_format(client_with_perms, event):
+def test_preview_applies_the_column_format(client_with_perms, event, event_data):
     """Formatting happens on the server, per column, from the definition."""
     definition = {
         "schema_version": 1,
@@ -566,14 +1443,21 @@ def test_preview_applies_the_column_format(client_with_perms, event):
             {"field": "order.datetime", "format": {"date_style": "iso"}},
             {"field": "order.datetime", "format": {"date_style": "date_only"}},
         ],
+        "filters": {
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "FMT01"}
+            ],
+        },
     }
     payload = post_json(
         client_with_perms, url_for("api.preview", event), {"definition": definition}
     ).json()
+    assert payload["row_count"] == 1, payload
     row = payload["rows"][0]
-    assert row[2] == "19.00"  # raw
+    assert row[2] == "38.00"  # raw
     assert row[1] != row[2]  # currency formatting actually happened
-    assert "19" in row[1]
+    assert "38" in row[1]
     assert row[3] in ("Yes", "No")
     assert row[4] in ("1", "0")
     assert row[5].startswith("2026-03-01T")
@@ -610,30 +1494,44 @@ def test_preview_rejects_a_position_field_without_aggregate(client_with_perms, e
     assert any(issue["code"] == "aggregate_required" for issue in payload["errors"])
 
 
-@pytest.mark.django_db
-def test_preview_survives_a_broken_field(client_with_perms, event, monkeypatch):
-    """A field whose renderer explodes must not take the editor down with it."""
-    from pretix_custom_reports.contracts.stubs import StubQueryCompiler
-    from pretix_custom_reports.views import api
+def compiler_with_renderer(render):
+    """The real compiler, but every cell is rendered by *render*.
 
-    class Exploding(StubQueryCompiler):
-        def compile(self, definition, event=None):
-            compiled = super().compile(definition, event)
-            broken = [
-                type(column)(
-                    key=column.key,
-                    label=column.label,
-                    datatype=column.datatype,
-                    render=lambda row: 1 / 0,
-                    aggregate=column.aggregate,
-                    field=column.field,
-                )
-                for column in compiled.columns
-            ]
-            compiled.columns = tuple(broken)
+    Wraps rather than replaces: the definition is really compiled, the queryset
+    is really executed against the event, only the last step -- turning a row
+    object into a cell -- misbehaves.
+
+    Note the import: this builds the compiler from ``query.compiler`` directly
+    and deliberately *not* through ``views.api.get_compiler``. The two callers
+    monkeypatch exactly that name, so going through the seam would make the
+    wrapper wrap itself -- once per request, until Python runs out of stack.
+    """
+    from pretix_custom_reports.query.compiler import ReportQueryCompiler
+    from pretix_custom_reports.registry.library import field_registry
+
+    class Wrapper:
+        def compile(self, definition, event, **kwargs):
+            inner = ReportQueryCompiler(field_registry())
+            compiled = inner.compile(definition, event, **kwargs)
+            compiled.columns = tuple(
+                replace(column, render=render) for column in compiled.columns
+            )
             return compiled
 
-    monkeypatch.setattr(api, "get_compiler", lambda: Exploding())
+    return Wrapper()
+
+
+@pytest.mark.django_db
+def test_preview_survives_a_broken_field(
+    client_with_perms, event, event_data, monkeypatch
+):
+    """A field whose renderer explodes must not take the editor down with it."""
+    from pretix_custom_reports.views import api
+
+    def explode(row):
+        return 1 / 0
+
+    monkeypatch.setattr(api, "get_compiler", lambda: compiler_with_renderer(explode))
     resp = post_json(
         client_with_perms,
         url_for("api.preview", event),
@@ -644,30 +1542,16 @@ def test_preview_survives_a_broken_field(client_with_perms, event, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_preview_escapes_cell_contents(client_with_perms, event, monkeypatch):
+def test_preview_escapes_cell_contents(
+    client_with_perms, event, event_data, monkeypatch
+):
     """Order data ends up in HTML; it must never be able to become markup."""
-    from pretix_custom_reports.contracts.stubs import StubQueryCompiler
     from pretix_custom_reports.views import api
 
     payload_string = "<script>alert('x')</script>"
-
-    class Injecting(StubQueryCompiler):
-        def compile(self, definition, event=None):
-            compiled = super().compile(definition, event)
-            compiled.columns = tuple(
-                type(column)(
-                    key=column.key,
-                    label=column.label,
-                    datatype=column.datatype,
-                    render=lambda row: payload_string,
-                    aggregate=column.aggregate,
-                    field=column.field,
-                )
-                for column in compiled.columns
-            )
-            return compiled
-
-    monkeypatch.setattr(api, "get_compiler", lambda: Injecting())
+    monkeypatch.setattr(
+        api, "get_compiler", lambda: compiler_with_renderer(lambda row: payload_string)
+    )
     result = post_json(
         client_with_perms,
         url_for("api.preview", event),
@@ -678,44 +1562,36 @@ def test_preview_escapes_cell_contents(client_with_perms, event, monkeypatch):
     assert "&lt;script&gt;" in result["html"]
 
 
-# ---------------------------------------------------------------------------
-# Wave 1 example endpoint
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.django_db
-def test_examples_endpoint_lists_every_fixture(client_with_perms, event):
-    payload = client_with_perms.get(url_for("api.examples", event)).json()
-    assert sorted(entry["slug"] for entry in payload["definitions"]) == FIXTURE_SLUGS
-    assert all(entry["purpose"] for entry in payload["definitions"])
+def test_preview_shows_only_this_events_orders(client_with_perms, event, event_data):
+    """CLAUDE.md rule 4, from the outside: the preview is one event's data."""
+    with scopes_disabled():
+        from pretix.base.models import Event
 
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("slug", FIXTURE_SLUGS)
-def test_example_endpoint_serves_the_fixture_verbatim(client_with_perms, event, slug):
-    payload = client_with_perms.get(url_for("api.example", event, slug=slug)).json()
-    raw = load_fixture(slug)
-    assert payload["definition"] == raw
-    assert payload["canonical"] == validate_definition(raw).as_dict()
-
-
-@pytest.mark.django_db
-def test_example_endpoint_rejects_unknown_slugs(client_with_perms, event):
-    assert (
-        client_with_perms.get(url_for("api.example", event, slug="wat")).status_code
-        == 404
-    )
-
-
-@pytest.mark.django_db
-def test_example_endpoint_cannot_be_talked_out_of_its_directory(
-    client_with_perms, event
-):
-    """The slug is matched against a directory listing, not pasted into a path."""
-    base = url_for("api.examples", event)
-    for evil in ("..%2f..%2fsecret", "....//etc/passwd", "-index"):
-        resp = client_with_perms.get(f"{base}{evil}/")
-        assert resp.status_code == 404
+        other = Event.objects.create(
+            organizer=event.organizer,
+            name="Other",
+            slug="other",
+            date_from=now() + datetime.timedelta(days=30),
+            plugins="pretix_custom_reports",
+            live=True,
+        )
+        Order.objects.create(
+            event=other,
+            code="FOREIGN",
+            status=Order.STATUS_PAID,
+            email="foreign@example.org",
+            sales_channel=other.organizer.sales_channels.get(identifier="web"),
+            datetime=now(),
+            expires=now() + datetime.timedelta(days=10),
+            total=Decimal("5.00"),
+        )
+    payload = post_json(
+        client_with_perms,
+        url_for("api.preview", event),
+        {"definition": load_fixture("minimal_order")},
+    ).json()
+    assert "FOREIGN" not in [row[0] for row in payload["rows"]]
 
 
 # ---------------------------------------------------------------------------
@@ -785,7 +1661,11 @@ def run_model_js(tmp_path, meta, cases):
 
 @pytest.fixture
 def js_meta(library):
-    """Exactly the metadata the browser gets from GET api/fields/."""
+    """Exactly the metadata the browser gets from GET api/fields/.
+
+    Since wave 2 that is the real registry's field table, so the JavaScript
+    model is exercised against the fields it will actually see.
+    """
     return {
         "operators": library["operators"],
         "fields": {field["key"]: field for field in library["fields"]},
@@ -978,6 +1858,427 @@ def test_js_model_output_is_accepted_by_the_preview(
 
 
 # ---------------------------------------------------------------------------
+# The editor in a real browser
+# ---------------------------------------------------------------------------
+#
+# Everything above tests the editor without ever executing its DOM half. The
+# four things that only a browser can answer are drag & drop (Sortable.js), the
+# select2 enhancement, the typed value widgets and the base switch dialogue --
+# and those were the open point wave 1 left behind.
+#
+# No new dependency is installed for this: playwright is already in the venv,
+# and the browser is the one on the machine (Edge or Chrome, driven through
+# playwright's `channel`), so nothing is downloaded either. If neither is
+# available the tests skip instead of pretending.
+#
+# The server is pytest-django's `live_server`, not the dev server: it serves the
+# routes this module injects (urls.py belongs to the integrator and does not
+# carry them yet), the test database and the static files, and it needs no
+# process anyone has to remember to start.
+
+
+def _launch_browser(playwright):
+    """A chromium that is already on this machine, or ``None``.
+
+    Order: the system browsers first, playwright's own download last -- the
+    bundled build is usually not there, and this must never install one.
+    """
+    for channel in ("msedge", "chrome"):
+        try:
+            return playwright.chromium.launch(channel=channel)
+        except Exception:
+            continue
+    try:
+        return playwright.chromium.launch()
+    except Exception:
+        return None
+
+
+@pytest.fixture(scope="session")
+def browser():
+    """One browser for all browser tests, plus Django's async escape hatch.
+
+    ``DJANGO_ALLOW_ASYNC_UNSAFE``: playwright's synchronous API keeps an event
+    loop running in this thread, and Django refuses ORM access from a thread
+    with a running loop. The flag is Django's documented way out for exactly
+    this situation (docs/topics/async, "asgiref.sync"); the ORM calls in
+    question are the test's own fixtures, and the live server runs in its own
+    thread either way. Restored afterwards so no other test silently inherits
+    it.
+    """
+    playwright_module = pytest.importorskip(
+        "playwright.sync_api", reason="playwright is not installed"
+    )
+    import os
+
+    previous = os.environ.get("DJANGO_ALLOW_ASYNC_UNSAFE")
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+    playwright = playwright_module.sync_playwright().start()
+    instance = _launch_browser(playwright)
+    if instance is None:
+        playwright.stop()
+        pytest.skip("no chromium, Edge or Chrome available to drive")
+    yield instance
+    instance.close()
+    playwright.stop()
+    if previous is None:
+        os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
+    else:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = previous
+
+
+@pytest.fixture
+def browser_page(browser, live_server, event, user_with_perms):
+    """A logged-in browser page factory, for tests that pick their own URL."""
+    login_client = Client()
+    assert login_client.login(email=user_with_perms.email, password=PASSWORD)
+    session_cookie = login_client.cookies["pretix_session"].value
+
+    context = browser.new_context(
+        base_url=live_server.url, viewport={"width": 1400, "height": 2400}
+    )
+    context.add_cookies(
+        [
+            {
+                "name": "pretix_session",
+                "value": session_cookie,
+                "url": live_server.url,
+            }
+        ]
+    )
+
+    def open_editor(path):
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(live_server.url + path)
+        page.wait_for_selector("#pcr-library-list li[data-field-key]", timeout=20_000)
+        return page, errors
+
+    yield open_editor
+    context.close()
+
+
+@pytest.fixture
+def editor_in_browser(browser, live_server, event, event_data, user_with_perms):
+    """A logged-in browser page with the editor open and booted.
+
+    The session is created with Django's test client and the cookie is handed to
+    the browser; logging in through the form would test pretix' login page, not
+    ours.
+    """
+    login_client = Client()
+    assert login_client.login(email=user_with_perms.email, password=PASSWORD)
+    session_cookie = login_client.cookies["pretix_session"].value
+
+    # A tall viewport, and not for comfort: the test settings switch off
+    # django-compressor's precompilers, so the control panel's SCSS is served
+    # as SCSS and the browser ignores it. Without Bootstrap's grid the two
+    # editor columns stack, which pushes the column list far below a normal
+    # 720px viewport -- and a drop target outside the viewport cannot be
+    # reached by a pointer.
+    context = browser.new_context(
+        base_url=live_server.url, viewport={"width": 1400, "height": 2400}
+    )
+    context.add_cookies(
+        [
+            {
+                "name": "pretix_session",
+                "value": session_cookie,
+                "url": live_server.url,
+            }
+        ]
+    )
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(live_server.url + url_for("editor.new", event))
+    # The editor has booted once the field library is on the page: that only
+    # happens after GET api/fields/ came back.
+    page.wait_for_selector("#pcr-library-list li[data-field-key]", timeout=20_000)
+    yield page, errors
+    context.close()
+
+
+def json_state(page):
+    """The editor's canonical JSON, as the JSON panel shows it."""
+    return json.loads(page.input_value("#pcr-json"))
+
+
+def library_action(page, key, title):
+    """Click one of the buttons on a field in the library.
+
+    The buttons are ``visibility: hidden`` until the entry is hovered or
+    focused, so the hover is not test decoration -- it is what a user does, and
+    leaving it out is why playwright waits forever.
+    """
+    entry = page.locator(f"#pcr-library-list li[data-field-key='{key}']")
+    entry.scroll_into_view_if_needed()
+    entry.hover()
+    entry.locator(f"button[title='{title}']").click()
+
+
+def drag(page, source_selector, target_selector):
+    """Drag one element onto another the way a hand does it.
+
+    Not ``page.drag_and_drop``: Sortable.js uses the browser's native HTML5
+    drag, and that only gets going after a mousedown followed by a small move
+    and then a *gradual* travel to the target. A single jump produces a
+    ``dragstart`` and nothing else -- verified by listening for the drag events
+    while trying it.
+
+    The other thing this taught us is in the viewport comment on the context
+    fixture: a drop target outside the viewport never receives ``dragover``,
+    however patiently the pointer is moved towards it.
+    """
+    source = page.locator(source_selector)
+    target = page.locator(target_selector)
+    source.scroll_into_view_if_needed()
+    source.hover()
+    start = source.bounding_box()
+    end = target.bounding_box()
+    assert start and end, (source_selector, target_selector)
+
+    page.mouse.down()
+    # A short nudge first: this is what turns the press into a drag.
+    page.mouse.move(start["x"] + start["width"] / 2 + 8, start["y"] + 4)
+    page.wait_for_timeout(50)
+    page.mouse.move(
+        end["x"] + end["width"] / 2,
+        end["y"] + end["height"] / 2,
+        steps=20,
+    )
+    page.wait_for_timeout(100)
+    # One more move inside the target, so Sortable sees a dragover on it.
+    page.mouse.move(
+        end["x"] + end["width"] / 2 + 2,
+        end["y"] + end["height"] / 2 + 2,
+    )
+    page.mouse.up()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_browser_drag_and_drop_adds_a_column(editor_in_browser):
+    """Dragging a field from the library into the column list adds a column.
+
+    The buttons next to each field do the same thing and are covered by the
+    model tests; this is about Sortable.js actually being loaded and its clone
+    ending up in the right list.
+    """
+    page, errors = editor_in_browser
+    assert page.text_content("#pcr-columns-count") == "0"
+    # The empty list still offers a drop area; an empty <tbody> would be zero
+    # pixels tall and could not be hit at all.
+    assert page.locator("#pcr-columns tr.pcr-drop-hint").is_visible()
+
+    drag(
+        page,
+        "#pcr-library-list li[data-field-key='order.code']",
+        "#pcr-columns tr.pcr-drop-hint",
+    )
+
+    page.wait_for_function(
+        "() => document.getElementById('pcr-columns-count').textContent === '1'"
+    )
+    assert [column["field"] for column in json_state(page)["columns"]] == ["order.code"]
+    assert page.locator("#pcr-columns tr.pcr-drop-hint").count() == 0
+
+    # A second field lands next to the first one, not instead of it.
+    drag(
+        page,
+        "#pcr-library-list li[data-field-key='order.email']",
+        "#pcr-columns tr:last-child",
+    )
+    page.wait_for_function(
+        "() => document.getElementById('pcr-columns-count').textContent === '2'"
+    )
+    assert {column["field"] for column in json_state(page)["columns"]} == {
+        "order.code",
+        "order.email",
+    }
+    assert errors == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_browser_filter_widgets_match_the_datatype(editor_in_browser):
+    """SPEC.md F6: a choice field gets a value list, a date field a date picker.
+
+    Free text is the exception, so this asserts on the *type* of the widgets the
+    editor builds, not just on their presence.
+    """
+    page, errors = editor_in_browser
+
+    # A choice field: multi-select for "is one of", not a text box.
+    library_action(page, "order.status", "Add as filter")
+    page.wait_for_selector(".pcr-condition-field")
+    page.select_option("select.pcr-condition-operator", "in")
+    page.wait_for_selector("select.pcr-multiselect")
+    options = page.eval_on_selector_all(
+        "select.pcr-multiselect option", "els => els.map(e => e.value)"
+    )
+    assert options == ["n", "p", "e", "c"]
+    page.select_option("select.pcr-multiselect", ["p", "n"])
+    # The browser reports selected options in document order, not click order.
+    assert json_state(page)["filters"]["children"][0]["value"] == ["n", "p"]
+
+    # A date field: a real date input *and* the relative operators.
+    library_action(page, "order.datetime", "Add as filter")
+    rows = page.locator(".pcr-condition-operator")
+    operators = rows.nth(1).locator("option")
+    values = [operators.nth(i).get_attribute("value") for i in range(operators.count())]
+    assert "relative_last_days" in values
+    assert "between" in values
+
+    rows.nth(1).select_option("gte")
+    page.wait_for_selector("input[type='datetime-local']")
+    page.fill("input[type='datetime-local']", "2026-03-01T10:00")
+    condition = json_state(page)["filters"]["children"][1]
+    assert condition["operator"] == "gte"
+    assert condition["value"].startswith("2026-03-01")
+
+    # ... and the relative operator needs a day count, not a date.
+    rows.nth(1).select_option("relative_last_days")
+    page.wait_for_selector("input[type='number']")
+    assert json_state(page)["filters"]["children"][1]["operator"] == (
+        "relative_last_days"
+    )
+    assert errors == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_browser_select2_enhances_the_field_chooser(editor_in_browser):
+    """The field chooser has ~90 options; without select2 it is unusable.
+
+    select2 is loaded by the control panel itself (pretixcontrol/base.html), so
+    this also checks that the editor's assumption about the surrounding stack
+    holds.
+    """
+    page, errors = editor_in_browser
+    page.click("#pcr-add-condition")
+    page.wait_for_selector("select.pcr-condition-field")
+    # enhanceSelect() is deferred by a tick, so wait for select2's own markup.
+    page.wait_for_selector(".select2-container", timeout=10_000)
+    # A plain <select> would leave the user scrolling through ~90 options.
+    assert page.locator("select.pcr-condition-field").count() == 1
+    assert page.locator(".select2-container").count() >= 1
+
+    page.click(".select2-container")
+    page.fill("input.select2-search__field", "ZIP")
+    page.wait_for_selector(".select2-results__option")
+    # Two fields match ("ZIP code" and "Attendee ZIP code"), so pick by exact
+    # text -- and not a group heading, which is an option element as well.
+    page.click(".select2-results__option[role='option']:text-is('ZIP code')")
+
+    condition = json_state(page)["filters"]["children"][0]
+    assert condition["field"] == "invoice_address.zipcode"
+    assert errors == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_browser_base_switch_explains_the_loss_before_applying_it(editor_in_browser):
+    """F3: the user sees what a base switch costs before it happens."""
+    page, errors = editor_in_browser
+
+    page.fill("#pcr-json", json.dumps(load_fixture("orderposition_basic")))
+    page.click("#pcr-json-apply")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#pcr-columns tr').length === 20"
+    )
+
+    page.click("#pcr-base-order")
+    impact = page.locator("#pcr-base-impact")
+    impact.wait_for(state="visible")
+    text = impact.text_content()
+    # Several fields are affected, and the dialogue names them.
+    assert "position.positionid" in text
+    assert "seat.zone_name" in text
+    # Nothing has changed yet.
+    assert json_state(page)["base"] == "orderposition"
+
+    page.click("#pcr-base-impact button.btn-warning")
+    page.wait_for_function(
+        "() => JSON.parse(document.getElementById('pcr-json').value).base === 'order'"
+    )
+    switched = json_state(page)
+    assert switched["base"] == "order"
+    assert all(
+        column.get("aggregate")
+        for column in switched["columns"]
+        if column["field"].startswith(("position.", "item.", "seat.", "voucher."))
+    )
+    # The sorting stage that cannot survive on the new base is gone.
+    assert "position.positionid" not in [
+        entry["field"] for entry in switched.get("sorting", [])
+    ]
+    assert errors == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_browser_asks_before_leaving_with_unsaved_changes(
+    browser_page, event, stored_report
+):
+    """Import, templates and the export download all leave the editor.
+
+    None of them can see what is unsaved in this page: import and "load a
+    template" replace it, and the export file is built from the stored row. So
+    the editor asks -- and only when there is really something to lose.
+    """
+    report = stored_report(load_fixture("minimal_order"))
+    page, errors = browser_page(
+        url_for("editor.edit", event, identifier=report.identifier)
+    )
+
+    # Nothing changed yet: the link just follows, no dialogue.
+    asked = []
+    page.on("dialog", lambda dialog: (asked.append(dialog.message), dialog.dismiss()))
+    page.click("#pcr-templates")
+    page.wait_for_load_state()
+    assert asked == []
+    assert "/reports/templates/" in page.url
+
+    page.go_back()
+    page.wait_for_selector("#pcr-library-list li[data-field-key]")
+
+    # Now change something and try again: the editor asks, and a "no" keeps us
+    # on the page with the change intact.
+    library_action(page, "order.email", "Add as column")
+    page.wait_for_function(
+        "() => document.getElementById('pcr-columns-count').textContent === '2'"
+    )
+    page.click("#pcr-templates")
+    page.wait_for_timeout(300)
+    assert len(asked) == 1
+    assert "unsaved" in asked[0]
+    assert "/editor/" in page.url
+    assert len(json_state(page)["columns"]) == 2
+
+    # The export link warns about something else: its file is the saved version.
+    page.click("#pcr-export")
+    page.wait_for_timeout(300)
+    assert len(asked) == 2
+    assert "saved version" in asked[1]
+    assert errors == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_browser_live_preview_shows_real_rows(editor_in_browser, event_data):
+    """The whole chain in one assertion: click -> preview endpoint -> table."""
+    page, errors = editor_in_browser
+
+    library_action(page, "order.code", "Add as column")
+    page.wait_for_selector("#pcr-preview table td")
+    codes = page.eval_on_selector_all(
+        "#pcr-preview table tbody td", "els => els.map(e => e.textContent.trim())"
+    )
+    assert "FMT01" in codes
+    # The test mode order is not in there: excluded by default (options).
+    assert "TEST4" not in codes
+    assert page.text_content("#pcr-preview-status").startswith("Showing 3 of 3 rows")
+    assert errors == []
+
+
+# ---------------------------------------------------------------------------
 # Contract guards
 # ---------------------------------------------------------------------------
 
@@ -1024,3 +2325,38 @@ def test_static_assets_are_self_hosted():
         assert "http://" not in source, path
         assert "https://" not in source, path
     assert checked >= 3  # two scripts and a stylesheet, at least
+
+
+def test_no_stub_is_left_in_the_editor_views():
+    """Wave 2: the editor must not import ``contracts.stubs`` any more.
+
+    ADR 0001 section 6 asks that a stub in the production path be visible in the
+    diff. This is the automated half of that promise.
+
+    Checked on the parsed module rather than on the text, because the module
+    docstrings still *mention* the superseded stubs -- deliberately, that is the
+    history of the two swap points -- and a substring check would either forbid
+    writing that down or have to be weakened until it stops meaning anything.
+    Function-local imports are covered: ``ast.walk`` does not care how deeply
+    nested a node is.
+    """
+    import ast
+
+    for name in ("api.py", "editor.py"):
+        source = (PLUGIN_ROOT / "views" / name).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+                imported.update(f"{node.module or ''}.{a.name}" for a in node.names)
+            elif isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+        assert not [module for module in imported if "stubs" in module], (
+            name,
+            imported,
+        )
+        # The two factory functions of the stub module, in case someone imports
+        # them under a different path.
+        assert "stub_registry(" not in source, name
+        assert "stub_compiler(" not in source, name
