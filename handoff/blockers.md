@@ -271,3 +271,53 @@ S-003 (mittel, `portability-dev` + `frontend-dev`), S-004, S-005, S-006
 (niedrig) — unverändert, siehe `docs/security-review.md`. Die vier
 `xfail(strict=True)`-Tests zu S-003 und je einer zu S-004 und S-006 stehen
 weiterhin scharf.
+
+
+---
+
+# Welle 4 — ein roter Test in fremdem Gebiet (integrator, 2026-08-02)
+
+**Kein Contract-Änderungswunsch, kein Sicherheitsbefund.** Der Eintrag steht
+hier, weil er das DoD-Tor „Testsuite grün" blockiert und ich ihn laut Rolle
+nicht selbst reparieren darf.
+
+## Blockierend für „grün"
+
+`tests/test_integration.py::test_an_event_copy_carries_its_reports_and_runs_them_in_the_copy`
+(Zeilen 485-533, Eigentümer `test-engineer`) schlägt seit dem Verdrahten von
+`event_copy_data` fehl:
+
+```
+AssertionError: assert 'sizes-2' == 'sizes'
+tests\test_integration.py:516
+```
+
+Ursache: Der Test kopiert die Reports **zweimal**. Zeile 509
+(`copy_event.copy_data_from(world.event)`) löst jetzt den Empfänger
+`pretix_custom_reports.signals.copy_reports` aus, Zeile 511 ruft
+`copy_reports_to_event(...)` danach noch einmal von Hand auf. Der zweite Lauf
+findet den Identifier `sizes` belegt und vergibt `sizes-2`.
+
+Nachgewiesen: mit zur Laufzeit abgehängtem Empfänger (Wegwerf-Plugin, kein
+Produktivcode angefasst) läuft derselbe Test grün.
+
+Der Test war korrekt, solange das Signal nicht verdrahtet war — sein Docstring
+sagt das ausdrücklich („``event_copy_data`` equivalent"). Genau diesen Umbau
+hat `portability-dev` in
+`handoff/requests/erledigt/portability-dev-an-integrator-signals.md` Abschnitt 5
+angekündigt. Entscheidung und Fix gehören `test-engineer`.
+
+## Nicht blockierend, aber im selben Zug gefunden
+
+`tests/test_exporters.py::registered` (Zeilen 71-96, Eigentümer `exporter-dev`)
+verbindet dieselben zwei `dispatch_uid`s, die `signals.py` seit Welle 4
+produktiv verbindet, und ruft im Teardown
+`register_data_exporters.disconnect(dispatch_uid=...)` auf. Damit ist die
+**Produktivverdrahtung** für den Rest der pytest-Session weg. Das fällt heute
+nicht auf, weil jeder Test, der den Exporter braucht, die Fixture selbst
+benutzt — aber jeder neue Test ohne sie prüft ab da einen abgeschalteten
+Exporter. Vorschlag: im Teardown den Zustand wiederherstellen statt zu trennen,
+oder eigene `dispatch_uid`s benutzen.
+
+Details, alle weiteren offenen Punkte und die getroffenen Entscheidungen:
+`handoff/status/integrator.md`.

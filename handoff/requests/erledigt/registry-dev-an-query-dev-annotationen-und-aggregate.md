@@ -1,3 +1,8 @@
+> **ARCHIVIERT — 2026-08-02, `integrator` (Welle 4).** Nicht an mich
+> adressiert; beim Aufräumen von `handoff/requests/` gegen den Code geprüft und
+> als umgesetzt befunden (`query/report.py:148` annotiert einmal mit `**plan.annotations`). Falls der ursprüngliche
+> Empfänger anderer Meinung ist: Datei zurückschieben.
+
 # registry-dev → query-dev: drei Dinge, die die echte Registry anders macht als der Stub
 
 **Welle:** 1 → 1/2 (spätestens beim ersten Merge)

@@ -1,0 +1,2125 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: pretix-custom-reports 0.1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language-Team: German\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: pretix_custom_reports/apps.py:23
+msgid "Custom Reports"
+msgstr "Custom Reports"
+
+#: pretix_custom_reports/apps.py:26
+msgid ""
+"Define your own reports on orders and order positions in a graphical editor, "
+"save them, reuse them, schedule them and share them as organizer-level "
+"templates."
+msgstr ""
+"Definieren Sie eigene Auswertungen über Bestellungen und Bestellpositionen in"
+" einem grafischen Editor, speichern Sie sie, verwenden Sie sie wieder, lassen"
+" Sie sie terminiert laufen und teilen Sie sie als Vorlagen auf Veranstalter-"
+"Ebene."
+
+#: pretix_custom_reports/apps.py:41 pretix_custom_reports/signals.py:70
+#: pretix_custom_reports/templates/pretix_custom_reports/placeholder.html:3
+#: pretix_custom_reports/templates/pretix_custom_reports/placeholder.html:5
+msgid "Exports"
+msgstr "Auswertungen"
+
+#: pretix_custom_reports/exporters.py:240
+msgid "Custom report"
+msgstr "Eigene Auswertung"
+
+#: pretix_custom_reports/exporters.py:241
+msgctxt "export_category"
+msgid "Custom reports"
+msgstr "Eigene Auswertungen"
+
+#: pretix_custom_reports/exporters.py:243
+msgid ""
+"Run one of the reports you defined in the report editor. Relative date "
+"filters such as \"last 30 days\" are evaluated when the export runs, so a "
+"scheduled export keeps producing a current result."
+msgstr ""
+"Führen Sie eine der Auswertungen aus, die Sie im Auswertungs-Editor definiert"
+" haben. Relative Datumsfilter wie „letzte 30 Tage“ werden beim Ausführen des "
+"Exports berechnet, ein terminierter Export liefert also immer ein aktuelles "
+"Ergebnis."
+
+#: pretix_custom_reports/exporters.py:294 pretix_custom_reports/models.py:263
+msgid "Report"
+msgstr "Auswertung"
+
+#: pretix_custom_reports/exporters.py:302
+msgid ""
+"Reports are matched by their internal identifier, so the same report can be "
+"exported across several events."
+msgstr ""
+"Auswertungen werden über ihren internen Bezeichner zugeordnet, dieselbe "
+"Auswertung kann deshalb über mehrere Veranstaltungen hinweg exportiert "
+"werden."
+
+#: pretix_custom_reports/exporters.py:306
+msgid "One of the reports saved for this event."
+msgstr "Eine der Auswertungen, die für diese Veranstaltung gespeichert sind."
+
+#: pretix_custom_reports/exporters.py:310
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:231
+msgid "Include canceled positions"
+msgstr "Stornierte Positionen einschließen"
+
+#: pretix_custom_reports/exporters.py:314
+#: pretix_custom_reports/exporters.py:322
+msgid "Overrides the setting saved with the report, for this run only."
+msgstr ""
+"Überschreibt die mit der Auswertung gespeicherte Einstellung, nur für diesen "
+"Lauf."
+
+#: pretix_custom_reports/exporters.py:318
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:243
+msgid "Include test mode orders"
+msgstr "Bestellungen im Testmodus einschließen"
+
+#: pretix_custom_reports/exporters.py:326
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:247
+msgid "Maximum number of rows"
+msgstr "Maximale Zeilenzahl"
+
+#: pretix_custom_reports/exporters.py:331
+msgid ""
+"Leave empty to use the limit saved with the report. Scheduled exports are "
+"capped at 20 MB by pretix, so a large report needs a limit here to arrive at "
+"all."
+msgstr ""
+"Leer lassen, um die mit der Auswertung gespeicherte Grenze zu verwenden. "
+"Terminierte Exporte sind von pretix auf 20 MB begrenzt, eine große Auswertung"
+" braucht hier also eine Grenze, um überhaupt anzukommen."
+
+#: pretix_custom_reports/exporters.py:338
+msgid "If an event cannot supply this report"
+msgstr "Wenn eine Veranstaltung diese Auswertung nicht liefern kann"
+
+#: pretix_custom_reports/exporters.py:341
+msgid "Skip the event and export the rest"
+msgstr "Veranstaltung überspringen und den Rest exportieren"
+
+#: pretix_custom_reports/exporters.py:342
+msgid "Fail the whole export"
+msgstr "Den ganzen Export abbrechen"
+
+#: pretix_custom_reports/exporters.py:346
+msgid ""
+"An event may not have this report at all, or a column may refer to a question"
+" that does not exist there."
+msgstr ""
+"Eine Veranstaltung hat diese Auswertung vielleicht gar nicht, oder eine "
+"Spalte verweist auf eine Frage, die es dort nicht gibt."
+
+#: pretix_custom_reports/exporters.py:355
+msgid "Use the setting saved with the report"
+msgstr "Die mit der Auswertung gespeicherte Einstellung verwenden"
+
+#: pretix_custom_reports/exporters.py:356
+#: pretix_custom_reports/registry/choices.py:209
+#: pretix_custom_reports/views/api.py:1008
+#: pretix_custom_reports/views/editor.py:337
+msgid "Yes"
+msgstr "Ja"
+
+#: pretix_custom_reports/exporters.py:357
+#: pretix_custom_reports/registry/choices.py:209
+#: pretix_custom_reports/views/api.py:1008
+#: pretix_custom_reports/views/editor.py:309
+msgid "No"
+msgstr "Nein"
+
+#: pretix_custom_reports/exporters.py:411
+msgid ""
+"This export cannot be written in the format \"{format}\". Please open the "
+"export configuration and pick a format again."
+msgstr ""
+"Dieser Export kann nicht im Format „{format}“ geschrieben werden. Bitte "
+"öffnen Sie die Export-Konfiguration und wählen Sie erneut ein Format."
+
+#: pretix_custom_reports/exporters.py:433
+msgid "There is no event you may run this export for."
+msgstr ""
+"Es gibt keine Veranstaltung, für die Sie diesen Export ausführen dürfen."
+
+#: pretix_custom_reports/exporters.py:453
+msgid ""
+"The report \"{identifier}\" has {found} columns in event {event}, but "
+"{expected} in the events before it."
+msgstr ""
+"Die Auswertung „{identifier}“ hat in der Veranstaltung {event} {found} "
+"Spalten, in den Veranstaltungen davor aber {expected}."
+
+#: pretix_custom_reports/exporters.py:483
+msgid "This report could not be run for any of the selected events."
+msgstr ""
+"Diese Auswertung konnte für keine der ausgewählten Veranstaltungen ausgeführt"
+" werden."
+
+#: pretix_custom_reports/exporters.py:492
+msgid "Event slug"
+msgstr "Veranstaltungskürzel"
+
+#: pretix_custom_reports/exporters.py:492
+msgid "Event name"
+msgstr "Veranstaltungsname"
+
+#: pretix_custom_reports/exporters.py:527
+msgid ""
+"The report \"{identifier}\" cannot be exported for event {event}: the plugin "
+"is not enabled for this event."
+msgstr ""
+"Die Auswertung „{identifier}“ kann für die Veranstaltung {event} nicht "
+"exportiert werden: Das Plugin ist für diese Veranstaltung nicht aktiviert."
+
+#: pretix_custom_reports/exporters.py:546
+msgid ""
+"The report \"{identifier}\" does not exist in event {event}. It was probably "
+"deleted or renamed after this export was configured."
+msgstr ""
+"Die Auswertung „{identifier}“ existiert in der Veranstaltung {event} nicht. "
+"Sie wurde vermutlich gelöscht oder umbenannt, nachdem dieser Export "
+"eingerichtet wurde."
+
+#: pretix_custom_reports/exporters.py:563
+msgid "The report \"{name}\" cannot be run for event {event}: {error}"
+msgstr ""
+"Die Auswertung „{name}“ kann für die Veranstaltung {event} nicht ausgeführt "
+"werden: {error}"
+
+#: pretix_custom_reports/exporters.py:606
+msgid ""
+"No report was selected for this export, or the stored selection is not a "
+"valid report identifier."
+msgstr ""
+"Für diesen Export wurde keine Auswertung ausgewählt, oder die gespeicherte "
+"Auswahl ist kein gültiger Auswertungs-Bezeichner."
+
+#: pretix_custom_reports/exporters.py:620
+msgid "The stored value \"{value}\" for option \"{option}\" is not one of yes/no."
+msgstr ""
+"Der gespeicherte Wert „{value}“ für die Option „{option}“ ist weder yes noch "
+"no."
+
+#: pretix_custom_reports/exporters.py:644
+msgid ""
+"The stored row limit \"{value}\" is not a whole number between 1 and "
+"{maximum}."
+msgstr ""
+"Die gespeicherte Zeilengrenze „{value}“ ist keine ganze Zahl zwischen 1 und "
+"{maximum}."
+
+#: pretix_custom_reports/forms.py:160
+msgid ""
+"The selected base does not match the base inside the definition "
+"(%(definition_base)s)."
+msgstr ""
+"Die gewählte Basis passt nicht zur Basis innerhalb der Definition "
+"(%(definition_base)s)."
+
+#: pretix_custom_reports/models.py:169 pretix_custom_reports/views/api.py:187
+msgid "One row per order"
+msgstr "Eine Zeile je Bestellung"
+
+#: pretix_custom_reports/models.py:170 pretix_custom_reports/views/api.py:188
+msgid "One row per order position"
+msgstr "Eine Zeile je Bestellposition"
+
+#: pretix_custom_reports/models.py:181
+msgid "Event"
+msgstr "Veranstaltung"
+
+#: pretix_custom_reports/models.py:189
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:19
+msgid "Organizer"
+msgstr "Veranstalter"
+
+#: pretix_custom_reports/models.py:190
+msgid "Set instead of an event to make this report a template."
+msgstr ""
+"Statt einer Veranstaltung setzen, um aus dieser Auswertung eine Vorlage zu "
+"machen."
+
+#: pretix_custom_reports/models.py:195
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:35
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:16
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:39
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:31
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:24
+msgid "Name"
+msgstr "Name"
+
+#: pretix_custom_reports/models.py:200
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:42
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:22
+msgid "Description"
+msgstr "Beschreibung"
+
+#: pretix_custom_reports/models.py:205
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:40
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:32
+msgid "Internal identifier"
+msgstr "Interner Bezeichner"
+
+#: pretix_custom_reports/models.py:207
+msgid ""
+"Stable name used to reference this report from scheduled exports. If you "
+"leave this empty, we generate one for you."
+msgstr ""
+"Stabiler Name, über den terminierte Exporte diese Auswertung ansprechen. Wenn"
+" Sie das Feld leer lassen, erzeugen wir einen für Sie."
+
+#: pretix_custom_reports/models.py:214
+msgid ""
+"The identifier may only contain letters, numbers, dots, dashes, and "
+"underscores."
+msgstr ""
+"Der Bezeichner darf nur Buchstaben, Ziffern, Punkte, Bindestriche und "
+"Unterstriche enthalten."
+
+#: pretix_custom_reports/models.py:223
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:88
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:26
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:41
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:20
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:33
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:25
+msgid "Report base"
+msgstr "Auswertungsbasis"
+
+#: pretix_custom_reports/models.py:224
+msgid "Row granularity. Must match the base inside the definition."
+msgstr "Zeilen-Granularität. Muss zur Basis innerhalb der Definition passen."
+
+#: pretix_custom_reports/models.py:229
+msgid "Definition"
+msgstr "Definition"
+
+#: pretix_custom_reports/models.py:230
+msgid "Columns, filters, sorting and options as JSON."
+msgstr "Spalten, Filter, Sortierung und Optionen als JSON."
+
+#: pretix_custom_reports/models.py:234
+msgid "Schema version"
+msgstr "Schema-Version"
+
+#: pretix_custom_reports/models.py:236
+msgid ""
+"Denormalised copy of the schema_version inside the definition, which stays "
+"authoritative."
+msgstr ""
+"Denormalisierte Kopie der schema_version innerhalb der Definition, die "
+"maßgeblich bleibt."
+
+#: pretix_custom_reports/models.py:246
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:42
+msgid "Created from template"
+msgstr "Aus Vorlage erstellt"
+
+#: pretix_custom_reports/models.py:255
+msgid "Created by"
+msgstr "Erstellt von"
+
+#: pretix_custom_reports/models.py:264
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:11
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:13
+msgid "Reports"
+msgstr "Auswertungen"
+
+#: pretix_custom_reports/models.py:362
+msgid ""
+"The report base does not match the base inside the definition "
+"(%(definition_base)s)."
+msgstr ""
+"Die Auswertungsbasis passt nicht zur Basis innerhalb der Definition "
+"(%(definition_base)s)."
+
+#: pretix_custom_reports/models.py:380
+msgid ""
+"A report belongs either to an event or, as a template, to an organizer -- "
+"never to both and never to neither."
+msgstr ""
+"Eine Auswertung gehört entweder zu einer Veranstaltung oder, als Vorlage, zu "
+"einem Veranstalter – niemals zu beidem und niemals zu keinem von beiden."
+
+#: pretix_custom_reports/registry/annotations.py:175
+msgid "not paid"
+msgstr "nicht bezahlt"
+
+#: pretix_custom_reports/registry/annotations.py:176
+msgid "partially paid"
+msgstr "teilweise bezahlt"
+
+#: pretix_custom_reports/registry/annotations.py:177
+msgid "paid in full"
+msgstr "vollständig bezahlt"
+
+#: pretix_custom_reports/registry/annotations.py:178
+msgid "overpaid"
+msgstr "überzahlt"
+
+#: pretix_custom_reports/registry/computed.py:60
+msgid "Order status (text)"
+msgstr "Bestellstatus (Text)"
+
+#: pretix_custom_reports/registry/computed.py:72
+msgid ""
+"The order status spelled out, for the export. Filter on \"Order status\" "
+"instead -- its values are stable letters."
+msgstr ""
+"Der Zahlungsstatus ausgeschrieben, für den Export. Filtern Sie stattdessen "
+"über „Bestellstatus“ – dessen Werte sind stabile Buchstaben."
+
+#: pretix_custom_reports/registry/computed.py:78
+msgid "Payment status"
+msgstr "Zahlungsstatus"
+
+#: pretix_custom_reports/registry/computed.py:89
+msgid ""
+"Derived from the outstanding amount: overpaid, paid in full, partially paid "
+"or not paid. A canceled order counts as paid in full because it owes nothing."
+msgstr ""
+"Abgeleitet aus dem offenen Betrag: überzahlt, vollständig bezahlt, teilweise "
+"bezahlt oder nicht bezahlt. Eine stornierte Bestellung gilt als vollständig "
+"bezahlt, weil sie nichts mehr schuldet."
+
+#: pretix_custom_reports/registry/core.py:149
+msgid "Order code"
+msgstr "Bestellnummer"
+
+#: pretix_custom_reports/registry/core.py:157
+msgid "Order status"
+msgstr "Bestellstatus"
+
+#: pretix_custom_reports/registry/core.py:163
+msgid "n = pending, p = paid, e = expired, c = canceled."
+msgstr "n = ausstehend, p = bezahlt, e = abgelaufen, c = storniert."
+
+#: pretix_custom_reports/registry/core.py:167
+msgid "Order date"
+msgstr "Bestelldatum"
+
+#: pretix_custom_reports/registry/core.py:175
+msgid "Payment deadline"
+msgstr "Zahlungsfrist"
+
+#: pretix_custom_reports/registry/core.py:183
+msgid "Cancellation date"
+msgstr "Stornodatum"
+
+#: pretix_custom_reports/registry/core.py:191
+msgid "Last modified"
+msgstr "Zuletzt geändert"
+
+#: pretix_custom_reports/registry/core.py:199
+msgid "Follow-up date"
+msgstr "Datum zur Wiedervorlage"
+
+#: pretix_custom_reports/registry/core.py:206
+msgid "E-mail"
+msgstr "E-Mail"
+
+#: pretix_custom_reports/registry/core.py:208
+msgid "Phone"
+msgstr "Telefon"
+
+#: pretix_custom_reports/registry/core.py:211
+msgid "Language"
+msgstr "Sprache"
+
+#: pretix_custom_reports/registry/core.py:220
+msgid "Sales channel"
+msgstr "Verkaufskanal"
+
+#: pretix_custom_reports/registry/core.py:231
+msgid "Order total"
+msgstr "Gesamtbetrag"
+
+#: pretix_custom_reports/registry/core.py:239
+msgid "Test mode"
+msgstr "Testmodus"
+
+#: pretix_custom_reports/registry/core.py:247
+msgid "Approval required"
+msgstr "Freigabe erforderlich"
+
+#: pretix_custom_reports/registry/core.py:255
+msgid "Valid although unpaid"
+msgstr "Gültig trotz offener Zahlung"
+
+#: pretix_custom_reports/registry/core.py:263
+msgid "Requires attention at check-in"
+msgstr "Benötigt besondere Behandlung beim Check-in"
+
+#: pretix_custom_reports/registry/core.py:271
+msgid "Check-in note"
+msgstr "Check-in-Hinweis"
+
+#: pretix_custom_reports/registry/core.py:280
+msgid "Internal comment"
+msgstr "Interner Kommentar"
+
+#: pretix_custom_reports/registry/core.py:294
+msgid "Invoice name"
+msgstr "Name (Rechnungsadresse)"
+
+#: pretix_custom_reports/registry/core.py:295
+msgid "Company"
+msgstr "Firma"
+
+#: pretix_custom_reports/registry/core.py:296
+msgid "Street"
+msgstr "Straße"
+
+#: pretix_custom_reports/registry/core.py:297
+msgid "ZIP code"
+msgstr "Postleitzahl"
+
+#: pretix_custom_reports/registry/core.py:298
+msgid "City"
+msgstr "Stadt"
+
+#: pretix_custom_reports/registry/core.py:299
+#: pretix_custom_reports/views/api.py:272
+msgid "Country"
+msgstr "Land"
+
+#: pretix_custom_reports/registry/core.py:300
+msgid "State"
+msgstr "Bundesland"
+
+#: pretix_custom_reports/registry/core.py:301
+msgid "VAT ID"
+msgstr "USt-ID-Nr."
+
+#: pretix_custom_reports/registry/core.py:302
+msgid "Business customer"
+msgstr "Firmenkunde"
+
+#: pretix_custom_reports/registry/core.py:305
+msgid "Internal reference"
+msgstr "Interne Referenz"
+
+#: pretix_custom_reports/registry/core.py:309
+msgid "Beneficiary"
+msgstr "Leistungsempfänger"
+
+#: pretix_custom_reports/registry/core.py:310
+msgid "Custom address field"
+msgstr "Zusätzliches Adressfeld"
+
+#: pretix_custom_reports/registry/core.py:333
+msgid "Position number"
+msgstr "Positionsnummer"
+
+#: pretix_custom_reports/registry/core.py:334
+msgid "Price (gross)"
+msgstr "Preis (brutto)"
+
+#: pretix_custom_reports/registry/core.py:335
+msgid "Tax rate"
+msgstr "Steuersatz"
+
+#: pretix_custom_reports/registry/core.py:336
+msgid "Tax amount"
+msgstr "Steuerbetrag"
+
+#: pretix_custom_reports/registry/core.py:337
+msgid "Tax code"
+msgstr "Steuer-Code"
+
+#: pretix_custom_reports/registry/core.py:338
+msgid "Attendee name"
+msgstr "Name Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:339
+msgid "Attendee e-mail"
+msgstr "E-Mail Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:340
+msgid "Attendee company"
+msgstr "Firma Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:341
+msgid "Attendee street"
+msgstr "Straße Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:342
+msgid "Attendee ZIP code"
+msgstr "Postleitzahl Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:343
+msgid "Attendee city"
+msgstr "Stadt Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:344
+msgid "Attendee country"
+msgstr "Land Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:345
+msgid "Attendee state"
+msgstr "Bundesland Teilnehmer*in"
+
+#: pretix_custom_reports/registry/core.py:346
+msgid "Position canceled"
+msgstr "Position storniert"
+
+#: pretix_custom_reports/registry/core.py:347
+msgid "Part of a bundle"
+msgstr "Teil eines Bundles"
+
+#: pretix_custom_reports/registry/core.py:350
+msgid "Attendee ID (pseudonymised)"
+msgstr "Teilnehmer*innen-ID (pseudonymisiert)"
+
+#: pretix_custom_reports/registry/core.py:354
+msgid "Ticket valid from"
+msgstr "Ticket gültig ab"
+
+#: pretix_custom_reports/registry/core.py:355
+msgid "Ticket valid until"
+msgstr "Ticket gültig bis"
+
+#: pretix_custom_reports/registry/core.py:358
+msgid "Add-on to position number"
+msgstr "Zusatz-Produkt zu Positionsnummer"
+
+#: pretix_custom_reports/registry/core.py:385
+#: pretix_custom_reports/registry/groups.py:69
+#: pretix_custom_reports/views/api.py:176
+msgid "Product"
+msgstr "Produkt"
+
+#: pretix_custom_reports/registry/core.py:394
+msgid "Product (internal name)"
+msgstr "Produkt (interner Name)"
+
+#: pretix_custom_reports/registry/core.py:403
+msgid "Product category"
+msgstr "Produktkategorie"
+
+#: pretix_custom_reports/registry/core.py:412
+msgid "Admission product"
+msgstr "Zutrittsprodukt"
+
+#: pretix_custom_reports/registry/core.py:421
+msgid "Product default price"
+msgstr "Standardpreis des Produkts"
+
+#: pretix_custom_reports/registry/core.py:430
+msgid "Product variation"
+msgstr "Variante"
+
+#: pretix_custom_reports/registry/core.py:439
+#: pretix_custom_reports/registry/groups.py:70
+#: pretix_custom_reports/views/api.py:177
+#: pretix_custom_reports/views/api.py:266
+msgid "Date"
+msgstr "Termin"
+
+#: pretix_custom_reports/registry/core.py:448
+msgid "Date start"
+msgstr "Termin-Beginn"
+
+#: pretix_custom_reports/registry/core.py:457
+msgid "Date end"
+msgstr "Termin-Ende"
+
+#: pretix_custom_reports/registry/core.py:466
+msgid "Date admission"
+msgstr "Termin-Einlass"
+
+#: pretix_custom_reports/registry/core.py:475
+msgid "Date location"
+msgstr "Termin-Ort"
+
+#: pretix_custom_reports/registry/core.py:484
+msgid "Seat zone"
+msgstr "Sitzplatz-Bereich"
+
+#: pretix_custom_reports/registry/core.py:493
+msgid "Seat row"
+msgstr "Sitzplatz-Reihe"
+
+#: pretix_custom_reports/registry/core.py:502
+msgid "Seat number"
+msgstr "Sitzplatz-Nummer"
+
+#: pretix_custom_reports/registry/core.py:511
+msgid "Seat ID"
+msgstr "Sitzplatz-ID"
+
+#: pretix_custom_reports/registry/core.py:520
+msgid "Voucher code"
+msgstr "Gutscheincode"
+
+#: pretix_custom_reports/registry/core.py:529
+msgid "Voucher tag"
+msgstr "Gutschein-Tag"
+
+#: pretix_custom_reports/registry/core.py:538
+msgid "Voucher comment"
+msgstr "Gutschein-Kommentar"
+
+#: pretix_custom_reports/registry/core.py:547
+#: pretix_custom_reports/registry/groups.py:73
+msgid "Discount"
+msgstr "Rabatt"
+
+#: pretix_custom_reports/registry/core.py:763
+msgid "Outstanding amount"
+msgstr "Offener Betrag"
+
+#: pretix_custom_reports/registry/core.py:770
+msgid ""
+"Order total minus confirmed payments plus refunds, calculated the same way "
+"pretix calculates it. A canceled order owes nothing."
+msgstr ""
+"Gesamtbetrag abzüglich bestätigter Zahlungen zuzüglich Erstattungen, genauso "
+"berechnet wie pretix es berechnet. Eine stornierte Bestellung schuldet "
+"nichts."
+
+#: pretix_custom_reports/registry/core.py:776
+msgid "Number of positions"
+msgstr "Anzahl Positionen"
+
+#: pretix_custom_reports/registry/core.py:782
+msgid "Canceled positions are not counted."
+msgstr "Stornierte Positionen werden nicht mitgezählt."
+
+#: pretix_custom_reports/registry/core.py:786
+msgid "Order code with event slug"
+msgstr "Bestellnummer mit Veranstaltungskürzel"
+
+#: pretix_custom_reports/registry/core.py:792
+msgid "Unique across all events of the organizer."
+msgstr "Eindeutig über alle Veranstaltungen des Veranstalters hinweg."
+
+#: pretix_custom_reports/registry/core.py:796
+msgid "Amount paid"
+msgstr "Bezahlter Betrag"
+
+#: pretix_custom_reports/registry/core.py:803
+msgid ""
+"Sum of all payments pretix counts as received, i.e. in state confirmed or "
+"refunded."
+msgstr ""
+"Summe aller Zahlungen, die pretix als eingegangen zählt, also im Zustand "
+"bestätigt oder erstattet."
+
+#: pretix_custom_reports/registry/core.py:810
+msgid "Amount refunded"
+msgstr "Erstatteter Betrag"
+
+#: pretix_custom_reports/registry/core.py:817
+msgid ""
+"Sum of all refunds pretix counts, i.e. in state done, in transit or created."
+msgstr ""
+"Summe aller Erstattungen, die pretix zählt, also im Zustand erledigt, "
+"unterwegs oder angelegt."
+
+#: pretix_custom_reports/registry/core.py:824
+msgid "Last payment"
+msgstr "Letzte Zahlung"
+
+#: pretix_custom_reports/registry/core.py:833
+msgid "Payment providers"
+msgstr "Zahlungsmethoden"
+
+#: pretix_custom_reports/registry/core.py:843
+msgid "Number of check-ins"
+msgstr "Anzahl Check-ins"
+
+#: pretix_custom_reports/registry/core.py:850
+msgid ""
+"Successful entry scans in this event only. Exit scans and failed scans are "
+"not counted."
+msgstr ""
+"Erfolgreiche Eintritts-Scans nur in dieser Veranstaltung. Austritts-Scans und"
+" fehlgeschlagene Scans werden nicht gezählt."
+
+#: pretix_custom_reports/registry/core.py:856
+msgid "First check-in"
+msgstr "Erster Check-in"
+
+#: pretix_custom_reports/registry/core.py:865
+msgid "Last check-in"
+msgstr "Letzter Check-in"
+
+#: pretix_custom_reports/registry/core.py:879
+msgid "Position code"
+msgstr "Positionscode"
+
+#: pretix_custom_reports/registry/core.py:885
+msgid "Order code and position number, e.g. ABCDE-1."
+msgstr "Bestellnummer und Positionsnummer, z. B. ABCDE-1."
+
+#: pretix_custom_reports/registry/core.py:889
+msgid "Price (net)"
+msgstr "Preis (netto)"
+
+#: pretix_custom_reports/registry/core.py:895
+msgid "Gross price minus tax amount."
+msgstr "Bruttopreis abzüglich Steuerbetrag."
+
+#: pretix_custom_reports/registry/core.py:899
+#: pretix_custom_reports/registry/groups.py:71
+#: pretix_custom_reports/views/api.py:178
+msgid "Seat"
+msgstr "Sitzplatz"
+
+#: pretix_custom_reports/registry/core.py:906
+msgid ""
+"Full seat name as pretix displays it. Only available as a column: it is "
+"assembled in Python, so it cannot be filtered or sorted. Use seat zone, row "
+"and number for that."
+msgstr ""
+"Vollständiger Sitzplatzname, so wie pretix ihn anzeigt. Nur als Spalte "
+"verfügbar: Er wird in Python zusammengesetzt und kann deshalb weder gefiltert"
+" noch sortiert werden. Verwenden Sie dafür Sitzplatz-Bereich, -Reihe und "
+"-Nummer."
+
+#: pretix_custom_reports/registry/groups.py:64
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:143
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:208
+#: pretix_custom_reports/views/api.py:173
+msgid "Order"
+msgstr "Bestellung"
+
+#: pretix_custom_reports/registry/groups.py:65
+#: pretix_custom_reports/views/api.py:180
+msgid "Payments and refunds"
+msgstr "Zahlungen und Erstattungen"
+
+#: pretix_custom_reports/registry/groups.py:66
+#: pretix_custom_reports/views/api.py:181
+msgid "Check-in"
+msgstr "Check-in"
+
+#: pretix_custom_reports/registry/groups.py:67
+#: pretix_custom_reports/views/api.py:175
+msgid "Invoice address"
+msgstr "Rechnungsadresse"
+
+#: pretix_custom_reports/registry/groups.py:68
+msgid "Position"
+msgstr "Position"
+
+#: pretix_custom_reports/registry/groups.py:72
+#: pretix_custom_reports/views/api.py:179
+msgid "Voucher"
+msgstr "Gutschein"
+
+#: pretix_custom_reports/registry/groups.py:74
+#: pretix_custom_reports/views/api.py:182
+msgid "Questions"
+msgstr "Fragen"
+
+#: pretix_custom_reports/registry/groups.py:75
+msgid "Meta data"
+msgstr "Metadaten"
+
+#: pretix_custom_reports/registry/groups.py:76
+msgid "Calculated"
+msgstr "Berechnet"
+
+#: pretix_custom_reports/registry/meta.py:167
+msgid "Meta data of the event, identical for every row of this report."
+msgstr ""
+"Metadaten der Veranstaltung, für jede Zeile dieser Auswertung identisch."
+
+#: pretix_custom_reports/registry/questions.py:223
+msgid ""
+"pretix stores every answer as text. Comparisons on this field are therefore "
+"textual, not numeric."
+msgstr ""
+"pretix speichert jede Antwort als Text. Vergleiche auf diesem Feld sind "
+"deshalb textuell, nicht numerisch."
+
+#: pretix_custom_reports/registry/questions.py:228
+msgid ""
+"Answers belong to a position. On an order-based report this column needs an "
+"aggregate, and answers cannot be filtered -- build the report on base \"order"
+" position\" for that."
+msgstr ""
+"Antworten gehören zu einer Position. In einer Auswertung auf Basis der "
+"Bestellung braucht diese Spalte eine Aggregatfunktion, und Antworten können "
+"nicht gefiltert werden – bauen Sie die Auswertung dafür auf der Basis "
+"„Bestellposition“ auf."
+
+#: pretix_custom_reports/registry/questions.py:344
+msgid "Age at the event date: {question}"
+msgstr "Alter am Veranstaltungsdatum: {question}"
+
+#: pretix_custom_reports/registry/questions.py:360
+msgid ""
+"Full years between the answer to this date question and the start of the "
+"event, calculated in the database."
+msgstr ""
+"Volle Jahre zwischen der Antwort auf diese Datumsfrage und dem Beginn der "
+"Veranstaltung, in der Datenbank berechnet."
+
+#: pretix_custom_reports/signals.py:117
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:10
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:12
+msgid "Report templates"
+msgstr "Auswertungs-Vorlagen"
+
+#: pretix_custom_reports/signals.py:180 pretix_custom_reports/views/crud.py:198
+msgid "The report has been created."
+msgstr "Die Auswertung wurde angelegt."
+
+#: pretix_custom_reports/signals.py:181
+msgid "The report has been changed."
+msgstr "Die Auswertung wurde geändert."
+
+#: pretix_custom_reports/signals.py:182 pretix_custom_reports/views/crud.py:262
+msgid "The report has been deleted."
+msgstr "Die Auswertung wurde gelöscht."
+
+#: pretix_custom_reports/signals.py:183
+msgid "The report has been run."
+msgstr "Die Auswertung wurde ausgeführt."
+
+#: pretix_custom_reports/signals.py:184
+msgid "The report has been exported."
+msgstr "Die Auswertung wurde exportiert."
+
+#: pretix_custom_reports/signals.py:185
+#: pretix_custom_reports/views/portability.py:270
+msgid "The report has been imported."
+msgstr "Die Auswertung wurde importiert."
+
+#: pretix_custom_reports/signals.py:187
+msgid "A report template has been applied."
+msgstr "Eine Auswertungs-Vorlage wurde angewendet."
+
+#: pretix_custom_reports/signals.py:212
+msgid "Report {val}"
+msgstr "Auswertung {val}"
+
+#: pretix_custom_reports/signals.py:218
+msgid "(deleted)"
+msgstr "(gelöscht)"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:13
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:22
+msgid "Report editor"
+msgstr "Auswertungs-Editor"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:68
+#: pretix_custom_reports/templates/pretix_custom_reports/report_form.html:38
+#: pretix_custom_reports/templates/pretix_custom_reports/template_form.html:38
+msgid "Save"
+msgstr "Speichern"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:72
+msgid ""
+"You cannot save this report: either you may view reports but not change them,"
+" or the report views are not reachable in this installation. Copy the JSON "
+"from the panel at the bottom in the meantime."
+msgstr ""
+"Sie können diese Auswertung nicht speichern: Entweder dürfen Sie Auswertungen"
+" ansehen, aber nicht ändern, oder die Auswertungs-Ansichten sind in dieser "
+"Installation nicht erreichbar. Kopieren Sie sich solange das JSON aus dem "
+"Feld ganz unten."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:98
+msgid "Field library"
+msgstr "Feldbibliothek"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:103
+msgid "Search fields"
+msgstr "Felder durchsuchen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:106
+msgid "Search fields …"
+msgstr "Felder durchsuchen …"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:111
+msgid "Also show fields that need the other report base"
+msgstr "Auch Felder anzeigen, die die andere Auswertungsbasis brauchen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:115
+msgid ""
+"Drag a field into the column list, or use the buttons to add it as a column, "
+"filter or sorting stage."
+msgstr ""
+"Ziehen Sie ein Feld in die Spaltenliste, oder fügen Sie es über die Knöpfe "
+"als Spalte, Filter oder Sortierstufe hinzu."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:130
+msgid "Columns"
+msgstr "Spalten"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:136
+msgid "No columns yet. Drag fields here from the field library."
+msgstr "Noch keine Spalten. Ziehen Sie Felder aus der Feldbibliothek hierher."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:144
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:209
+msgid "Field"
+msgstr "Feld"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:145
+msgid "Column title"
+msgstr "Spaltenüberschrift"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:146
+msgid "Aggregate"
+msgstr "Aggregatfunktion"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:147
+msgid "Format"
+msgstr "Format"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:148
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:211
+msgid "Actions"
+msgstr "Aktionen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:158
+msgid "Filters"
+msgstr "Filter"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:162
+msgid "A row is included when it matches"
+msgstr "Eine Zeile wird aufgenommen, wenn sie erfüllt"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:166
+msgid "No filters: the report covers every order of this event."
+msgstr ""
+"Keine Filter: Die Auswertung umfasst jede Bestellung dieser Veranstaltung."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:174
+#: pretix_custom_reports/views/editor.py:223
+msgid "Add condition"
+msgstr "Bedingung hinzufügen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:178
+msgid "Add group"
+msgstr "Gruppe hinzufügen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:182
+msgid ""
+"One level of grouping is available: conditions at the top level are combined "
+"with each other, and each group is combined as one condition."
+msgstr ""
+"Eine Verschachtelungsebene ist möglich: Bedingungen auf der obersten Ebene "
+"werden miteinander verknüpft, und jede Gruppe zählt als eine Bedingung."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:194
+msgid "Sorting"
+msgstr "Sortierung"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:200
+msgid "No sorting: rows come in whatever order the database returns them."
+msgstr ""
+"Keine Sortierung: Die Zeilen kommen in der Reihenfolge, die die Datenbank "
+"liefert."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:210
+msgid "Direction"
+msgstr "Richtung"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:218
+msgid "Add sorting stage"
+msgstr "Sortierstufe hinzufügen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:225
+msgid "Options"
+msgstr "Optionen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:234
+msgid "Only meaningful for reports with one row per order position."
+msgstr "Nur sinnvoll für Auswertungen mit einer Zeile je Bestellposition."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:250
+msgid "no limit"
+msgstr "keine Grenze"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:261
+msgid "Live preview"
+msgstr "Live-Vorschau"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:265
+msgid "refresh automatically"
+msgstr "automatisch aktualisieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:269
+msgid "Refresh"
+msgstr "Aktualisieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:283
+msgid "Definition as JSON"
+msgstr "Definition als JSON"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:287
+msgid ""
+"This is exactly what gets stored. You can paste a definition here and apply "
+"it."
+msgstr ""
+"Genau das wird gespeichert. Sie können hier eine Definition einfügen und "
+"übernehmen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:295
+msgid "Apply JSON"
+msgstr "JSON übernehmen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:313
+msgid "Export as a file"
+msgstr "Als Datei exportieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:320
+msgid "Import from a file"
+msgstr "Aus Datei importieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:327
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:31
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:119
+msgid "Load a template"
+msgstr "Vorlage laden"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:333
+msgid ""
+"The exported file contains the saved report, not the changes you have not "
+"saved yet."
+msgstr ""
+"Die exportierte Datei enthält die gespeicherte Auswertung, nicht die "
+"Änderungen, die Sie noch nicht gespeichert haben."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:338
+msgid "Save this report to be able to export it as a file."
+msgstr ""
+"Speichern Sie diese Auswertung, um sie als Datei exportieren zu können."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/editor.html:343
+msgid ""
+"Importing a file or loading a template opens a separate page and replaces "
+"what you see here."
+msgstr ""
+"Der Import einer Datei oder das Laden einer Vorlage öffnet eine eigene Seite "
+"und ersetzt, was Sie hier sehen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:11
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:13
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:9
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:11
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:27
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:115
+msgid "Import a report"
+msgstr "Auswertung importieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:18
+msgid "Exported from"
+msgstr "Exportiert aus"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:21
+msgid "Exported at"
+msgstr "Exportiert am"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:24
+msgid "Created with"
+msgstr "Erstellt mit"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:39
+msgid "One reference cannot be resolved in this event."
+msgid_plural "%(counter)s references cannot be resolved in this event."
+msgstr[0] "Eine Referenz kann in dieser Veranstaltung nicht aufgelöst werden."
+msgstr[1] ""
+"%(counter)s Referenzen können in dieser Veranstaltung nicht aufgelöst werden."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:48
+msgid "Do not import. I will fix the file or the event first."
+msgstr ""
+"Nicht importieren. Ich korrigiere zuerst die Datei oder die Veranstaltung."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:54
+msgid ""
+"Import without them. The columns, filters and sorting stages listed above "
+"will be removed."
+msgstr ""
+"Ohne sie importieren. Die oben aufgeführten Spalten, Filter und Sortierstufen"
+" werden entfernt."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:63
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:48
+#: pretix_custom_reports/templates/pretix_custom_reports/report_confirm_delete.html:25
+#: pretix_custom_reports/templates/pretix_custom_reports/report_form.html:35
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:59
+#: pretix_custom_reports/templates/pretix_custom_reports/template_confirm_delete.html:25
+#: pretix_custom_reports/templates/pretix_custom_reports/template_form.html:35
+#: pretix_custom_reports/views/editor.py:249
+msgid "Cancel"
+msgstr "Abbrechen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:65
+msgid "Import this report"
+msgstr "Diese Auswertung importieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_confirm.html:65
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:61
+msgid "Apply my choice"
+msgstr "Auswahl übernehmen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:15
+msgid "This file is not a valid report definition:"
+msgstr "Diese Datei ist keine gültige Auswertungs-Definition:"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:27
+msgid "Report file"
+msgstr "Auswertungs-Datei"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:31
+msgid "A JSON file exported from this or another event, at most %(kib)s KiB."
+msgstr ""
+"Eine JSON-Datei, die aus dieser oder einer anderen Veranstaltung exportiert "
+"wurde, höchstens %(kib)s KiB groß."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:38
+msgid "or paste the definition"
+msgstr "oder die Definition einfügen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:43
+msgid ""
+"Both an exported file and a plain definition from the editor's JSON panel are"
+" accepted."
+msgstr ""
+"Sowohl eine exportierte Datei als auch eine reine Definition aus dem JSON-"
+"Feld des Editors werden angenommen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/import_form.html:49
+msgid "Check this file"
+msgstr "Diese Datei prüfen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/placeholder.html:7
+msgid "Still empty. Custom reports are not implemented yet."
+msgstr "Noch leer. Eigene Auswertungen sind noch nicht umgesetzt."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/preview_table.html:14
+msgid "Row"
+msgstr "Zeile"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/preview_table.html:33
+msgid "empty"
+msgstr "leer"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/preview_table.html:40
+msgid "No order matches this report."
+msgstr "Keine Bestellung passt zu dieser Auswertung."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/preview_table.html:48
+msgid "%(counter)s row shown."
+msgid_plural "%(counter)s rows shown."
+msgstr[0] "%(counter)s Zeile angezeigt."
+msgstr[1] "%(counter)s Zeilen angezeigt."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/preview_table.html:54
+msgid "%(shown)s of %(total)s rows shown."
+msgstr "%(shown)s von %(total)s Zeilen angezeigt."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/preview_table.html:59
+msgid "The preview never loads more than %(limit)s rows."
+msgstr "Die Vorschau lädt nie mehr als %(limit)s Zeilen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/preview_table.html:65
+msgid "Add a column to see a preview."
+msgstr "Fügen Sie eine Spalte hinzu, um eine Vorschau zu sehen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_confirm_delete.html:6
+#: pretix_custom_reports/templates/pretix_custom_reports/report_confirm_delete.html:8
+msgid "Delete report"
+msgstr "Auswertung löschen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_confirm_delete.html:12
+msgid "Are you sure you want to delete the report <strong>%(name)s</strong>?"
+msgstr "Möchten Sie die Auswertung <strong>%(name)s</strong> wirklich löschen?"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_confirm_delete.html:17
+msgid ""
+"Scheduled exports that reference the identifier <code>%(identifier)s</code> "
+"will start failing."
+msgstr ""
+"Terminierte Exporte, die den Bezeichner <code>%(identifier)s</code> "
+"verwenden, werden ab dann fehlschlagen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_confirm_delete.html:28
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:88
+#: pretix_custom_reports/templates/pretix_custom_reports/template_confirm_delete.html:27
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:60
+msgid "Delete"
+msgstr "Löschen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_form.html:12
+msgid "Change report"
+msgstr "Auswertung ändern"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_form.html:12
+msgid "Create report"
+msgstr "Auswertung anlegen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_form.html:17
+msgid "Report: %(name)s"
+msgstr "Auswertung: %(name)s"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_form.html:21
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:19
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:109
+msgid "Create a new report"
+msgstr "Neue Auswertung anlegen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:72
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:56
+msgid "Export"
+msgstr "Exportieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:77
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:52
+msgid "Edit"
+msgstr "Bearbeiten"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:83
+msgid "Duplicate"
+msgstr "Duplizieren"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/report_list.html:102
+msgid "You have not created any reports yet."
+msgstr "Sie haben noch keine Auswertungen angelegt."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:13
+msgid "This report cannot be stored in this event:"
+msgstr ""
+"Diese Auswertung kann in dieser Veranstaltung nicht gespeichert werden:"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:23
+msgid ""
+"%(found)s reference(s) found, %(mapped)s matched to a different object, "
+"%(missing)s not found."
+msgstr ""
+"%(found)s Referenz(en) gefunden, %(mapped)s einem anderen Objekt zugeordnet, "
+"%(missing)s nicht gefunden."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:28
+msgid "%(ok)s of %(checked)s filter values exist in this event."
+msgstr ""
+"%(ok)s von %(checked)s Filterwerten existieren in dieser Veranstaltung."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:40
+msgid "Where"
+msgstr "Wo"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:41
+msgid "In the file"
+msgstr "In der Datei"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:42
+msgid "In this event"
+msgstr "In dieser Veranstaltung"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:43
+msgid "Result"
+msgstr "Ergebnis"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:67
+msgid "found"
+msgstr "gefunden"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:69
+msgid "matched"
+msgstr "zugeordnet"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:71
+msgid "not found"
+msgstr "nicht gefunden"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:73
+msgid "ambiguous"
+msgstr "mehrdeutig"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:75
+msgid "not verifiable"
+msgstr "nicht prüfbar"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/resolution_report.html:78
+msgid "will be removed"
+msgstr "wird entfernt"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:10
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:10
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:12
+msgid "Load a report template"
+msgstr "Auswertungs-Vorlage laden"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:13
+msgid "Load template: %(name)s"
+msgstr "Vorlage laden: %(name)s"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:35
+msgid "One reference of this template does not exist in this event."
+msgid_plural ""
+"%(counter)s references of this template do not exist in this event."
+msgstr[0] ""
+"Eine Referenz dieser Vorlage existiert in dieser Veranstaltung nicht."
+msgstr[1] ""
+"%(counter)s Referenzen dieser Vorlage existieren in dieser Veranstaltung "
+"nicht."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:44
+msgid "Do not load it. I will add the missing questions or products first."
+msgstr "Nicht laden. Ich lege zuerst die fehlenden Fragen oder Produkte an."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:50
+msgid ""
+"Load it without them. The entries listed above will be removed from the copy."
+msgstr ""
+"Ohne sie laden. Die oben aufgeführten Einträge werden aus der Kopie entfernt."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_apply.html:61
+msgid "Create the copy"
+msgstr "Kopie anlegen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_confirm_delete.html:6
+msgid "Delete template"
+msgstr "Vorlage löschen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_confirm_delete.html:8
+msgid "Delete report template"
+msgstr "Auswertungs-Vorlage löschen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_confirm_delete.html:12
+msgid "Are you sure you want to delete the template <strong>%(name)s</strong>?"
+msgstr "Möchten Sie die Vorlage <strong>%(name)s</strong> wirklich löschen?"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_confirm_delete.html:17
+msgid ""
+"Reports that were created from this template stay in their events. They only "
+"lose the note that says where they came from."
+msgstr ""
+"Auswertungen, die aus dieser Vorlage entstanden sind, bleiben in ihren "
+"Veranstaltungen. Sie verlieren nur den Hinweis darauf, woher sie stammen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_form.html:12
+msgid "Change template"
+msgstr "Vorlage ändern"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_form.html:12
+msgid "Create template"
+msgstr "Vorlage anlegen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_form.html:17
+msgid "Template: %(name)s"
+msgstr "Vorlage: %(name)s"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_form.html:21
+msgid "Create a new report template"
+msgstr "Neue Auswertungs-Vorlage anlegen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:14
+msgid ""
+"Templates are report definitions kept at organizer level. Loading one in an "
+"event creates an editable copy; the template itself is not changed by that "
+"copy and does not change it later."
+msgstr ""
+"Vorlagen sind Auswertungs-Definitionen auf Veranstalter-Ebene. Wer eine davon"
+" in einer Veranstaltung lädt, bekommt eine bearbeitbare Kopie; die Vorlage "
+"selbst wird durch diese Kopie nicht verändert und verändert sie später auch "
+"nicht."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:23
+msgid "Create a new template"
+msgstr "Neue Vorlage anlegen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:34
+msgid "Used in events"
+msgstr "Verwendet in Veranstaltungen"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_list.html:72
+msgid "There are no report templates yet."
+msgstr "Es gibt noch keine Auswertungs-Vorlagen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:14
+msgid ""
+"Loading a template creates a copy in this event that you can edit freely. The"
+" template itself is not affected."
+msgstr ""
+"Beim Laden einer Vorlage entsteht in dieser Veranstaltung eine Kopie, die Sie"
+" frei bearbeiten können. Die Vorlage selbst bleibt davon unberührt."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:42
+msgid "Load"
+msgstr "Laden"
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:53
+msgid "This organizer has no report templates yet."
+msgstr "Dieser Veranstalter hat noch keine Auswertungs-Vorlagen."
+
+#: pretix_custom_reports/templates/pretix_custom_reports/template_pick.html:57
+msgid "Back"
+msgstr "Zurück"
+
+#: pretix_custom_reports/views/api.py:174
+msgid "Order position"
+msgstr "Bestellposition"
+
+#: pretix_custom_reports/views/api.py:183
+msgid "Meta properties"
+msgstr "Meta-Eigenschaften"
+
+#: pretix_custom_reports/views/api.py:193
+msgid ""
+"Order level. Fields that belong to a single position (product, seat, answers)"
+" are only available as an aggregate here."
+msgstr ""
+"Bestellebene. Felder, die zu einer einzelnen Position gehören (Produkt, "
+"Sitzplatz, Antworten), sind hier nur als Aggregat verfügbar."
+
+#: pretix_custom_reports/views/api.py:197
+msgid ""
+"Position level, the classic attendee list. Order fields repeat on every "
+"position of the same order."
+msgstr ""
+"Positionsebene, die klassische Teilnehmendenliste. Bestellfelder wiederholen "
+"sich auf jeder Position derselben Bestellung."
+
+#: pretix_custom_reports/views/api.py:205
+msgid "is"
+msgstr "ist"
+
+#: pretix_custom_reports/views/api.py:206
+msgid "is not"
+msgstr "ist nicht"
+
+#: pretix_custom_reports/views/api.py:207
+msgid "contains"
+msgstr "enthält"
+
+#: pretix_custom_reports/views/api.py:208
+msgid "does not contain"
+msgstr "enthält nicht"
+
+#: pretix_custom_reports/views/api.py:209
+msgid "starts with"
+msgstr "beginnt mit"
+
+#: pretix_custom_reports/views/api.py:210
+msgid "ends with"
+msgstr "endet mit"
+
+#: pretix_custom_reports/views/api.py:211
+msgid "is empty"
+msgstr "ist leer"
+
+#: pretix_custom_reports/views/api.py:212
+msgid "is not empty"
+msgstr "ist nicht leer"
+
+#: pretix_custom_reports/views/api.py:213
+msgid "is one of"
+msgstr "ist eines von"
+
+#: pretix_custom_reports/views/api.py:214
+msgid "is none of"
+msgstr "ist keines von"
+
+#: pretix_custom_reports/views/api.py:215
+msgid "is less than"
+msgstr "ist kleiner als"
+
+#: pretix_custom_reports/views/api.py:216
+msgid "is at most"
+msgstr "ist höchstens"
+
+#: pretix_custom_reports/views/api.py:217
+msgid "is greater than"
+msgstr "ist größer als"
+
+#: pretix_custom_reports/views/api.py:218
+msgid "is at least"
+msgstr "ist mindestens"
+
+#: pretix_custom_reports/views/api.py:219
+msgid "is between"
+msgstr "liegt zwischen"
+
+#: pretix_custom_reports/views/api.py:220
+msgid "is today"
+msgstr "ist heute"
+
+#: pretix_custom_reports/views/api.py:221
+msgid "is within the last … days"
+msgstr "liegt in den letzten … Tagen"
+
+#: pretix_custom_reports/views/api.py:222
+msgid "is within the next … days"
+msgstr "liegt in den nächsten … Tagen"
+
+#: pretix_custom_reports/views/api.py:223
+msgid "is in the current month"
+msgstr "liegt im laufenden Monat"
+
+#: pretix_custom_reports/views/api.py:224
+msgid "is in the current year"
+msgstr "liegt im laufenden Jahr"
+
+#: pretix_custom_reports/views/api.py:225
+msgid "is after the event start"
+msgstr "liegt nach dem Veranstaltungsbeginn"
+
+#: pretix_custom_reports/views/api.py:229
+msgid "Count"
+msgstr "Anzahl"
+
+#: pretix_custom_reports/views/api.py:230
+msgid "Count (distinct)"
+msgstr "Anzahl (verschiedene)"
+
+#: pretix_custom_reports/views/api.py:231
+msgid "Sum"
+msgstr "Summe"
+
+#: pretix_custom_reports/views/api.py:232
+msgid "Minimum"
+msgstr "Minimum"
+
+#: pretix_custom_reports/views/api.py:233
+msgid "Maximum"
+msgstr "Maximum"
+
+#: pretix_custom_reports/views/api.py:234
+msgid "Average"
+msgstr "Durchschnitt"
+
+#: pretix_custom_reports/views/api.py:235
+msgid "List, joined"
+msgstr "Liste, zusammengefügt"
+
+#: pretix_custom_reports/views/api.py:239
+msgid "Short"
+msgstr "Kurz"
+
+#: pretix_custom_reports/views/api.py:240
+msgid "Medium"
+msgstr "Mittel"
+
+#: pretix_custom_reports/views/api.py:241
+msgid "Long"
+msgstr "Lang"
+
+#: pretix_custom_reports/views/api.py:242
+msgid "ISO 8601"
+msgstr "ISO 8601"
+
+#: pretix_custom_reports/views/api.py:243
+msgid "Date only"
+msgstr "Nur Datum"
+
+#: pretix_custom_reports/views/api.py:244
+msgid "Time only"
+msgstr "Nur Uhrzeit"
+
+#: pretix_custom_reports/views/api.py:248
+msgid "Plain number"
+msgstr "Reine Zahl"
+
+#: pretix_custom_reports/views/api.py:249
+msgid "Localized"
+msgstr "Lokalisiert"
+
+#: pretix_custom_reports/views/api.py:250
+msgid "With currency"
+msgstr "Mit Währung"
+
+#: pretix_custom_reports/views/api.py:254
+msgid "Yes / No"
+msgstr "Ja / Nein"
+
+#: pretix_custom_reports/views/api.py:255
+msgid "true / false"
+msgstr "true / false"
+
+#: pretix_custom_reports/views/api.py:256
+msgid "1 / 0"
+msgstr "1 / 0"
+
+#: pretix_custom_reports/views/api.py:260
+msgid "Text"
+msgstr "Text"
+
+#: pretix_custom_reports/views/api.py:261
+msgid "Long text"
+msgstr "Langer Text"
+
+#: pretix_custom_reports/views/api.py:262
+msgid "Whole number"
+msgstr "Ganze Zahl"
+
+#: pretix_custom_reports/views/api.py:263
+msgid "Decimal number"
+msgstr "Dezimalzahl"
+
+#: pretix_custom_reports/views/api.py:264
+msgid "Amount"
+msgstr "Betrag"
+
+#: pretix_custom_reports/views/api.py:265
+msgid "Yes/No"
+msgstr "Ja/Nein"
+
+#: pretix_custom_reports/views/api.py:267
+msgid "Time"
+msgstr "Uhrzeit"
+
+#: pretix_custom_reports/views/api.py:268
+msgid "Date and time"
+msgstr "Datum und Uhrzeit"
+
+#: pretix_custom_reports/views/api.py:269
+msgid "Choice"
+msgstr "Auswahl"
+
+#: pretix_custom_reports/views/api.py:270
+msgid "Multiple choice"
+msgstr "Mehrfachauswahl"
+
+#: pretix_custom_reports/views/api.py:271
+msgid "Translated text"
+msgstr "Übersetzter Text"
+
+#: pretix_custom_reports/views/api.py:273
+msgid "E-mail address"
+msgstr "E-Mail-Adresse"
+
+#: pretix_custom_reports/views/api.py:274
+msgid "Phone number"
+msgstr "Telefonnummer"
+
+#: pretix_custom_reports/views/api.py:275
+msgid "URL"
+msgstr "URL"
+
+#: pretix_custom_reports/views/api.py:276
+msgid "File"
+msgstr "Datei"
+
+#: pretix_custom_reports/views/api.py:277
+msgid "List"
+msgstr "Liste"
+
+#: pretix_custom_reports/views/api.py:281
+msgid "ascending"
+msgstr "aufsteigend"
+
+#: pretix_custom_reports/views/api.py:282
+msgid "descending"
+msgstr "absteigend"
+
+#: pretix_custom_reports/views/api.py:286
+msgid "all of these conditions (AND)"
+msgstr "alle diese Bedingungen (UND)"
+
+#: pretix_custom_reports/views/api.py:287
+msgid "any of these conditions (OR)"
+msgstr "mindestens eine dieser Bedingungen (ODER)"
+
+#: pretix_custom_reports/views/api.py:905
+msgid "The preview could not be executed. Please check the selected fields."
+msgstr ""
+"Die Vorschau konnte nicht ausgeführt werden. Bitte prüfen Sie die "
+"ausgewählten Felder."
+
+#: pretix_custom_reports/views/crud.py:140
+#: pretix_custom_reports/views/portability.py:137
+msgid "The requested report does not exist."
+msgstr "Die angeforderte Auswertung existiert nicht."
+
+#: pretix_custom_reports/views/crud.py:169
+#: pretix_custom_reports/views/templates.py:191
+msgid "We could not save your changes. See below for details."
+msgstr "Wir konnten Ihre Änderungen nicht speichern. Details stehen unten."
+
+#: pretix_custom_reports/views/crud.py:215
+#: pretix_custom_reports/views/templates.py:230
+msgid "Your changes have been saved."
+msgstr "Ihre Änderungen wurden gespeichert."
+
+#: pretix_custom_reports/views/crud.py:236
+msgid "(copy)"
+msgstr "(Kopie)"
+
+#: pretix_custom_reports/views/crud.py:243
+msgid "The report has been duplicated."
+msgstr "Die Auswertung wurde dupliziert."
+
+#: pretix_custom_reports/views/editor.py:222
+msgid "Add as column"
+msgstr "Als Spalte hinzufügen"
+
+#: pretix_custom_reports/views/editor.py:224
+msgid "Add as filter"
+msgstr "Als Filter hinzufügen"
+
+#: pretix_custom_reports/views/editor.py:225
+msgid "Add as sorting stage"
+msgstr "Als Sortierstufe hinzufügen"
+
+#: pretix_custom_reports/views/editor.py:226
+msgid "Add"
+msgstr "Hinzufügen"
+
+#: pretix_custom_reports/views/editor.py:227
+msgid "no aggregate"
+msgstr "keine Aggregatfunktion"
+
+#: pretix_custom_reports/views/editor.py:228
+msgid "and"
+msgstr "und"
+
+#: pretix_custom_reports/views/editor.py:229
+msgid "aggregate"
+msgstr "Aggregatfunktion"
+
+#: pretix_custom_reports/views/editor.py:231
+msgid "Belongs to a single position: needs an aggregate on this base."
+msgstr ""
+"Gehört zu einer einzelnen Position: braucht auf dieser Basis eine "
+"Aggregatfunktion."
+
+#: pretix_custom_reports/views/editor.py:233
+msgid "event values"
+msgstr "Veranstaltungswerte"
+
+#: pretix_custom_reports/views/editor.py:235
+msgid ""
+"Filter values for this field are specific to this event and have to be "
+"remapped on import."
+msgstr ""
+"Filterwerte für dieses Feld gelten nur für diese Veranstaltung und müssen "
+"beim Import neu zugeordnet werden."
+
+#: pretix_custom_reports/views/editor.py:238
+msgid "Provided by another plugin."
+msgstr "Wird von einem anderen Plugin bereitgestellt."
+
+#: pretix_custom_reports/views/editor.py:239
+msgid "not on this base"
+msgstr "nicht auf dieser Basis"
+
+#: pretix_custom_reports/views/editor.py:240
+msgid "These columns will get an aggregate:"
+msgstr "Diese Spalten bekommen eine Aggregatfunktion:"
+
+#: pretix_custom_reports/views/editor.py:241
+msgid "These columns lose their aggregate:"
+msgstr "Diese Spalten verlieren ihre Aggregatfunktion:"
+
+#: pretix_custom_reports/views/editor.py:242
+msgid "These columns will be removed:"
+msgstr "Diese Spalten werden entfernt:"
+
+#: pretix_custom_reports/views/editor.py:243
+msgid "These filters will be removed:"
+msgstr "Diese Filter werden entfernt:"
+
+#: pretix_custom_reports/views/editor.py:244
+msgid "These sorting stages will be removed:"
+msgstr "Diese Sortierstufen werden entfernt:"
+
+#: pretix_custom_reports/views/editor.py:245
+msgid "Switch anyway"
+msgstr "Trotzdem wechseln"
+
+#: pretix_custom_reports/views/editor.py:247
+msgid "Switching the report base changes the available fields."
+msgstr "Ein Wechsel der Auswertungsbasis ändert die verfügbaren Felder."
+
+#: pretix_custom_reports/views/editor.py:250
+msgid "Choose a field …"
+msgstr "Feld auswählen …"
+
+#: pretix_custom_reports/views/editor.py:251
+msgid "Choose …"
+msgstr "Auswählen …"
+
+#: pretix_custom_reports/views/editor.py:252
+msgid "Visible in the output."
+msgstr "In der Ausgabe sichtbar."
+
+#: pretix_custom_reports/views/editor.py:254
+msgid "Hidden: kept in the definition, not written to the output."
+msgstr "Versteckt: bleibt in der Definition, wird aber nicht ausgegeben."
+
+#: pretix_custom_reports/views/editor.py:256
+msgid "days"
+msgstr "Tage"
+
+#: pretix_custom_reports/views/editor.py:257
+msgid "Drag to reorder"
+msgstr "Zum Umsortieren ziehen"
+
+#: pretix_custom_reports/views/editor.py:258
+msgid "Drop a field here to add it as a column."
+msgstr "Ziehen Sie ein Feld hierher, um es als Spalte hinzuzufügen."
+
+#: pretix_custom_reports/views/editor.py:259
+msgid "The report is not valid yet."
+msgstr "Die Auswertung ist noch nicht gültig."
+
+#: pretix_custom_reports/views/editor.py:261
+msgid ""
+"The values of this field are specific to this event and are remapped on "
+"import."
+msgstr ""
+"Die Werte dieses Feldes gelten nur für diese Veranstaltung und werden beim "
+"Import neu zugeordnet."
+
+#: pretix_custom_reports/views/editor.py:264
+msgid "Not available on this report base."
+msgstr "Auf dieser Auswertungsbasis nicht verfügbar."
+
+#: pretix_custom_reports/views/editor.py:265
+msgid "default"
+msgstr "Standard"
+
+#: pretix_custom_reports/views/editor.py:266
+msgid "Group:"
+msgstr "Gruppe:"
+
+#: pretix_custom_reports/views/editor.py:268
+msgid "Empty group: add a condition or it will be dropped."
+msgstr ""
+"Leere Gruppe: Fügen Sie eine Bedingung hinzu, sonst wird sie verworfen."
+
+#: pretix_custom_reports/views/editor.py:271
+msgid "A column uses an aggregate the field does not support."
+msgstr ""
+"Eine Spalte verwendet eine Aggregatfunktion, die das Feld nicht unterstützt."
+
+#: pretix_custom_reports/views/editor.py:274
+msgid "A column needs an aggregate on this report base."
+msgstr "Eine Spalte braucht auf dieser Auswertungsbasis eine Aggregatfunktion."
+
+#: pretix_custom_reports/views/editor.py:277
+msgid "The same field is used twice for sorting."
+msgstr "Dasselbe Feld wird zweimal zum Sortieren verwendet."
+
+#: pretix_custom_reports/views/editor.py:280
+msgid "A field is not available on this report base."
+msgstr "Ein Feld ist auf dieser Auswertungsbasis nicht verfügbar."
+
+#: pretix_custom_reports/views/editor.py:283
+msgid "A filter has no field or no operator yet and is ignored."
+msgstr "Ein Filter hat noch kein Feld oder keinen Operator und wird ignoriert."
+
+#: pretix_custom_reports/views/editor.py:285
+msgid "A sorting stage has no field yet."
+msgstr "Eine Sortierstufe hat noch kein Feld."
+
+#: pretix_custom_reports/views/editor.py:286
+msgid "The row limit is out of range."
+msgstr "Die Zeilengrenze liegt außerhalb des zulässigen Bereichs."
+
+#: pretix_custom_reports/views/editor.py:287
+msgid "A column title is too long."
+msgstr "Eine Spaltenüberschrift ist zu lang."
+
+#: pretix_custom_reports/views/editor.py:288
+msgid "A filter is missing its value."
+msgstr "Einem Filter fehlt sein Wert."
+
+#: pretix_custom_reports/views/editor.py:289
+msgid "A report needs at least one column."
+msgstr "Eine Auswertung braucht mindestens eine Spalte."
+
+#: pretix_custom_reports/views/editor.py:290
+msgid "A field used for sorting is not sortable."
+msgstr "Ein Feld, nach dem sortiert wird, ist nicht sortierbar."
+
+#: pretix_custom_reports/views/editor.py:292
+msgid "An operator is not allowed for its field."
+msgstr "Ein Operator ist für sein Feld nicht erlaubt."
+
+#: pretix_custom_reports/views/editor.py:294
+msgid "Too many columns."
+msgstr "Zu viele Spalten."
+
+#: pretix_custom_reports/views/editor.py:295
+msgid "Too many sorting stages."
+msgstr "Zu viele Sortierstufen."
+
+#: pretix_custom_reports/views/editor.py:296
+msgid "Too many values in one filter."
+msgstr "Zu viele Werte in einem Filter."
+
+#: pretix_custom_reports/views/editor.py:298
+msgid "This page has unsaved changes that will be lost. Continue?"
+msgstr ""
+"Diese Seite hat ungespeicherte Änderungen, die verloren gehen. Fortfahren?"
+
+#: pretix_custom_reports/views/editor.py:301
+msgid ""
+"This page has unsaved changes. The file will contain the saved version, not "
+"your current changes. Continue?"
+msgstr ""
+"Diese Seite hat ungespeicherte Änderungen. Die Datei enthält den "
+"gespeicherten Stand, nicht Ihre aktuellen Änderungen. Fortfahren?"
+
+#: pretix_custom_reports/views/editor.py:304
+msgid "No field matches your search."
+msgstr "Kein Feld passt zu Ihrer Suche."
+
+#: pretix_custom_reports/views/editor.py:305
+msgid "The editor could not be loaded."
+msgstr "Der Editor konnte nicht geladen werden."
+
+#: pretix_custom_reports/views/editor.py:306
+msgid "Move down"
+msgstr "Nach unten"
+
+#: pretix_custom_reports/views/editor.py:307
+msgid "Move up"
+msgstr "Nach oben"
+
+#: pretix_custom_reports/views/editor.py:308
+msgid "Select one or more values."
+msgstr "Wählen Sie einen oder mehrere Werte."
+
+#: pretix_custom_reports/views/editor.py:310
+msgid "no values yet"
+msgstr "noch keine Werte"
+
+#: pretix_custom_reports/views/editor.py:311
+msgid "No preview: the report is not valid yet."
+msgstr "Keine Vorschau: Die Auswertung ist noch nicht gültig."
+
+#: pretix_custom_reports/views/editor.py:313
+msgid "Complete the highlighted entries to refresh the preview."
+msgstr ""
+"Vervollständigen Sie die hervorgehobenen Einträge, um die Vorschau zu "
+"aktualisieren."
+
+#: pretix_custom_reports/views/editor.py:315
+msgid "preview limited to %(limit)s rows"
+msgstr "Vorschau auf %(limit)s Zeilen begrenzt"
+
+#: pretix_custom_reports/views/editor.py:316
+msgid "Loading preview …"
+msgstr "Vorschau wird geladen …"
+
+#: pretix_custom_reports/views/editor.py:317
+msgid "Automatic preview is off."
+msgstr "Die automatische Vorschau ist aus."
+
+#: pretix_custom_reports/views/editor.py:318
+msgid "Showing %(shown)s of %(total)s rows"
+msgstr "%(shown)s von %(total)s Zeilen werden angezeigt"
+
+#: pretix_custom_reports/views/editor.py:319
+msgid "Remove"
+msgstr "Entfernen"
+
+#: pretix_custom_reports/views/editor.py:320
+msgid "Remove group"
+msgstr "Gruppe entfernen"
+
+#: pretix_custom_reports/views/editor.py:321
+msgid "Separator between the joined values"
+msgstr "Trennzeichen zwischen den zusammengefügten Werten"
+
+#: pretix_custom_reports/views/editor.py:323
+msgid "The report refers to fields in a way this event does not allow."
+msgstr ""
+"Die Auswertung verweist auf Felder in einer Weise, die diese Veranstaltung "
+"nicht zulässt."
+
+#: pretix_custom_reports/views/editor.py:325
+msgid "The preview could not be executed."
+msgstr "Die Vorschau konnte nicht ausgeführt werden."
+
+#: pretix_custom_reports/views/editor.py:327
+msgid "The report refers to fields that do not exist here."
+msgstr "Die Auswertung verweist auf Felder, die es hier nicht gibt."
+
+#: pretix_custom_reports/views/editor.py:330
+msgid "The editor sent something the server could not read."
+msgstr "Der Editor hat etwas geschickt, das der Server nicht lesen konnte."
+
+#: pretix_custom_reports/views/editor.py:332
+msgid "The report definition is not valid."
+msgstr "Die Auswertungs-Definition ist nicht gültig."
+
+#: pretix_custom_reports/views/editor.py:333
+msgid "unknown"
+msgstr "unbekannt"
+
+#: pretix_custom_reports/views/editor.py:335
+msgid "no value needed"
+msgstr "kein Wert nötig"
+
+#: pretix_custom_reports/views/editor.py:336
+msgid "Warnings"
+msgstr "Warnungen"
+
+#: pretix_custom_reports/views/portability.py:159
+msgid "This report cannot be exported: %(problem)s"
+msgstr "Diese Auswertung kann nicht exportiert werden: %(problem)s"
+
+#: pretix_custom_reports/views/portability.py:214
+msgid "The file is larger than %(kib)s KiB."
+msgstr "Die Datei ist größer als %(kib)s KiB."
+
+#: pretix_custom_reports/views/portability.py:225
+msgid "The file is not UTF-8 encoded text. Report files are JSON."
+msgstr ""
+"Die Datei ist kein UTF-8-kodierter Text. Auswertungs-Dateien sind JSON."
+
+#: pretix_custom_reports/views/portability.py:244
+msgid "Please choose a file or paste a report definition."
+msgstr ""
+"Bitte wählen Sie eine Datei aus oder fügen Sie eine Auswertungs-Definition "
+"ein."
+
+#: pretix_custom_reports/views/portability.py:278
+msgid ""
+"This report cannot be imported as it is. Please choose how to deal with the "
+"fields listed below."
+msgstr ""
+"Diese Auswertung kann so nicht importiert werden. Bitte entscheiden Sie, wie "
+"mit den unten aufgeführten Feldern umgegangen werden soll."
+
+#: pretix_custom_reports/views/templates.py:155
+#: pretix_custom_reports/views/templates.py:311
+msgid "The requested template does not exist."
+msgstr "Die angeforderte Vorlage existiert nicht."
+
+#: pretix_custom_reports/views/templates.py:210
+msgid "The template has been created."
+msgstr "Die Vorlage wurde angelegt."
+
+#: pretix_custom_reports/views/templates.py:253
+msgid "The template has been deleted."
+msgstr "Die Vorlage wurde gelöscht."
+
+#: pretix_custom_reports/views/templates.py:277
+msgid "This template cannot be exported: %(problem)s"
+msgstr "Diese Vorlage kann nicht exportiert werden: %(problem)s"
+
+#: pretix_custom_reports/views/templates.py:379
+msgid ""
+"This template cannot be loaded as it is. Please choose how to deal with the "
+"fields listed below."
+msgstr ""
+"Diese Vorlage kann so nicht geladen werden. Bitte entscheiden Sie, wie mit "
+"den unten aufgeführten Feldern umgegangen werden soll."
+
+#: pretix_custom_reports/views/templates.py:391
+msgid "The template has been loaded into this event."
+msgstr "Die Vorlage wurde in diese Veranstaltung geladen."

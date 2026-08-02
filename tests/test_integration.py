@@ -44,6 +44,7 @@ import io
 import json
 import pytest
 import warnings
+import weakref
 from decimal import Decimal
 from django.urls import reverse
 from django_scopes import scope, scopes_disabled
@@ -62,7 +63,6 @@ from pretix.base.signals import (
 
 from pretix_custom_reports import contracts, exporters
 from pretix_custom_reports.models import ReportDefinition
-from pretix_custom_reports.portability.eventcopy import copy_reports_to_event
 from pretix_custom_reports.portability.resolution import (
     STATUS_FOUND,
     STATUS_MAPPED,
@@ -77,8 +77,59 @@ from pretix_custom_reports.registry.library import field_registry
 from . import factories
 
 URL_NAMESPACE = "plugins:pretix_custom_reports"
-DISPATCH_UID = "pretix_custom_reports_integration_exporter"
-MULTI_DISPATCH_UID = "pretix_custom_reports_integration_multiexporter"
+
+#: The dispatch_uids ``signals.py`` uses (integrator, wave 4). Not a private
+#: choice of this file any more: since the plugin connects both receivers at
+#: import time, a test fixture that wants them connected has to talk about the
+#: *same* key, otherwise it adds a second registration instead of guaranteeing
+#: the first one. See :func:`registered`.
+DISPATCH_UID = "pretix_custom_reports_exporter"
+MULTI_DISPATCH_UID = "pretix_custom_reports_multiexporter"
+
+#: The wiring these tests need, as ``(signal, receiver, dispatch_uid)`` -- the
+#: same three-tuples ``signals.py`` passes to ``connect()``.
+WIRING = (
+    (register_data_exporters, exporters.register_report_exporter, DISPATCH_UID),
+    (
+        register_multievent_data_exporters,
+        exporters.register_multievent_report_exporter,
+        MULTI_DISPATCH_UID,
+    ),
+)
+
+
+def connected_receiver(signal, dispatch_uid):
+    """The receiver currently connected to *signal* under *dispatch_uid*.
+
+    ``Signal.receivers`` holds ``(lookup_key, receiver, is_async)`` in Django
+    5.2 and ``lookup_key`` is ``(dispatch_uid or id(receiver), id(sender))``
+    (django/dispatch/dispatcher.py:96-99, 113-117). With the default
+    ``weak=True`` the second slot is a ``weakref.ref`` and has to be
+    dereferenced before it can be compared against a function.
+
+    Returns ``None`` if nothing is connected under that dispatch_uid.
+
+    Deliberately a copy of the identical helper in ``tests/test_exporters.py``
+    rather than an import: the two modules belong to different agents
+    (ORCHESTRIERUNG.md section 5) and one test module importing another's
+    internals turns a rename over there into a failure over here.
+    """
+    for lookup_key, receiver, *_ in signal.receivers:
+        if lookup_key[0] == dispatch_uid:
+            if isinstance(receiver, weakref.ReferenceType):
+                return receiver()
+            return receiver
+    return None
+
+
+#: The production wiring as it stood while this module was imported, i.e. after
+#: ``apps.ready()`` -> ``signals.py`` and before any test or fixture here ran.
+#: ``signals.py`` is imported once per process and never re-connects itself, so
+#: this is the only reliable record of what the plugin established at startup.
+WIRING_AT_IMPORT = {
+    dispatch_uid: connected_receiver(signal, dispatch_uid)
+    for signal, _receiver, dispatch_uid in WIRING
+}
 
 
 # ---------------------------------------------------------------------------
@@ -121,29 +172,85 @@ def second_event(organizer):
     return factories.make_event(organizer, slug="second", name="Second Event")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def wiring_before_this_module():
+    """The signal wiring as this module found it, for the canary at the bottom.
+
+    Module scoped and autouse so that it is established before the first test
+    here runs. Not the same thing as :data:`WIRING_AT_IMPORT`: what this file
+    has to answer for is that it changes nothing, not that the session was
+    healthy when it got the process.
+    """
+    return {
+        dispatch_uid: connected_receiver(signal, dispatch_uid)
+        for signal, _receiver, dispatch_uid in WIRING
+    }
+
+
 @pytest.fixture
 def registered():
-    """Connect the exporter receivers exactly as ``signals.py`` will in wave 4.
+    """Guarantee the two exporter receivers are connected -- and restore after.
 
-    ``register_multievent_data_exporters`` is an ``OrganizerPluginSignal`` with
-    ``allow_legacy_plugins=True``; connecting an event-level plugin to it emits a
-    ``DeprecationWarning`` that pretix filters in its own test config and we do
-    not. Silenced narrowly, so a *different* deprecation stays visible.
+    Since wave 4 ``signals.py`` connects both receivers at plugin import
+    (``apps.ready()``), so in a normal run this fixture has nothing left to do.
+    It must nevertheless not be written as a plain connect/disconnect pair, and
+    the reason is not style:
+
+    * ``Signal.connect()`` skips a receiver whose ``(dispatch_uid, sender_id)``
+      key is already present (django/dispatch/dispatcher.py:113-117), and
+    * ``Signal.disconnect(dispatch_uid=...)`` matches on that key *alone* --
+      the receiver argument is ignored entirely (dispatcher.py:138-153).
+
+    Neither call knows who connected first. So a fixture using the production
+    uids would connect nothing and, on teardown, remove the *production*
+    registration for the rest of the pytest session, in whatever file follows.
+    pretix' ``EventPluginSignal``/``OrganizerPluginSignal`` override ``connect``
+    but not ``disconnect`` (pretix/base/signals.py:261-311), so nothing softens
+    this for plugin signals. That is the defect ``exporter-dev`` found in
+    ``tests/test_exporters.py``; ``tests/test_smoke.py`` still carries a
+    snapshot workaround because of it.
+
+    This module dodged that particular failure by using private, ``_integration``
+    suffixed uids -- and bought a quieter one for it: two distinct keys pointing
+    at the same function are two receivers, so ``register_data_exporters.send()``
+    returned :class:`CustomReportExporter` twice and every export list in this
+    file silently contained our exporter twice over.
+    ``init_event_exporter()`` returns the first match
+    (pretix/base/services/export.py:191-195), which is why nothing ever failed;
+    the export *page* would have listed the report export twice.
+    ``test_the_event_export_is_offered_exactly_once`` is the guard for that.
+
+    So: use the production uids, connect only what is missing, disconnect only
+    what we connected. If a uid is already taken, assert it is taken by the
+    function we expect -- otherwise the no-op ``connect()`` would quietly run
+    this whole module against somebody else's receiver.
+
+    ``register_multievent_data_exporters`` is an
+    ``OrganizerPluginSignal(allow_legacy_plugins=True)`` and this plugin is
+    event level, so ``connect()`` emits a ``DeprecationWarning``
+    (pretix/base/signals.py:301-306) that pretix filters in its own test config
+    and we do not. Silenced narrowly, so a *different* deprecation stays visible.
     """
-    register_data_exporters.connect(
-        exporters.register_report_exporter, dispatch_uid=DISPATCH_UID
-    )
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message=".*organizer-level.*", category=DeprecationWarning
-        )
-        register_multievent_data_exporters.connect(
-            exporters.register_multievent_report_exporter,
-            dispatch_uid=MULTI_DISPATCH_UID,
-        )
+    connected_by_us = []
+    for signal, receiver, dispatch_uid in WIRING:
+        existing = connected_receiver(signal, dispatch_uid)
+        if existing is not None:
+            assert existing is receiver, (
+                f"{dispatch_uid!r} is connected to {existing!r}, not to "
+                f"{receiver!r} -- signals.py and exporters.py disagree."
+            )
+            continue
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*organizer-level.*",
+                category=DeprecationWarning,
+            )
+            signal.connect(receiver, dispatch_uid=dispatch_uid)
+        connected_by_us.append((signal, dispatch_uid))
     yield
-    register_data_exporters.disconnect(dispatch_uid=DISPATCH_UID)
-    register_multievent_data_exporters.disconnect(dispatch_uid=MULTI_DISPATCH_UID)
+    for signal, dispatch_uid in connected_by_us:
+        signal.disconnect(dispatch_uid=dispatch_uid)
 
 
 # ---------------------------------------------------------------------------
@@ -486,13 +593,20 @@ def test_a_template_reaches_an_event_whose_question_is_spelled_differently(
 def test_an_event_copy_carries_its_reports_and_runs_them_in_the_copy(
     registered, user_with_perms, world, organizer
 ):
-    """``event_copy_data`` equivalent: the reports travel and still produce rows.
+    """``Event.copy_data_from`` alone must bring the reports along and run them.
 
-    ``copy_reports_to_event`` resolves with ``KEEP``, so a key the target does not
-    have stays in the definition rather than disappearing. This checks the happy
-    path end to end: the copied event has the same questions (because pretix
-    copies questions with their identifiers), so the copied report runs and
-    returns the *copy's* orders, not the source's.
+    Nothing here calls ``copy_reports_to_event``. Since wave 4 the receiver in
+    ``signals.py`` is connected to ``event_copy_data``, so the copy happens as a
+    side effect of the pretix call -- which is the only way to find out whether
+    the receiver is wired at all, whether the signal reaches an event-level
+    plugin, and whether the copy sees the *new* event's questions. The unit
+    tests in ``tests/test_portability.py`` section 8 cover the function itself.
+
+    ``copy_reports_to_event`` resolves with ``KEEP``, so a key the target does
+    not have stays in the definition rather than disappearing. This checks the
+    happy path end to end: the copied event has the same questions (because
+    pretix copies questions with their identifiers), so the copied report runs
+    and returns the *copy's* orders, not the source's.
     """
     with scopes_disabled():
         source_report = ReportDefinition.objects.create(
@@ -508,12 +622,15 @@ def test_an_event_copy_carries_its_reports_and_runs_them_in_the_copy(
         copy_event = factories.make_event(organizer, slug="copy", name="Copy")
         copy_event.copy_data_from(world.event)
 
-        result = copy_reports_to_event(copy_event, world.event, user=user_with_perms)
+        # One report in, exactly one report out, under its own identifier. A
+        # receiver that fires twice would leave a second row called "sizes-2"
+        # (``ReportDefinition`` deduplicates identifiers per event), and that is
+        # the failure this list comparison is here to catch.
+        copies = list(copy_event.custom_reports.order_by("identifier"))
 
-    assert result.count == 1
-    assert result.failed == ()
-    copied = result.copied[0].report
-    assert copied.identifier == source_report.identifier
+    assert [report.identifier for report in copies] == ["sizes"]
+    copied = copies[0]
+    assert copied.pk != source_report.pk, "the copy must be a new row"
     assert copied.definition == source_report.definition
 
     # A copied event has the products and questions but no orders.
@@ -531,6 +648,64 @@ def test_an_event_copy_carries_its_reports_and_runs_them_in_the_copy(
 
     _, lines = export_csv(copy_event, user_with_perms, copied.identifier)
     assert lines == [["Order code", "T-shirt size"], ["CPY01", "XL"]]
+
+
+@pytest.mark.django_db
+def test_the_event_copy_signal_hands_the_question_map_to_the_log_entry(
+    world, organizer
+):
+    """The receiver's arguments arrive intact -- checked through the log entry.
+
+    ``event_copy_data`` sends seven ``*_map`` arguments and the receiver takes
+    ``question_map`` out of them; the copy writes what it got into the
+    ``copied_from_event`` block of its ``report.added`` entry. That block is the
+    only place where the *arguments of the real signal* become observable, so
+    this is what separates "the receiver is connected" from "the receiver is
+    connected and pretix passes it what we think it does".
+
+    Expected values, all hand-counted from ``tests/factories.py``:
+
+    * ``questions_mapped == 12`` -- ``QUESTION_SPECS`` has one entry per
+      ``Question.type`` and ``build_reference_world`` creates all of them, and
+      pretix' event copy takes every question along,
+    * source organizer/event/identifier as written below,
+    * ``resolution`` clean, because the copy has the same question identifiers:
+      both column references resolve exactly, nothing is mapped or missing.
+
+    The entry has no user on purpose: ``event_copy_data`` does not carry one,
+    so the receiver cannot invent one. The copy is attributed to the event copy
+    the user triggered, which pretix logs separately on the event.
+    """
+    with scopes_disabled():
+        ReportDefinition.objects.create(
+            event=world.event,
+            name="Sizes",
+            identifier="sizes",
+            definition=definition(
+                base="orderposition",
+                columns=columns("order.code", "answer.tshirt-size"),
+            ),
+        )
+        copy_event = factories.make_event(organizer, slug="copy", name="Copy")
+        copy_event.copy_data_from(world.event)
+
+        copied = copy_event.custom_reports.get(identifier="sizes")
+        entries = list(copied.all_logentries())
+        assert [entry.action_type for entry in entries] == [contracts.LOG_ACTION_ADDED]
+        entry = entries[0]
+        assert entry.user is None
+        assert entry.event_id == copy_event.pk
+        provenance = entry.parsed_data["copied_from_event"]
+
+    assert provenance["organizer"] == organizer.slug
+    assert provenance["event"] == world.event.slug
+    assert provenance["identifier"] == "sizes"
+    assert provenance["questions_mapped"] == 12
+    assert provenance["resolution"]["issues"] == []
+    counts = provenance["resolution"]["counts"]
+    assert counts["found"] == 2, "order.code and answer.tshirt-size"
+    assert counts["mapped"] == 0
+    assert counts["missing"] == 0
 
 
 @pytest.mark.django_db
@@ -1878,3 +2053,93 @@ def test_since_event_start_uses_the_events_own_start_instant(organizer):
     reference = dt.datetime(2026, 7, 1, 12, 0, tzinfo=dt.timezone.utc)
     _, rows = run_report(document, event, now=reference)
     assert sorted(row[0] for row in rows) == ["LATER"]
+
+
+# ===========================================================================
+# 7. The signal wiring itself
+# ===========================================================================
+#
+# Everything above takes the exporter registration for granted, because the
+# ``registered`` fixture guarantees it. These two tests are about that
+# guarantee: the first checks what production actually established, the second
+# checks that this file gives it back.
+
+
+@pytest.mark.django_db
+def test_the_report_export_is_offered_exactly_once_on_both_levels(
+    user_with_perms, main_event, organizer
+):
+    """The export appears once in the event *and* once in the organizer list.
+
+    Deliberately without the ``registered`` fixture: the subject here is the
+    wiring ``signals.py`` did at plugin import, and a fixture that guarantees
+    the wiring cannot also be the witness for it.
+
+    The interesting number is the ``1``. ``init_event_exporters`` instantiates
+    one exporter per truthy signal response (services/export.py:198-222) and
+    does not deduplicate, so every extra registration of
+    :class:`CustomReportExporter` -- one receiver connected twice under two
+    dispatch_uids, say, which is exactly what this module's old fixture did --
+    becomes a second, identical entry in the export UI. Nothing raises,
+    ``init_event_exporter`` keeps returning the first match, and the only
+    visible symptom is a duplicated line on a page no test opens.
+    """
+    from pretix.base.services.export import (
+        init_event_exporters,
+        init_organizer_exporters,
+    )
+
+    identifier = exporters.CustomReportExporter.identifier
+    with scope(organizer=organizer):
+        event_level = [
+            ex.identifier
+            for ex in init_event_exporters(event=main_event, user=user_with_perms)
+            if ex.identifier == identifier
+        ]
+        organizer_level = [
+            ex.identifier
+            for ex in init_organizer_exporters(
+                organizer=organizer, user=user_with_perms
+            )
+            if ex.identifier == identifier
+        ]
+
+    assert event_level == [identifier], "event-level export registered != once"
+    assert organizer_level == [identifier], "organizer-level export registered != once"
+
+    # And it is ours, under the uids handoff/requests/exporter-dev-an-
+    # integrator-signals.md asked for -- named literally, because other test
+    # modules disconnect by them.
+    assert WIRING_AT_IMPORT[DISPATCH_UID] is exporters.register_report_exporter
+    assert (
+        WIRING_AT_IMPORT[MULTI_DISPATCH_UID]
+        is exporters.register_multievent_report_exporter
+    )
+
+
+# NOTE: keep this last. pytest runs a module's tests in definition order, so a
+# check placed here has seen every ``registered`` teardown in this file.
+def test_this_module_hands_the_signal_wiring_back_untouched(wiring_before_this_module):
+    """The canary for the bug this file used to have.
+
+    The first assertion is the one that belongs to this file: whatever we were
+    handed, we hand back -- no receiver added, none removed, none rebound. The
+    rest only runs when we really were handed the production wiring, so that
+    this test keeps reporting *our* leaks and not another module's:
+    ``tests/test_security.py`` still carries the old connect/disconnect pair
+    (``security-reviewer``'s call), and it running first must not put a failure
+    with the wrong name on it.
+    """
+    after = {
+        dispatch_uid: connected_receiver(signal, dispatch_uid)
+        for signal, _receiver, dispatch_uid in WIRING
+    }
+    assert after == wiring_before_this_module
+
+    if wiring_before_this_module == WIRING_AT_IMPORT:
+        # ``has_listeners`` and the identity check fail for different reasons:
+        # a signal emptied wholesale versus our own uid dropped or rebound.
+        assert register_data_exporters.has_listeners()
+        assert register_multievent_data_exporters.has_listeners()
+        for _signal, receiver, dispatch_uid in WIRING:
+            assert after[dispatch_uid] is receiver, dispatch_uid

@@ -1,3 +1,7 @@
+> **ERLEDIGT — 2026-08-02, `integrator` (Welle 4).** Vollständig übernommen.
+> Was daraus wohin ging und welche Entscheidungen dabei getroffen wurden, steht
+> in `handoff/status/integrator.md`.
+
 # portability-dev → integrator: `event_copy_data`-Empfänger
 
 **Welle:** 2

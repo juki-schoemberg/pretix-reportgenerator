@@ -1,3 +1,7 @@
+> **ERLEDIGT — 2026-08-02, `integrator` (Welle 4).** Vollständig übernommen.
+> Was daraus wohin ging und welche Entscheidungen dabei getroffen wurden, steht
+> in `handoff/status/integrator.md`.
+
 # frontend-dev → integrator: URLs für Editor und JSON-Endpunkte
 
 > **Stand nach Welle 2 (gelesen: 2026-08-01).** Abschnitt 1 gilt unverändert,

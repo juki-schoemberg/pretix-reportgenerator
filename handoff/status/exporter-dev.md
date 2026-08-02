@@ -570,3 +570,82 @@ keine anderen Module beeinflusst.
    Streaming-Kette (`iterator(chunk_size=1000)` → Generator → `csv.writer`) ist
    durchgehend faul, aber das ist bisher nur konstruiert, nicht gemessen.
    Außerdem: XLSX-Byte-Pfad unter Linux (siehe oben).
+
+---
+
+## Nachtrag (nach Welle 4): Fixture `registered` reparte die Signal-Verdrahtung
+
+Vom `integrator` gemeldeter Nebenbefund, bestätigt und behoben. Nur
+`tests/test_exporters.py` geändert, kein Produktivcode.
+
+**Der Fehler.** Seit `signals.py` die beiden Receiver beim Plugin-Import
+verbindet, gab es die `dispatch_uid`s `pretix_custom_reports_exporter` und
+`pretix_custom_reports_multiexporter` schon, bevor ein Test lief. Die alte
+Fixture verband sie erneut und trennte sie im Teardown. Beides ist im
+Django-Source nachgelesen (`django/dispatch/dispatcher.py`, Django 5.2.16):
+
+* `connect()` überspringt einen Receiver, dessen `(dispatch_uid, sender_id)`
+  schon vorhanden ist (Zeile 113-117) — der `connect()` der Fixture war also
+  wirkungslos.
+* `disconnect(dispatch_uid=...)` matcht **allein** über diesen Schlüssel, das
+  `receiver`-Argument wird ignoriert (Zeile 138-153).
+
+Der letzte Teardown des Moduls entfernte damit die *produktive* Verbindung, für
+den Rest der Pytest-Session. `signals.py` läuft einmal und verbindet sich nicht
+neu. pretix' `EventPluginSignal`/`OrganizerPluginSignal` überschreiben nur
+`connect`, nicht `disconnect` (`pretix/base/signals.py:261-311`) — für
+Plugin-Signale gilt das also unverändert.
+
+**Die Lösung.** Weg 2 aus dem Auftrag: idempotent verbinden, nur das eigene
+Zutun zurücknehmen. Weg 1 (eigene `dispatch_uid` mit `-test`-Suffix) wäre hier
+falsch gewesen: `init_event_exporters` erzeugt **pro Signal-Response eine
+Exporter-Instanz** (`services/export.py:203-225`), zwei Verbindungen hätten den
+Exporter in jeder Liste doppelt erscheinen lassen — eine stille
+Verhaltensänderung in allen 40 bestehenden Tests.
+
+Die Fixture prüft jetzt pro `(Signal, Receiver, dispatch_uid)`, ob die uid schon
+belegt ist. Falls ja: nichts tun, aber per `assert` sicherstellen, dass die uid
+wirklich an *unsere* Funktion gebunden ist — sonst hätte der wirkungslose
+`connect()` das ganze Modul stillschweigend gegen einen fremden Receiver laufen
+lassen. Falls nein: verbinden und nur diese Verbindung im Teardown wieder lösen.
+
+**Zwei neue Tests** (42 statt 40 im Modul):
+
+* `test_signals_py_connects_both_receivers_at_plugin_import` — liest das
+  Modul-Snapshot `WIRING_AT_IMPORT`, das zur *Importzeit* der Testdatei
+  entsteht, also vor jedem Test und jeder Fixture. Bewusst **ohne** die
+  `registered`-Fixture, die eine fehlende Verbindung ja selbst herstellen und
+  den Fehler damit verdecken würde. Das ist der Test, der die `dispatch_uid`s
+  als Schnittstelle festnagelt.
+* `test_this_module_hands_the_signal_wiring_back_untouched` — steht bewusst als
+  letzter im Modul (pytest führt innerhalb einer Datei in Definitionsreihenfolge
+  aus) und vergleicht gegen den Zustand, den eine modulweite Autouse-Fixture
+  beim Start dieses Moduls aufgenommen hat. Absichtlich nicht gegen
+  `WIRING_AT_IMPORT`: diese Datei haftet dafür, nichts zu verändern, nicht
+  dafür, dass die Session heil bei ihr ankommt. Der `has_listeners()`-Teil läuft
+  nur, wenn wir die produktive Verdrahtung tatsächlich vorgefunden haben.
+
+Gegenprobe: mit dem alten, unbedingten `disconnect()` im Teardown wieder
+eingesetzt schlägt der Kanarienvogel fehl (`assert after ==
+wiring_before_this_module`), danach wieder entfernt.
+
+**Offen, nicht mein Gebiet.** Dieselbe Konstruktion steht in
+`tests/test_integration.py:133-146` (`test-engineer`) und
+`tests/test_security.py:306-319` (`security-reviewer`) — gleiche
+`dispatch_uid`s, gleiches unbedingtes `disconnect` im Teardown, gleicher latenter
+Fehler. Beide Dateien laufen alphabetisch **nach** `test_exporters.py`, ihr Leck
+wirkt also auf alles danach. Der Fix ist wörtlich der aus dieser Datei
+übertragbar (`connected_receiver()` plus die Schleife in `registered`). Solange
+das offen ist, bleibt auch der Snapshot-Workaround in `tests/test_smoke.py:38-53`
+nötig; dessen Kommentar verweist noch auf diese Fixture hier und kann nach dem
+Nachziehen der beiden anderen Dateien entschärft werden (`integrator`).
+
+**Geprüft.** `pytest tests/test_exporters.py -q` → 42 passed.
+`pytest tests/test_exporters.py tests/test_integration.py -q` und dieselbe
+Kombination in umgekehrter Reihenfolge → je 75 passed, 2 xfailed; die umgekehrte
+Reihenfolge ist der interessante Fall, weil dort das noch offene Leck aus
+`test_integration.py` die produktive Verbindung vor uns entfernt und unsere
+Fixture sie sauber selbst herstellt und wieder abräumt.
+`pytest tests/test_exporters.py tests/test_smoke.py -q` → 64 passed.
+Gesamtsuite `pytest -m "not performance" -q` → 1016 passed, 8 deselected,
+8 xfailed. `flake8`/`isort -c`/`black --check` auf der Datei sauber.

@@ -11,12 +11,46 @@ import pytest
 from django.apps import apps
 from django.urls import reverse
 from pretix.base.plugins import get_all_plugins
+from pretix.base.signals import (
+    event_copy_data,
+    register_data_exporters,
+    register_multievent_data_exporters,
+)
 
 import pretix_custom_reports
 from pretix_custom_reports.signals import URL_NAMESPACE, VIEW_PERMISSION
 
 MODULE_NAME = "pretix_custom_reports"
 NAV_LABEL = "Exports"
+
+
+def _dispatch_uids(signal):
+    """The dispatch_uids currently connected to *signal*.
+
+    ``Signal.receivers`` holds ``(lookup_key, receiver, is_async)`` in Django
+    5.2, and ``lookup_key`` is ``(dispatch_uid or id(receiver), id(sender))``.
+    Only the receivers connected with an explicit ``dispatch_uid`` have a
+    string there, and those are ours.
+    """
+    return {entry[0][0] for entry in signal.receivers if isinstance(entry[0][0], str)}
+
+
+#: Snapshot of the receivers ``apps.ready()`` -> ``signals.py`` established,
+#: taken at *collection* time, before any test has run.
+#:
+#: It has to be a snapshot: ``tests/test_exporters.py::registered`` connects the
+#: same two dispatch_uids and calls ``disconnect(dispatch_uid=...)`` on teardown,
+#: which removes the *production* connection for the rest of the session. That
+#: is a defect in that fixture (reported to exporter-dev, see
+#: handoff/status/integrator.md), but it must not make this file order
+#: dependent.
+CONNECTED_AT_IMPORT = {
+    "register_data_exporters": _dispatch_uids(register_data_exporters),
+    "register_multievent_data_exporters": _dispatch_uids(
+        register_multievent_data_exporters
+    ),
+    "event_copy_data": _dispatch_uids(event_copy_data),
+}
 
 
 def test_module_imports():
@@ -89,18 +123,24 @@ def test_navigation_link_target_reverses(event):
 
 
 @pytest.mark.django_db
-def test_placeholder_page_opens(client_with_perms, event):
+def test_event_index_opens_the_report_list(client_with_perms, event):
+    """``event.index`` is the report list since wave 4.
+
+    Wave 0a put a placeholder behind the menu entry; the integrator repointed
+    the name at ``views/crud.py::ReportListView`` when wiring up urls.py, see
+    handoff/status/integrator.md.
+    """
     url = reverse(
         f"{URL_NAMESPACE}:event.index",
         kwargs={"organizer": event.organizer.slug, "event": event.slug},
     )
     resp = client_with_perms.get(url)
     assert resp.status_code == 200
-    assert "customreports-placeholder" in resp.content.decode()
+    assert "You have not created any reports yet." in resp.content.decode()
 
 
 @pytest.mark.django_db
-def test_placeholder_page_denied_without_permission(client_without_perms, event):
+def test_event_index_denied_without_permission(client_without_perms, event):
     url = reverse(
         f"{URL_NAMESPACE}:event.index",
         kwargs={"organizer": event.organizer.slug, "event": event.slug},
@@ -149,10 +189,182 @@ def test_view_permission_is_a_known_pretix_permission():
     assert VIEW_PERMISSION in get_all_event_permissions()
 
 
-def test_no_migration_created_yet():
-    """No migration may ship yet; migrations belong to persistence-dev."""
+# ---------------------------------------------------------------------------
+# The wiring itself (wave 4, integrator)
+# ---------------------------------------------------------------------------
+
+
+def _plugin_routes():
+    from pretix_custom_reports import urls
+
+    return [(p.name, p.pattern.regex.pattern) for p in urls.urlpatterns]
+
+
+def test_every_route_list_of_every_agent_is_wired_up():
+    """urls.py concatenates six module variables; none may go missing.
+
+    Each agent maintains their routes next to their views (see
+    docs/adr/0006-verdrahtung.md section 1). A dropped ``+`` in urls.py would
+    otherwise only show up in that agent's own tests.
+    """
+    from pretix_custom_reports.views.api import api_urlpatterns
+    from pretix_custom_reports.views.crud import event_urlpatterns
+    from pretix_custom_reports.views.editor import editor_urlpatterns
+    from pretix_custom_reports.views.portability import (
+        portability_event_urlpatterns,
+    )
+    from pretix_custom_reports.views.templates import (
+        templates_event_urlpatterns,
+        templates_organizer_urlpatterns,
+    )
+
+    wired = {name for name, _pattern in _plugin_routes()}
+    for source in (
+        event_urlpatterns,
+        editor_urlpatterns,
+        api_urlpatterns,
+        portability_event_urlpatterns,
+        templates_event_urlpatterns,
+        templates_organizer_urlpatterns,
+    ):
+        assert {p.name for p in source} <= wired
+
+
+def test_no_route_name_and_no_url_pattern_is_used_twice():
+    names = [name for name, _pattern in _plugin_routes()]
+    patterns = [pattern for _name, pattern in _plugin_routes()]
+    assert len(set(names)) == len(names)
+    assert len(set(patterns)) == len(patterns)
+
+
+def test_every_route_reverses_and_resolves_back_to_itself():
+    """No route may be shadowed by an earlier, more general one.
+
+    Six route lists from four agents are concatenated; the claim that their
+    prefixes do not overlap is checked here rather than believed.
+    """
+    from django.urls import resolve
+
+    extra = {"report": 1, "template": 2, "identifier": "abc"}
+    for name, pattern in _plugin_routes():
+        if "organizer/" in pattern and "event/" not in pattern:
+            kwargs = {"organizer": "o"}
+        else:
+            kwargs = {"organizer": "o", "event": "e"}
+        kwargs.update({k: v for k, v in extra.items() if f"<{k}>" in pattern})
+        url = reverse(f"{URL_NAMESPACE}:{name}", kwargs=kwargs)
+        assert resolve(url).url_name == name, url
+
+
+def test_the_registry_cache_receivers_are_connected_by_importing_signals():
+    """signals.py must import registry.cache, or invalidation is late.
+
+    Without that import the post_save/post_delete receivers are only connected
+    once something touches the registry, and a question renamed before that
+    invalidates nothing. See docs/adr/0002-registry.md section 7.
+    """
+    from django.db.models.signals import post_save
+    from pretix.base.models import Question
+
+    receivers = [str(r[0][0]) for r in post_save.receivers]
+    assert any("pretix_custom_reports" in r for r in receivers), receivers
+    assert Question  # the model the receiver is attached to still exists
+
+
+def test_the_seven_log_action_types_are_registered():
+    """An unregistered action type shows an empty line in the log viewer."""
+    from pretix.base.logentrytypes import log_entry_types
+
+    from pretix_custom_reports import contracts
+
+    for action in (
+        contracts.LOG_ACTION_ADDED,
+        contracts.LOG_ACTION_CHANGED,
+        contracts.LOG_ACTION_DELETED,
+        contracts.LOG_ACTION_EXECUTED,
+        contracts.LOG_ACTION_EXPORTED,
+        contracts.LOG_ACTION_IMPORTED,
+        contracts.LOG_ACTION_TEMPLATE_APPLIED,
+    ):
+        entry, meta = log_entry_types.get(action_type=action)
+        assert entry is not None, action
+        assert str(entry.display(None, {}))
+
+
+def test_both_exporters_are_connected():
+    """Without these two the exporter exists but is invisible in production.
+
+    It appears in neither the event's nor the organizer's export UI, and no
+    scheduled export can be created for it.
+    """
+    assert (
+        "pretix_custom_reports_exporter"
+        in CONNECTED_AT_IMPORT["register_data_exporters"]
+    )
+    assert (
+        "pretix_custom_reports_multiexporter"
+        in CONNECTED_AT_IMPORT["register_multievent_data_exporters"]
+    )
+
+
+def test_the_event_copy_receiver_is_connected():
+    assert "pretix_custom_reports_copy_data" in CONNECTED_AT_IMPORT["event_copy_data"]
+
+
+@pytest.mark.django_db
+def test_the_log_object_link_survives_an_organizer_template(organizer, event):
+    """An organizer template has ``event=None`` and must not break the log page.
+
+    ``EventLogEntryType.get_object_link_info`` reverses with
+    ``logentry.event.slug``; for a template that attribute is ``None`` and the
+    inherited implementation would raise while *rendering the log page*. See
+    docs/adr/0006-verdrahtung.md section 5.
+    """
+    from django_scopes import scopes_disabled
+    from pretix.base.logentrytypes import log_entry_types
+
+    from pretix_custom_reports import contracts
+    from pretix_custom_reports.models import ReportDefinition
+
+    logtype, _meta = log_entry_types.get(action_type=contracts.LOG_ACTION_ADDED)
+    document = {
+        "schema_version": contracts.SCHEMA_VERSION,
+        "base": "order",
+        "columns": [{"field": "order.code"}],
+    }
+
+    with scopes_disabled():
+        template = ReportDefinition.objects.create(
+            organizer=organizer,
+            name="A template",
+            identifier="tmpl",
+            definition=document,
+        )
+        report = ReportDefinition.objects.create(
+            event=event, name="A report", identifier="rep", definition=document
+        )
+        template_entry = template.log_added()
+        report_entry = report.log_added()
+
+    template_link = str(logtype.get_object_link(template_entry))
+    report_link = str(logtype.get_object_link(report_entry))
+
+    assert "A template" in template_link
+    assert "/customreports/templates/" in template_link
+    assert "A report" in report_link
+    assert "/customreports/reports/" in report_link
+
+
+def test_exactly_one_migration_ships():
+    """Migrations belong to persistence-dev, and there must be no duplicates.
+
+    Replaces the wave-0a gate ``test_no_migration_created_yet``, which was
+    green exactly as long as no migration existed. Since wave 1 there is
+    ``0001_initial.py`` and the gate has done its job, see
+    handoff/requests/persistence-dev-an-integrator-urls.md section 2.
+    """
     import pathlib
 
     migrations = pathlib.Path(pretix_custom_reports.__file__).parent / "migrations"
-    assert migrations.is_dir()
-    assert not [p for p in migrations.glob("0*.py")]
+    numbered = sorted(p.name for p in migrations.glob("0*.py"))
+    assert numbered == ["0001_initial.py"]

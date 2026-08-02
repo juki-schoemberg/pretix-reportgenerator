@@ -426,3 +426,139 @@ von `tests/conftest.py`, `tests/factories.py`, `tests/test_integration.py`,
    unverändert weiter.
 4. **Wer T-001 oder T-002 behebt:** die zwei `xfail`-Tests fallen dann mit
    **XPASS** um. Das ist Absicht. Marker entfernen, Assertion stehen lassen.
+
+---
+
+## Nachtrag — Welle 4: `event_copy_data` ist jetzt verdrahtet
+
+**Anlass.** Der `integrator` hat den Empfänger von `portability-dev` in
+`pretix_custom_reports/signals.py` verbunden. Damit ruft jedes
+`Event.copy_data_from(...)` selbst `copy_reports_to_event(...)` auf. In Welle 3
+gab es das Signal noch nicht, deshalb rief
+`test_an_event_copy_carries_its_reports_and_runs_them_in_the_copy` die
+Kopierfunktion von Hand nach — jetzt lief sie zweimal, der zweite Aufruf traf
+auf den vergebenen Identifier und legte `sizes-2` an:
+
+```
+tests/test_integration.py:516: AssertionError: assert 'sizes-2' == 'sizes'
+```
+
+Kein Produktivfehler, sondern ein Test, der eine Simulation prüfte, wo es
+inzwischen den echten Weg gibt.
+
+**Geändert (nur `tests/test_integration.py`):**
+
+1. `test_an_event_copy_carries_its_reports_and_runs_them_in_the_copy` ruft
+   `copy_reports_to_event` nicht mehr auf. Der Test macht nur noch
+   `copy_event.copy_data_from(world.event)` und liest das Ergebnis über
+   `copy_event.custom_reports`. Statt `result.count`/`result.failed`/
+   `result.copied[0].report` steht dort jetzt
+   `assert [r.identifier for r in copies] == ["sizes"]` — eine Liste, kein
+   `get()`: ein doppelt feuernder Empfänger hinterlässt `sizes-2`, und genau das
+   fällt so auf. Der Rest (Export leer, dann Bestellung in der Kopie, dann eine
+   Zeile) ist unverändert.
+2. Neu: `test_the_event_copy_signal_hands_the_question_map_to_the_log_entry`.
+   Er prüft den Signalweg dort, wo er sich von einem direkten Funktionsaufruf
+   unterscheidet — an den **Argumenten, die pretix schickt**. Über den
+   `copied_from_event`-Block des `report.added`-Eintrags:
+   `questions_mapped == 12` (eine Frage je `Question.type`, `QUESTION_SPECS` in
+   `tests/factories.py`), Quell-Organizer/-Event/-Identifier, und
+   `counts.found == 2` bei `mapped == missing == 0`. Festgehalten ist außerdem,
+   dass der Eintrag **keinen** Benutzer hat: `event_copy_data` führt keinen mit,
+   der Empfänger kann keinen erfinden.
+3. Import `copy_reports_to_event` entfernt (in dieser Datei nun ungenutzt). Die
+   Funktion selbst bleibt in `tests/test_portability.py` Abschnitt 8 mit fünf
+   Tests abgedeckt, inklusive Umbenennung, nicht auflösbarem Key und
+   organizerübergreifender Kopie. Doppelt musste sie hier nicht sein; der
+   Integrationsteil trägt jetzt genau das bei, was die Unit-Tests nicht können.
+
+Damit ist Punkt 5 aus
+`handoff/requests/erledigt/portability-dev-an-integrator-signals.md` erledigt
+(„ein Test, der das Signal selbst auslöst, gehört nach dem Verdrahten in
+tests/test_integration.py").
+
+**Läufe.**
+
+```
+pytest tests/test_integration.py -q          -> 33 passed, 2 xfailed
+pytest -m "not performance" -q               -> 1016 passed, 8 deselected, 8 xfailed
+flake8 / isort -c / black --check tests/test_integration.py -> rc 0
+```
+
+Kein Produktivcode angefasst, kein `git commit`. Die drei Findings in
+`handoff/blockers.md` (T-001 bis T-003) sind davon unberührt und stehen weiter
+offen.
+
+---
+
+## Nachtrag (Welle 4): `registered`-Fixture entschärft
+
+`exporter-dev` hat in `tests/test_exporters.py` einen Fixture-Fehler gefunden und
+behoben und denselben Fehlermechanismus in meiner Datei gemeldet. Meine Fixture
+`registered` (`tests/test_integration.py`) hatte **nicht** die lauteste Variante
+davon, aber die leisere derselben Familie.
+
+**Was war.** Die Fixture verband `register_report_exporter` und
+`register_multievent_report_exporter` unter eigenen `dispatch_uid`s
+(`pretix_custom_reports_integration_exporter` / `..._integration_multiexporter`).
+Weil `signals.py` seit Welle 4 dieselben Funktionen beim Plugin-Import unter
+`pretix_custom_reports_exporter` / `..._multiexporter` verbindet, waren das ab
+Welle 4 **zwei** Empfänger für dieselbe Funktion. Der Teardown hat sauber die
+eigene Verbindung getrennt — die Produktivverdrahtung blieb also unberührt, die
+sessionweite Variante des Fehlers (`test_exporters.py`, `test_security.py`) hatte
+ich nicht. Dafür lief jeder Test dieser Datei gegen eine Exporterliste, in der
+`customreports` **doppelt** stand: `init_event_exporters()` instanziiert einen
+Exporter je wahrer Signalantwort und dedupliziert nicht
+(`pretix/base/services/export.py:198-222`). Aufgefallen ist es nie, weil
+`init_event_exporter()` den ersten Treffer zurückgibt (ebd. 191-195) — sichtbar
+geworden wäre es als doppelte Zeile auf der Exportseite.
+
+**Was jetzt ist.** Muster von `exporter-dev` übernommen, Helfer bewusst
+dupliziert statt importiert (zwei Testmodule verschiedener Agents sollen sich
+nicht gegenseitig importieren):
+
+* `connected_receiver(signal, dispatch_uid)` dereferenziert die `weakref.ref`s
+  aus `Signal.receivers`.
+* `WIRING` nennt die **produktiven** `dispatch_uid`s, `WIRING_AT_IMPORT` hält den
+  Zustand nach `apps.ready()` fest.
+* `registered` verbindet nur noch, was fehlt, und trennt nur, was sie selbst
+  verbunden hat. Ist eine uid belegt, prüft ein `assert`, dass sie an die
+  erwartete Funktion gebunden ist — sonst liefe die ganze Datei still gegen einen
+  fremden Empfänger, weil `connect()` bei belegtem Schlüssel wirkungslos ist
+  (`django/dispatch/dispatcher.py:113-117`) und `disconnect(dispatch_uid=...)`
+  allein über diesen Schlüssel matcht (ebd. 138-153).
+
+**Zwei neue Tests** in neuem Abschnitt 7:
+
+1. `test_the_report_export_is_offered_exactly_once_on_both_levels` — ohne die
+   Fixture, weil die Fixture nicht gleichzeitig Zeuge ihrer eigenen Zusage sein
+   kann. Prüft über `init_event_exporters` **und** `init_organizer_exporters`,
+   dass `customreports` genau einmal in der Liste steht, und dass die beiden
+   produktiven uids an unsere Funktionen gebunden sind. Gegenprobe gemacht: mit
+   einer zweiten Verbindung unter fremder uid schlägt er fehl
+   (`assert ['customreports', 'customreports'] == ['customreports']`).
+2. `test_this_module_hands_the_signal_wiring_back_untouched` — steht bewusst als
+   letzter Test der Datei. Vergleicht gegen einen modulweiten Snapshot; der
+   strenge Teil läuft nur, wenn die Datei wirklich die Produktivverdrahtung
+   bekommen hat, damit fremde Lecks nicht unter meinem Testnamen auflaufen.
+
+**Nicht mein Gebiet, nur als Hinweis:** `tests/test_smoke.py:38-53` (integrator)
+hält einen Snapshot-Workaround, dessen Kommentar noch auf die alte Fixture von
+`exporter-dev` zeigt. `tests/test_security.py` hat `security-reviewer`
+parallel auf dasselbe Muster gezogen (`registered_exporter`). Damit ist in allen
+drei Modulen die Ursache weg und der Workaround in `test_smoke.py` könnte
+zurückgebaut werden — Entscheidung des `integrator`.
+
+**Läufe.**
+
+```
+pytest tests/test_integration.py -q                                   -> 35 passed, 2 xfailed
+pytest tests/test_integration.py tests/test_exporters.py \
+       tests/test_security.py -q                                      -> 206 passed, 8 xfailed
+pytest tests/test_security.py tests/test_integration.py \
+       tests/test_exporters.py tests/test_smoke.py -q  (Reihenfolge)   -> 228 passed, 8 xfailed
+pytest -m "not performance" -q                                        -> 1019 passed, 8 deselected, 8 xfailed
+flake8 / isort -c / black --check tests/test_integration.py           -> rc 0
+```
+
+Nur `tests/test_integration.py` geändert. Kein Produktivcode, kein `git commit`.

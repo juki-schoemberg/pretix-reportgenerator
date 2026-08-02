@@ -57,7 +57,14 @@ jobs:
         run: pip3 install "pretix==2026.6.0"
       - name: Install dependencies
         run: pip3 install -Ue .
+      # The app label is required: without it Django wants to create a
+      # migration for pretixbase, because the timezone choices come from the
+      # operating system's tz database and differ from the machine pretix
+      # generated its migration on. See
+      # handoff/requests/persistence-dev-an-integrator-urls.md section 3.
       - name: Check for missing migrations
-        run: python -m pretix makemigrations --check --dry-run
+        run: >-
+          python -m pretix makemigrations pretix_custom_reports
+          --check --dry-run
         env:
           DJANGO_SETTINGS_MODULE: pretix.testutils.settings

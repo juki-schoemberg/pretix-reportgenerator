@@ -1,3 +1,7 @@
+> **ERLEDIGT — 2026-08-02, `integrator` (Welle 4).** Vollständig übernommen.
+> Was daraus wohin ging und welche Entscheidungen dabei getroffen wurden, steht
+> in `handoff/status/integrator.md`.
+
 # exporter-dev → integrator: zwei Empfänger in `signals.py`
 
 **Welle:** 2 → 4 (bzw. beim ersten Merge)

@@ -2,3 +2,4 @@ recursive-include pretix_custom_reports/static *
 recursive-include pretix_custom_reports/templates *
 recursive-include pretix_custom_reports/locale *
 include LICENSE
+include CHANGELOG.rst

@@ -36,6 +36,7 @@ import pathlib
 import pytest
 import re
 import warnings
+import weakref
 from decimal import Decimal
 from django.test import Client
 from django.urls import clear_url_caches, reverse
@@ -95,8 +96,71 @@ CHANGE_PERMISSION = "event.settings.general:write"
 VIEW_PERMISSION = "event.orders:read"
 ORGANIZER_CHANGE_PERMISSION = "organizer.settings.general:write"
 
-EXPORTER_UID = "pretix_custom_reports_security_exporter"
-EXPORTER_MULTI_UID = "pretix_custom_reports_security_multiexporter"
+#: The dispatch_uids ``signals.py`` uses. Not test-local ones on purpose, see
+#: :func:`registered_exporter`.
+EXPORTER_UID = "pretix_custom_reports_exporter"
+EXPORTER_MULTI_UID = "pretix_custom_reports_multiexporter"
+
+#: The wiring these tests need, as ``(signal, receiver, dispatch_uid)``.
+EXPORTER_WIRING = (
+    (register_data_exporters, exporters.register_report_exporter, EXPORTER_UID),
+    (
+        register_multievent_data_exporters,
+        exporters.register_multievent_report_exporter,
+        EXPORTER_MULTI_UID,
+    ),
+)
+
+
+def connected_receiver(signal, dispatch_uid):
+    """The receiver currently connected to *signal* under *dispatch_uid*.
+
+    ``Signal.receivers`` holds ``(lookup_key, receiver, is_async)`` in Django
+    5.2 and ``lookup_key`` is ``(dispatch_uid or id(receiver), id(sender))``
+    (django/dispatch/dispatcher.py:96-99, 113-117). With the default
+    ``weak=True`` the second slot is a ``weakref.ref`` and has to be
+    dereferenced before it can be compared against a function.
+
+    Returns ``None`` if nothing is connected under that dispatch_uid.
+
+    Deliberately duplicated from ``tests/test_exporters.py``: two test modules
+    owned by two different agents do not import from each other.
+    """
+    for lookup_key, receiver, *_ in signal.receivers:
+        if lookup_key[0] == dispatch_uid:
+            if isinstance(receiver, weakref.ReferenceType):
+                return receiver()
+            return receiver
+    return None
+
+
+def named_receivers(signal):
+    """Every receiver on *signal* that was connected with a string dispatch_uid.
+
+    ``{dispatch_uid: receiver}``. Receivers connected without an explicit uid
+    have ``id(receiver)`` in that slot and are skipped -- the uid is what the
+    plugins in this process identify themselves by, and it is what
+    ``disconnect()`` acts on.
+    """
+    result = {}
+    for lookup_key, receiver, *_ in signal.receivers:
+        if isinstance(lookup_key[0], str):
+            if isinstance(receiver, weakref.ReferenceType):
+                receiver = receiver()
+            result[lookup_key[0]] = receiver
+    return result
+
+
+def times_connected(signal, function):
+    """How often *function* is connected to *signal*, under any lookup key."""
+    count = 0
+    for _lookup_key, receiver, *_ in signal.receivers:
+        if isinstance(receiver, weakref.ReferenceType):
+            receiver = receiver()
+        if receiver is function:
+            count += 1
+    return count
+
 
 #: A lone UTF-16 high surrogate. ``json.loads`` accepts ``"\ud800"`` -- it is a
 #: valid JSON escape -- but the resulting Python string cannot be encoded as
@@ -300,23 +364,86 @@ def orders(event):
     return {"order": order, "item": item}
 
 
+@pytest.fixture(scope="module", autouse=True)
+def exporter_wiring_before_this_module():
+    """The exporter wiring as this module found it, for the canary at the end.
+
+    Module scoped and autouse, so it is taken before the first test here runs.
+    What this file has to answer for is that it changes nothing -- not that the
+    session was healthy when it got the process. Somebody else's leak is
+    somebody else's test to fail.
+    """
+    return {
+        signal: named_receivers(signal)
+        for signal in (register_data_exporters, register_multievent_data_exporters)
+    }
+
+
 @pytest.fixture
 def registered_exporter():
-    """Connect the two receivers exactly as the integrator will."""
-    register_data_exporters.connect(
-        exporters.register_report_exporter, dispatch_uid=EXPORTER_UID
-    )
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message=".*organizer-level.*", category=DeprecationWarning
-        )
-        register_multievent_data_exporters.connect(
-            exporters.register_multievent_report_exporter,
-            dispatch_uid=EXPORTER_MULTI_UID,
+    """Guarantee the two exporter receivers are connected, and restore after.
+
+    Since wave 4 ``signals.py`` connects both of them at plugin import
+    (``apps.ready()``), so in a normal run there is nothing left to do here.
+    This must not be written as a plain connect/disconnect pair, and that is
+    not a style preference -- both halves of such a pair are wrong:
+
+    * ``Signal.connect()`` skips a receiver whose ``(dispatch_uid, sender_id)``
+      key is already present (django/dispatch/dispatcher.py:113-117). Under the
+      production uid the call is a silent no-op; under a *test-local* uid it is
+      worse, because the key differs and the same receiver gets connected a
+      second time -- ``init_event_exporters()`` iterates the signal responses
+      without deduplicating (pretix/base/services/export.py:198-225), so every
+      test would run against an exporter list holding ``customreports`` twice.
+      That is what this fixture used to do, with its own
+      ``pretix_custom_reports_security_*`` uids.
+    * ``Signal.disconnect(dispatch_uid=...)`` matches on that key *alone*; the
+      receiver argument is ignored entirely (dispatcher.py:138-153). Under the
+      production uid the teardown therefore removes the registration
+      ``signals.py`` made at plugin import, for the rest of the pytest session,
+      in whatever file follows. ``signals.py`` runs once and never reconnects.
+      pretix' ``EventPluginSignal``/``OrganizerPluginSignal`` override
+      ``connect`` but not ``disconnect`` (pretix/base/signals.py:261-311), so
+      none of this is softened for plugin signals.
+
+    So: use the production uids, connect only what is missing, disconnect only
+    what we connected ourselves. If a uid is already taken, assert it is taken
+    by the function we expect -- otherwise the no-op ``connect()`` would run
+    this whole module against somebody else's receiver without a word.
+
+    ``register_multievent_data_exporters`` is an
+    ``OrganizerPluginSignal(allow_legacy_plugins=True)`` and this plugin is
+    event level, so ``connect()`` emits a ``DeprecationWarning``
+    (pretix/base/signals.py:301-306). pretix' own test config filters it, ours
+    does not, so it is silenced here -- narrowly, so that a *different*
+    deprecation stays visible.
+    """
+    connected_by_us = []
+    for signal, receiver, dispatch_uid in EXPORTER_WIRING:
+        existing = connected_receiver(signal, dispatch_uid)
+        if existing is not None:
+            assert existing is receiver, (
+                f"{dispatch_uid!r} is connected to {existing!r}, not to "
+                f"{receiver!r} -- signals.py and exporters.py disagree."
+            )
+            continue
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*organizer-level.*",
+                category=DeprecationWarning,
+            )
+            signal.connect(receiver, dispatch_uid=dispatch_uid)
+        connected_by_us.append((signal, dispatch_uid))
+    for signal, receiver, _dispatch_uid in EXPORTER_WIRING:
+        # The point of the whole dance: exactly one registration, not two.
+        assert times_connected(signal, receiver) == 1, (
+            f"{receiver.__name__} is connected {times_connected(signal, receiver)} "
+            f"times -- the exporter would appear that often in the export UI."
         )
     yield
-    register_data_exporters.disconnect(dispatch_uid=EXPORTER_UID)
-    register_multievent_data_exporters.disconnect(dispatch_uid=EXPORTER_MULTI_UID)
+    for signal, dispatch_uid in connected_by_us:
+        signal.disconnect(dispatch_uid=dispatch_uid)
 
 
 # ===========================================================================
@@ -2450,3 +2577,42 @@ def test_the_generated_export_file_name_survives_a_dotted_event_slug(
     assert name.isascii()
     for forbidden in ("/", "\\", '"', "\r", "\n", ".."):
         assert forbidden not in name, name
+
+
+# NOTE: keep this last. pytest runs the tests of a module in definition order,
+# so a check placed here has seen every ``registered_exporter`` teardown above.
+def test_this_module_hands_the_exporter_wiring_back_untouched(
+    exporter_wiring_before_this_module,
+):
+    """Whatever wiring this module was handed, it hands back.
+
+    Nothing added, nothing removed, nothing rebound under a known uid. A leak
+    here is order dependent and would surface in somebody else's file, which is
+    the worst possible way to find it.
+
+    This covers the *lasting* half of the fixture defect (a teardown that drops
+    the production registration for the rest of the session). It cannot cover
+    the transient half -- the old fixture's connect/disconnect pair under
+    test-local uids was balanced and left nothing behind at module end; that
+    the receivers are connected exactly once *while* a test runs is asserted in
+    :func:`registered_exporter` itself.
+
+    The second block only runs when we really were handed the production
+    wiring, so that this test keeps reporting *our* leaks and not another
+    module's.
+    """
+    after = {
+        signal: named_receivers(signal)
+        for signal in (register_data_exporters, register_multievent_data_exporters)
+    }
+    assert after == exporter_wiring_before_this_module
+
+    # Only meaningful when we really were handed the production wiring.
+    if all(
+        connected_receiver(signal, dispatch_uid) is receiver
+        for signal, receiver, dispatch_uid in EXPORTER_WIRING
+    ):
+        # has_listeners() and the identity check fail for different reasons: a
+        # signal emptied wholesale versus our own uid dropped or rebound.
+        assert register_data_exporters.has_listeners()
+        assert register_multievent_data_exporters.has_listeners()

@@ -1,3 +1,8 @@
+> **ARCHIVIERT — 2026-08-02, `integrator` (Welle 4).** Nicht an mich
+> adressiert; beim Aufräumen von `handoff/requests/` gegen den Code geprüft und
+> als umgesetzt befunden (`models.py`: `identifier` mit `IDENTIFIER_RE` und beiden `UniqueConstraint`s `pcr_uniq_identifier_event`/`_orga`). Falls der ursprüngliche
+> Empfänger anderer Meinung ist: Datei zurückschieben.
+
 # contract-architect → persistence-dev: stabiler `identifier` am Report-Modell
 
 **Welle:** 0c → 1

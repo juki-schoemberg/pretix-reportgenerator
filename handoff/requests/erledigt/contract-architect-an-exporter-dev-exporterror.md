@@ -1,3 +1,8 @@
+> **ARCHIVIERT — 2026-08-02, `integrator` (Welle 4).** Nicht an mich
+> adressiert; beim Aufräumen von `handoff/requests/` gegen den Code geprüft und
+> als umgesetzt befunden (`exporters.py` übersetzt an 14 Stellen in `ExportError`). Falls der ursprüngliche
+> Empfänger anderer Meinung ist: Datei zurückschieben.
+
 # contract-architect → exporter-dev: tote Report-Referenz muss `ExportError` werden
 
 **Welle:** 0c → 2

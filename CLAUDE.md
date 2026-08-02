@@ -50,10 +50,19 @@ bash scripts/install-plugin.sh          # Plugin registrieren
 pytest                                  # Tests
 pytest -m "not performance"             # ohne Lasttests
 flake8 . && isort -c . && black --check .
-python -m pretix makemigrations --check
+python -m pretix makemigrations pretix_custom_reports --check --dry-run
 pip install -e .                        # Plugin registrieren
 make                                    # Übersetzungen kompilieren
 ```
+
+Zum Migrationscheck: das App-Label **und** `--dry-run` gehören dazu. Ohne
+App-Label will Django eine Migration für `pretixbase` anlegen, weil die
+`timezone`-Choices aus der tz-Datenbank des Betriebssystems kommen — ohne
+`--dry-run` schreibt der Befehl diese Datei in den pretix-Klon, der laut
+`ENVIRONMENT.md` reine Lesequelle ist. Und immer `python -m pretix`, nie
+`django-admin`: pretix' eigener Befehl entfernt `verbose_name`, `help_text`,
+`validators`, `blank` und `choices` aus der Feld-Dekonstruktion
+(`pretix/base/management/commands/_migrations.py`).
 
 ## Struktur
 

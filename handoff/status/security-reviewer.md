@@ -398,3 +398,82 @@ S-003 (mittel), S-004, S-005, S-006 (niedrig) unverändert. Die sechs
 verbleibenden `xfail(strict=True)` verteilen sich auf S-003 (vier), S-004 (einer)
 und S-006 (einer). Nacharbeit an den `integrator`: das Plugin-Gate steht jetzt
 dreimal wörtlich im Repo — Kandidat für ein gemeinsames `views/_mixins.py`.
+
+---
+
+# Nachtrag (Welle 5): `registered_exporter`-Fixture repariert
+
+Reine Testinfrastruktur, kein neuer Befund. `docs/security-review.md` und
+`handoff/blockers.md` bleiben unverandert.
+
+## Was falsch war
+
+`tests/test_security.py::registered_exporter` war ein nackter
+connect/disconnect-Pfad. Seit `signals.py` die beiden Exporter-Receiver beim
+Plugin-Import dauerhaft verbindet, ist so ein Paar in beiden Varianten falsch:
+
+* Mit **produktiven** `dispatch_uid`s ist `connect()` ein stiller No-op
+  (`django/dispatch/dispatcher.py:113-117`), das Teardown-`disconnect()` matcht
+  aber allein uber `(dispatch_uid, sender_id)` und entfernt damit die
+  produktive Registrierung -- sessionweit, fur jede Datei, die danach lauft
+  (`dispatcher.py:138-153`). Das war der Fall in `tests/test_exporters.py`, den
+  `exporter-dev` behoben hat.
+* Meine Fixture hatte stattdessen **eigene** uids
+  (`pretix_custom_reports_security_exporter` / `..._multiexporter`). Damit
+  unterscheidet sich der Lookup-Key, `connect()` ist kein No-op, und dieselbe
+  Funktion hangt waehrend jedes Tests **zweimal** am Signal.
+  `init_event_exporters()` dedupliziert nicht
+  (`pretix/base/services/export.py:198-225`), also lief jeder Test mit
+  `registered_exporter` gegen eine Exporter-Liste, in der `customreports`
+  doppelt steht. Kein Sicherheitsbefund -- aber die Tests haben nicht das
+  geprueft, was in Produktion passiert, und ein Duplikat hatte eine echte
+  Doppelregistrierung nie auffallen lassen.
+
+## Was jetzt drinsteht
+
+Muster von `exporter-dev` uebernommen, Helfer bewusst dupliziert statt aus
+`tests/test_exporters.py` importiert (zwei Testmodule zweier Agents importieren
+nicht voneinander):
+
+* `connected_receiver(signal, dispatch_uid)` -- dereferenziert die
+  `weakref.ref` aus `Signal.receivers`.
+* `named_receivers(signal)` -- alle Receiver mit String-uid, fuer den Kanarien-
+  vogel.
+* `times_connected(signal, function)` -- zaehlt Registrierungen einer Funktion.
+* `EXPORTER_UID` / `EXPORTER_MULTI_UID` zeigen jetzt auf die **produktiven**
+  uids aus `signals.py`; `EXPORTER_WIRING` haelt die zwei Tripel.
+* `registered_exporter` verbindet nur, was fehlt, prueft bei belegter uid per
+  `assert`, dass wirklich unsere Funktion dranhaengt, trennt im Teardown nur
+  Selbstverbundenes -- und stellt vor dem `yield` sicher, dass jeder Receiver
+  **genau einmal** haengt.
+* Neu am Dateiende:
+  `test_this_module_hands_the_exporter_wiring_back_untouched` (Kanarienvogel,
+  modulweiter Vorher/Nachher-Vergleich uber die neue modulweite Autouse-Fixture
+  `exporter_wiring_before_this_module`). Er deckt die *bleibende* Haelfte ab;
+  die transiente Doppelregistrierung faengt der `assert` in der Fixture.
+
+## Zahlen
+
+* `pytest tests/test_security.py -q` -> **129 passed, 6 xfailed** (vorher 128/6;
+  +1 = der Kanarienvogel, keine Regression, dieselben sechs `xfail`).
+* `pytest tests/test_security.py tests/test_exporters.py -q` -> 171 passed,
+  6 xfailed. Umgekehrte Reihenfolge identisch.
+  `pytest tests/test_integration.py tests/test_security.py -q` -> 164 passed,
+  8 xfailed.
+* `pytest -m "not performance" -q` -> **1019 passed, 8 deselected, 8 xfailed**,
+  0 failed. (Das fruehere `test_no_migration_created_yet` faellt nicht mehr.)
+* `flake8`, `black --check`, `isort -c` ueber `tests/test_security.py`: gruen.
+* Geaendert: nur `tests/test_security.py` und diese Datei. Kein Produktivcode,
+  kein Commit.
+
+## Weitergegeben
+
+`tests/test_integration.py::registered` hatte dieselbe Doppelregistrierung
+(eigene uids `pretix_custom_reports_integration_*`); `integration-tester` hat
+sie waehrend meines Laufs parallel auf dasselbe Muster umgestellt -- erledigt,
+nur zur Kenntnis. Offen bleiben zwei veraltete Querverweise in fremdem Gebiet:
+`tests/test_exporters.py:1488` nennt `tests/test_security.py` noch als Datei
+mit dem alten connect/disconnect-Paar, und der Snapshot-Workaround in
+`tests/test_smoke.py:38-53` begruendet sich mit genau diesem Defekt. Beides
+stimmt ab jetzt nicht mehr; Nachziehen liegt bei `exporter-dev` bzw. dem
+Eigentuemer von `tests/test_smoke.py`.
