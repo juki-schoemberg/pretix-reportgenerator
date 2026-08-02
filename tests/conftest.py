@@ -18,7 +18,10 @@
 """Shared pytest fixtures for pretix-custom-reports."""
 
 import datetime
+import importlib
 import pytest
+import sys
+from django.urls import clear_url_caches
 from django.utils.timezone import now
 from django_scopes import scopes_disabled
 from pretix.base.models import Event, Organizer, Team, User
@@ -124,3 +127,67 @@ def fixture_dir():
     import pathlib
 
     return pathlib.Path(__file__).parent / "fixtures"
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 additions (test-engineer)
+# ---------------------------------------------------------------------------
+#
+# Everything below exists for the integration and performance tests. It is
+# deliberately opt-in -- no autouse fixture -- so that adding it cannot change
+# what any other agent's module does.
+
+#: Django's root URLconf under the pretix test settings.
+URLCONF = "pretix.multidomain.maindomain_urlconf"
+
+
+def reload_urlconf():
+    """Re-import the root URLconf and drop Django's reverse caches."""
+    if URLCONF in sys.modules:
+        importlib.reload(sys.modules[URLCONF])
+    else:  # pragma: no cover - only if nothing has resolved a URL yet
+        importlib.import_module(URLCONF)
+    clear_url_caches()
+
+
+@pytest.fixture(scope="module")
+def wired_urls():
+    """Attach **every** view module's routes to the plugin URLconf.
+
+    ``urls.py`` belongs to the integrator and is wired up in wave 4
+    (ORCHESTRIERUNG.md section 5), so until then the CRUD views, the editor, the
+    JSON API, import/export and the organizer templates are only reachable
+    through their ``*_urlpatterns`` module variables. ``tests/test_permissions.py``
+    and ``tests/test_portability.py`` each attach their own subset; the
+    end-to-end tests need all of them at once, because the whole point is that
+    the path from the editor to another event's export runs through four
+    different agents' views.
+
+    Module-scoped: reloading the URLconf is not free and the routes are static.
+    """
+    from pretix_custom_reports import urls as plugin_urls
+    from pretix_custom_reports.views.api import api_urlpatterns
+    from pretix_custom_reports.views.crud import event_urlpatterns
+    from pretix_custom_reports.views.editor import editor_urlpatterns
+    from pretix_custom_reports.views.portability import portability_event_urlpatterns
+    from pretix_custom_reports.views.templates import (
+        templates_event_urlpatterns,
+        templates_organizer_urlpatterns,
+    )
+
+    wanted = (
+        list(event_urlpatterns)
+        + list(editor_urlpatterns)
+        + list(api_urlpatterns)
+        + list(portability_event_urlpatterns)
+        + list(templates_event_urlpatterns)
+        + list(templates_organizer_urlpatterns)
+    )
+    known = {pattern.name for pattern in plugin_urls.urlpatterns}
+    added = [pattern for pattern in wanted if pattern.name not in known]
+    plugin_urls.urlpatterns.extend(added)
+    reload_urlconf()
+    yield
+    for pattern in added:
+        plugin_urls.urlpatterns.remove(pattern)
+    reload_urlconf()
