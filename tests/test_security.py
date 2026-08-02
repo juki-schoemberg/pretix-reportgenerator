@@ -907,36 +907,138 @@ def test_the_post_endpoints_reject_a_request_without_a_csrf_token(
         assert response.status_code == 403, name
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-001: views/crud.py has no PluginActiveMixin (all other view "
-    "modules do), so the CRUD views stay reachable for an event that has the "
-    "plugin switched off.",
-)
 def test_every_event_view_404s_when_the_plugin_is_off(
     admin_client, event_without_plugin
 ):
+    """Regression for S-001 (fixed): switching the plugin off is the brake.
+
+    Written in wave 3 as the proof of the defect, kept as a regression test now
+    that ``persistence-dev`` has added a ``PluginActiveMixin`` to
+    ``views/crud.py``. Widened while verifying that fix, because the original
+    version only proved what it happened to request:
+
+    * all **five** views, not the four that answer GET. ``ReportDuplicateView``
+      is POST-only, so a GET against it is 405 whether the gate exists or not --
+      it was structurally unable to fail here and has to be attacked with the
+      method that actually writes.
+    * every writing method, not only the form pages. The gate sits in
+      ``dispatch()`` and therefore covers both, but "the confirmation page is a
+      404" and "the deletion is refused" are two different statements and only
+      the second one is the security property.
+    * the database afterwards. A 404 that still wrote would be the worst of both
+      worlds, and no status code can rule that out.
+    """
     with scopes_disabled():
         foreign = ReportDefinition.objects.create(
             event=event_without_plugin,
             name="Left over",
+            identifier="LEFTOVER",
             base="orderposition",
             definition=definition(),
         )
-    urls = [
-        event_url("event.reports", event_without_plugin),
-        event_url("event.reports.add", event_without_plugin),
-        event_url("event.reports.edit", event_without_plugin, report=foreign.pk),
-        event_url("event.reports.delete", event_without_plugin, report=foreign.pk),
+    body = {
+        "name": "Sneaked in",
+        "description": "",
+        "identifier": "SNEAKED1",
+        "base": "orderposition",
+        "definition": json.dumps(definition()),
+    }
+    attempts = [
+        ("get", event_url("event.reports", event_without_plugin), None),
+        ("get", event_url("event.reports.add", event_without_plugin), None),
+        ("post", event_url("event.reports.add", event_without_plugin), body),
+        (
+            "get",
+            event_url("event.reports.edit", event_without_plugin, report=foreign.pk),
+            None,
+        ),
+        (
+            "post",
+            event_url("event.reports.edit", event_without_plugin, report=foreign.pk),
+            body,
+        ),
+        # POST-only view: a GET is 405 even with the gate in place, so the only
+        # request that says anything about the gate is the one that writes.
+        (
+            "post",
+            event_url(
+                "event.reports.duplicate", event_without_plugin, report=foreign.pk
+            ),
+            {},
+        ),
+        (
+            "get",
+            event_url("event.reports.delete", event_without_plugin, report=foreign.pk),
+            None,
+        ),
+        (
+            "post",
+            event_url("event.reports.delete", event_without_plugin, report=foreign.pk),
+            {},
+        ),
     ]
-    for url in urls:
-        assert admin_client.get(url).status_code == 404, url
+    for method, url, data in attempts:
+        response = (
+            admin_client.get(url) if data is None else admin_client.post(url, data)
+        )
+        assert response.status_code == 404, "{} {}".format(method.upper(), url)
+
+    with scopes_disabled():
+        # Nothing created, nothing renamed, nothing deleted.
+        assert list(ReportDefinition.objects.values_list("identifier", flat=True)) == [
+            "LEFTOVER"
+        ]
+        assert ReportDefinition.objects.get(pk=foreign.pk).name == "Left over"
+
+
+def test_the_permission_check_runs_before_the_plugin_gate_not_after(
+    read_only_user, admin_client, event_without_plugin
+):
+    """Which of the two gates answers first -- measured, not read off the MRO.
+
+    ``persistence-dev`` closed S-001 with the argument that the MRO puts
+    ``PluginActiveMixin`` left of ``EventPermissionRequiredMixin`` and that the
+    plugin gate therefore runs first, giving 404 instead of 403 for a
+    switched-off event (handoff/status/persistence-dev.md, "Nacharbeit vor Welle
+    4"). The MRO part is correct -- ``test_no_crud_view_is_missing_the_plugin_gate``
+    asserts it -- but the conclusion is not: ``EventPermissionRequiredMixin``
+    does not implement ``dispatch`` at all. It overrides ``as_view()`` and wraps
+    the finished view in ``event_permission_required(...)``
+    (pretix/control/permissions.py:81-91), so the permission decorator sits
+    *outside* the whole class-based dispatch chain and runs before any mixin.
+
+    Not a defect -- both gates refuse, and this order is the more careful one,
+    because a user who may not see the page cannot learn from the status code
+    whether the plugin is on. It is asserted here so that the wrong rationale
+    cannot be reused for the next view, and so a future refactor that moves the
+    permission check into ``dispatch()`` becomes visible instead of silent.
+
+    ``views/api.py``, ``views/portability.py`` and ``views/templates.py`` carry
+    the same mixin combination and therefore behave the same way; the second
+    URL in the first loop is a portability view for exactly that reason.
+    """
+    client = logged_in(read_only_user)
+    # Missing permission wins over the plugin gate: 403, not 404.
+    for name in ("event.reports.add", "event.reports.import"):
+        url = event_url(name, event_without_plugin)
+        assert client.get(url).status_code == 403, url
+
+    # And where the permission *is* held, the gate is what answers.
+    url = event_url("event.reports", event_without_plugin)
+    assert client.get(url).status_code == 404, url
+    assert admin_client.get(url).status_code == 404, url
 
 
 def test_the_endpoints_that_do_have_the_plugin_gate_really_404(
     admin_client, event_without_plugin
 ):
-    """Control group for the xfail above -- api, editor and portability do."""
+    """The other four view modules -- api, editor, portability, templates.
+
+    This was the control group for the S-001 xfail: it showed that the modules
+    which *did* gate answered 404, so a failing CRUD test could not be blamed on
+    the fixture or on the router. Kept now that S-001 is closed, because it is
+    the only place that asserts the four gates side by side.
+    """
     urls = [
         event_url("api.fields", event_without_plugin),
         event_url("editor.new", event_without_plugin),
@@ -945,6 +1047,35 @@ def test_the_endpoints_that_do_have_the_plugin_gate_really_404(
     ]
     for url in urls:
         assert admin_client.get(url).status_code == 404, url
+
+
+def test_no_crud_view_is_missing_the_plugin_gate():
+    """Belt and braces: the gate is a class property, not a URL property.
+
+    The request-level test above can only see the routes this module attaches. A
+    sixth view added to ``views/crud.py`` tomorrow would pass it simply by not
+    being routed here while being routed in ``urls.py``. So the class hierarchy
+    is asserted directly, for every view class the module exports.
+    """
+    from django.views.generic import View as DjangoView
+
+    from pretix_custom_reports.views import crud
+
+    view_classes = [
+        getattr(crud, name)
+        for name in crud.__all__
+        if isinstance(getattr(crud, name), type)
+        and issubclass(getattr(crud, name), DjangoView)
+    ]
+    assert len(view_classes) == 5, [c.__name__ for c in view_classes]
+    for view_class in view_classes:
+        mro = [c.__name__ for c in view_class.__mro__]
+        assert "PluginActiveMixin" in mro, view_class.__name__
+        # ...and left of the permission mixin, or the 403 would come first.
+        assert mro.index("PluginActiveMixin") < mro.index(
+            "EventPermissionRequiredMixin"
+        ), view_class.__name__
+        assert view_class.plugin_module == "pretix_custom_reports"
 
 
 # ===========================================================================
@@ -1665,15 +1796,28 @@ def test_stored_export_form_data_is_type_checked_before_use(
                 exporter.render(form_data)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-002: the multi-event exporter never asks whether the plugin is "
-    "active for an event, so switching the plugin off does not stop its reports "
-    "from being exported through the organizer-level export.",
-)
-def test_an_organizer_export_skips_events_with_the_plugin_switched_off(
-    event, event_without_plugin, registered_exporter, user_with_perms, organizer
-):
+def _organizer_exporter(organizer, user):
+    """The one ``customreports`` exporter pretix builds for an organizer run."""
+    found = [
+        ex
+        for ex in init_organizer_exporters(organizer=organizer, user=user)
+        if ex.identifier == "customreports"
+    ]
+    assert found, "the multi-event exporter was not offered at all"
+    return found[0]
+
+
+def _leftover_in_both_events(organizer, event, event_without_plugin):
+    """Report ``LEFTOVER`` plus one order in each of the two events.
+
+    Deliberately in **both**: with the report only in the switched-off event,
+    the whole export has nothing left to produce and dies with an
+    ``ExportError`` before any assertion about the file content can be made --
+    which would prove that the export failed, not that ``OFFEV`` is absent. Both
+    events holding the same identifier is also the realistic shape: identifiers
+    are unique per event, and an event copy or an organizer template is exactly
+    how the same report ends up in several events.
+    """
     with scopes_disabled():
         channel = organizer.sales_channels.get(identifier="web")
         item = Item.objects.create(
@@ -1695,28 +1839,80 @@ def test_an_organizer_export_skips_events_with_the_plugin_switched_off(
         OrderPosition.objects.create(
             order=order, item=item, price=Decimal("1.00"), positionid=1
         )
+        for owner in (event, event_without_plugin):
+            ReportDefinition.objects.create(
+                event=owner,
+                name="Left over",
+                identifier="LEFTOVER",
+                base="orderposition",
+                definition=definition(),
+            )
+
+
+def test_an_organizer_export_skips_events_with_the_plugin_switched_off(
+    event, event_without_plugin, registered_exporter, user_with_perms, organizer, orders
+):
+    """Regression for S-002 (fixed): the organizer export honours the brake.
+
+    ``register_multievent_data_exporters`` is an
+    ``OrganizerPluginSignal(allow_legacy_plugins=True)``, so pretix hands this
+    event-level plugin to every organizer, and ``self.events`` from
+    ``init_organizer_exporters`` is filtered by *permission* only. The per-event
+    plugin check therefore has to be the exporter's own, and this is the test
+    that it exists.
+
+    ``event`` (plugin on) and ``event_without_plugin`` (plugin off) both hold
+    the report ``LEFTOVER`` and both hold an order, so the file has something to
+    contain either way: the only thing that can keep ``OFFEV`` out is the gate.
+    The original wave-3 version put the report only in the switched-off event;
+    after the fix that made ``render()`` raise ``ExportError`` for having no
+    usable event left, and the test would then have failed for a reason that has
+    nothing to do with the leak.
+    """
+    _leftover_in_both_events(organizer, event, event_without_plugin)
+    with scope(organizer=organizer):
+        exporter = _organizer_exporter(organizer, user_with_perms)
+        _name, _mime, data = exporter.render(
+            {"report": "LEFTOVER", "_format": "default"}
+        )
+    # The order code and the slug of the switched-off event must not be in the
+    # file; the event that still has the plugin must be unaffected by the skip.
+    assert b"OFFEV" not in data
+    assert b"plain" not in data
+    assert b"AAAAA" in data
+    assert b"dummy" in data
+
+
+def test_the_organizer_export_form_never_offers_a_switched_off_events_report(
+    event, event_without_plugin, registered_exporter, user_with_perms, organizer
+):
+    """The gate has to hold in the choice list too, not only when rows are read.
+
+    ``report_choices()`` runs over ``self.events`` as well. Offering the report
+    of an event that ``_prepare()`` is then going to refuse would be a choice
+    that cannot be honoured -- and, worse, the report *name* of a switched-off
+    event is itself information that the brake was supposed to stop.
+    """
+    with scopes_disabled():
         ReportDefinition.objects.create(
             event=event_without_plugin,
-            name="Left over",
-            identifier="LEFTOVER",
+            name="Only in the switched-off event",
+            identifier="OFFONLY",
+            base="orderposition",
+            definition=definition(),
+        )
+        ReportDefinition.objects.create(
+            event=event,
+            name="Still live",
+            identifier="LIVEONE",
             base="orderposition",
             definition=definition(),
         )
     with scope(organizer=organizer):
-        found = [
-            ex
-            for ex in init_organizer_exporters(
-                organizer=organizer, user=user_with_perms
-            )
-            if ex.identifier == "customreports"
-        ]
-        assert found
-        _name, _mime, data = found[0].render(
-            {"report": "LEFTOVER", "_format": "default"}
-        )
-    # The order code of the event that has the plugin switched off must not be
-    # in the file.
-    assert b"OFFEV" not in data
+        choices = dict(_organizer_exporter(organizer, user_with_perms).report_choices())
+    assert "OFFONLY" not in choices
+    assert "LIVEONE" in choices
+    assert not any("switched-off" in label for label in choices.values())
 
 
 # ===========================================================================

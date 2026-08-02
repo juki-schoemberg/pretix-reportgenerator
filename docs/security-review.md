@@ -5,8 +5,16 @@ Prüfgegenstand: `pretix_custom_reports/**`, alle Views, der Exporter, das
 Portability-Paket, die Registry-Naht und der Query-Compiler.
 
 Alle Befunde sind mit einem Test in `tests/test_security.py` belegt
-(123 grün, 8 `xfail(strict=True)`). Ein Befund ohne Test steht ausschließlich im
+(128 grün, 6 `xfail(strict=True)`). Ein Befund ohne Test steht ausschließlich im
 Abschnitt „Unbestätigt" und ist dort als Vermutung gekennzeichnet.
+
+> **Nachtrag vom 2026-08-02 — S-001 und S-002 sind behoben und verifiziert.**
+> Der Orchestrator hat `persistence-dev` und `exporter-dev` vor dem Verdrahten
+> von `urls.py`/`signals.py` reaktiviert (Empfehlung U-07). Beide Fixes wurden
+> von mir gegengeprüft: die zwei Beweistests tragen kein `xfail` mehr, sind auf
+> die Lücken erweitert, die die ursprüngliche Fassung nicht messen konnte, und
+> schlagen bei künstlich entferntem Fix weiterhin genau am ursprünglichen Leck
+> fehl. Details je Befund unten unter **Status**. Offen bleiben S-003 bis S-006.
 
 **Kein kritischer Befund.** Es gibt in diesem Stand keinen Pfad, auf dem
 
@@ -33,13 +41,26 @@ Nummer des Befunds im `reason`. Damit gilt:
 * sobald jemand ihn behebt, wird der Test `XPASS` und die Suite **rot** — die
   Behebung erzwingt also, den Marker zu entfernen und damit den Befund
   abzuschließen,
-* `pytest --runxfail tests/test_security.py` zeigt die acht echten
-  Fehlermeldungen; jede wurde gegengelesen, damit kein Test aus dem falschen
-  Grund fehlschlägt.
+* `pytest --runxfail tests/test_security.py` zeigt die echten Fehlermeldungen
+  (bei Abgabe acht, nach dem Schließen von S-001 und S-002 noch sechs); jede
+  wurde gegengelesen, damit kein Test aus dem falschen Grund fehlschlägt.
 
 Zu jedem Befund, bei dem ein Nachbarpfad *nicht* betroffen ist, gibt es eine
 grüne **Kontrollgruppe**. Ohne die wäre ein `xfail` nicht von einem kaputten
 Test zu unterscheiden.
+
+Beim Schließen eines Befunds reicht „der Test ist grün" ausdrücklich **nicht**.
+Der Marker fällt erst, wenn drei Dinge gelten:
+
+1. Der Test läuft ohne `--runxfail` grün — also nicht nur „nicht mehr rot".
+2. Der Test misst noch, was er behauptet. Genau daran wäre der Beweistest zu
+   S-002 fast gescheitert: nach dem Fix hätte sein Aufbau einen `ExportError`
+   erzeugt, bevor die eigentliche Zusicherung erreicht wird. Ein Test, der aus
+   einem neuen Grund grün wird, ist kein Nachweis, sondern ein Deckmantel.
+3. Mit künstlich entferntem Fix fällt er wieder — und zwar an derselben Stelle
+   wie vorher. Geprüft über ein Wegwerf-Pytest-Plugin, das `dispatch` bzw.
+   `_plugin_is_active` zur Laufzeit neutralisiert; **kein Produktivcode wird
+   dafür angefasst**, auch nicht kurzzeitig.
 
 ---
 
@@ -47,9 +68,10 @@ Test zu unterscheiden.
 
 ### S-001 CRUD-Views laufen weiter, wenn das Plugin abgeschaltet ist
 Schweregrad: mittel
+Status: **behoben** (persistence-dev, verifiziert am 2026-08-02) — siehe unten
 Betroffen: `pretix_custom_reports/views/crud.py:94` (`EventReportMixin` und alle fünf Views darunter)
 Zuständig: persistence-dev
-Reproduktion: `test_every_event_view_404s_when_the_plugin_is_off` (xfail), Kontrollgruppe `test_the_endpoints_that_do_have_the_plugin_gate_really_404`
+Reproduktion: `test_every_event_view_404s_when_the_plugin_is_off` (jetzt grün, ohne Marker), `test_no_crud_view_is_missing_the_plugin_gate`, `test_the_permission_check_runs_before_the_plugin_gate_not_after`, Nachbarpfade `test_the_endpoints_that_do_have_the_plugin_gate_really_404`
 
 Auswirkung:
 `views/api.py` hat einen `PluginActiveMixin`, `views/portability.py` hat ihn
@@ -73,13 +95,67 @@ Zeile. Sauberer wäre, das Mixin einmal zu besitzen (es steht heute zweimal
 wörtlich im Repo) und aus beiden Modulen zu importieren; das ist aber ein
 Eigentumswechsel und gehört an den `integrator`.
 
+**Status — behoben, verifiziert.**
+`persistence-dev` hat in `views/crud.py:98` ein eigenes `PluginActiveMixin`
+ergänzt (404, wenn `"pretix_custom_reports" not in event.get_plugins()`) und
+`EventReportMixin` davon erben lassen. Bewusst dupliziert statt aus
+`views/api.py` importiert, nach dem Vorbild von `views/portability.py`; damit
+steht das Mixin nun **dreimal** wörtlich im Repo (siehe Nacharbeit unten).
+
+Gegengeprüft habe ich drei Dinge, die die ursprüngliche Fassung meines Tests
+nicht abdeckte:
+
+1. **Alle fünf Views, nicht vier.** `ReportDuplicateView` ist POST-only; ein GET
+   dagegen ist 405, ob das Gate existiert oder nicht — der alte Test hätte dort
+   also gar nicht fehlschlagen können. Der Test greift jetzt jede Ansicht mit
+   der Methode an, die tatsächlich schreibt (`POST` auf add, edit, duplicate,
+   delete) und prüft anschließend die Tabelle: nichts angelegt, nichts
+   umbenannt, nichts gelöscht.
+2. **Die Klassenhierarchie, nicht nur die Routen.** `test_no_crud_view_is_missing_the_plugin_gate`
+   läuft über `crud.__all__`, filtert auf Django-Views und verlangt für jede
+   das Mixin. Eine sechste Ansicht, die morgen dazukommt und in diesem Testmodul
+   nicht geroutet ist, fällt damit trotzdem auf.
+3. **Der Fix hält aus dem richtigen Grund.** Mit zur Laufzeit entferntem Gate
+   (`PluginActiveMixin.dispatch` auf ein reines `super()` gesetzt, Produktivcode
+   unangetastet) antwortet `GET /control/event/dummy/plain/customreports/reports/`
+   wieder mit **200** und der Test fällt genau dort — nicht an einer Nebenwirkung.
+
+**Korrektur an der Begründung des Fixes.**
+`handoff/status/persistence-dev.md` („Nacharbeit vor Welle 4") begründet den Fix
+damit, die MRO stelle das Plugin-Gate **vor** die Rechteprüfung, es gebe deshalb
+„404 statt 403". Die MRO-Aussage stimmt (nachgewiesen, das Gate ist in allen
+fünf Klassen links von `EventPermissionRequiredMixin`), die Schlussfolgerung
+nicht: `EventPermissionRequiredMixin` implementiert **kein** `dispatch`. Es
+überschreibt `as_view()` und wickelt die fertige View in
+`event_permission_required(...)` ein (`pretix/control/permissions.py:81-91`).
+Der Rechte-Decorator sitzt damit *außerhalb* der gesamten Dispatch-Kette und
+läuft **vor** jedem Mixin. Gemessen: ein Nutzer ohne
+`event.settings.general:write` bekommt auf
+`.../plain/customreports/reports/add/` **403**, nicht 404.
+
+Das ist kein Befund — beide Tore weisen ab, und diese Reihenfolge ist die
+vorsichtigere: wer die Seite ohnehin nicht sehen darf, erfährt am Statuscode
+nichts über den Plugin-Zustand. Festgehalten ist es trotzdem, in
+`test_the_permission_check_runs_before_the_plugin_gate_not_after`, damit die
+falsche Begründung nicht bei der nächsten View wiederverwendet wird und damit
+ein späteres Verschieben der Rechteprüfung in `dispatch()` sichtbar wird statt
+still zu passieren. Gilt wortgleich für `views/api.py`, `views/portability.py`
+und `views/templates.py`, die dieselbe Mixin-Kombination benutzen.
+
+**Nacharbeit (nicht sicherheitsrelevant, an den `integrator`).**
+Das Gate steht jetzt dreimal wörtlich im Repo (`api.py`, `portability.py`,
+`crud.py`) plus einmal als Organizer-Variante in `templates.py` und einmal als
+`_plugin_is_active` im Exporter. Ein gemeinsames `views/_mixins.py` in Welle 4
+wäre der richtige Ort; bis dahin gilt: wer eines ändert, ändert alle.
+
 ---
 
 ### S-002 Der Organizer-Export ignoriert das Plugin-Gate
 Schweregrad: mittel
+Status: **behoben** (exporter-dev, verifiziert am 2026-08-02) — siehe unten
 Betroffen: `pretix_custom_reports/exporters.py:318` (`report_choices`), `:371` (`iterate_list`), `:709` (`register_multievent_report_exporter`)
 Zuständig: exporter-dev
-Reproduktion: `test_an_organizer_export_skips_events_with_the_plugin_switched_off` (xfail), Kontrollgruppe `test_the_event_level_exporter_is_invisible_when_the_plugin_is_off`
+Reproduktion: `test_an_organizer_export_skips_events_with_the_plugin_switched_off` (jetzt grün, ohne Marker), `test_the_organizer_export_form_never_offers_a_switched_off_events_report`, Nachbarpfad `test_the_event_level_exporter_is_invisible_when_the_plugin_is_off`
 
 Auswirkung:
 Auf Event-Ebene ist alles in Ordnung: `register_data_exporters` ist ein
@@ -110,6 +186,48 @@ längeren Plugin-Namen), sondern über die Prüfung, die pretix selbst benutzt:
 `self.plugin_module in event.get_plugins()` je Event in `_prepare()`, mit einer
 `_EventProblem`-Meldung, die den Grund nennt. Der Skip-Pfad existiert bereits und
 ist die richtige Stelle.
+
+**Status — behoben, verifiziert.**
+`exporter-dev` hat die Empfehlung eins zu eins umgesetzt:
+`CustomReportExporter._plugin_is_active` (`exporters.py:263`) prüft
+`self.plugin_module in event.get_plugins()` — die Prüfung, die pretix selbst vor
+der Zustellung eines Event-Plugin-Signals macht (`pretix/base/signals.py:100-103`),
+nicht `plugins__contains`. Angewandt wird sie an beiden Stellen:
+`report_choices()` filtert `self.events`, und `_prepare()` prüft **vor** dem
+Report-Lookup und wirft ein `_EventProblem` mit eigener Meldung („the plugin is
+not enabled for this event"). Damit läuft ein abgeschaltetes Event über denselben
+Skip-/Fail-Pfad wie ein gelöschter Report, und der Grund überlebt bis in den
+`ExportError`, den der Eigentümer eines terminierten Exports per Mail bekommt.
+
+**Der Beweistest musste umgebaut werden — und das war nötig, nicht kosmetisch.**
+Die Wellen-3-Fassung legte `LEFTOVER` **nur** im abgeschalteten Event an. Nach
+dem Fix kann damit kein Event mehr etwas liefern, `render()` stirbt an
+„could not be run for any of the selected events", und die Zusicherung
+`assert b"OFFEV" not in data` wird nie erreicht. Der Test wäre also grün
+geworden, ohne das Leck je gemessen zu haben — genau die Sorte Test, die eine
+Behebung vortäuscht. Jetzt halten **beide** Events denselben Identifier
+`LEFTOVER` und je eine Bestellung; die Datei enthält Zeilen, und das Einzige,
+was `OFFEV` heraushalten kann, ist das Gate. Zusätzlich geprüft: `AAAAA` und
+`dummy` sind weiterhin drin — ein deaktiviertes Event darf einen Organizer nicht
+die übrigen kosten.
+
+Gegenprobe wie bei S-001: mit zur Laufzeit auf `True` gezwungenem
+`_plugin_is_active` (Produktivcode unangetastet) liefert die CSV wieder
+`"plain","Plain Event","OFFEV"` und der Test fällt genau an dieser Zeile.
+
+**Zweite Facette, neu abgedeckt.** `report_choices()` ist nicht nur eine
+Bequemlichkeit: der *Name* eines Reports aus einem abgeschalteten Event ist
+selbst eine Auskunft, die die Notbremse stoppen sollte, und eine Auswahl
+anzubieten, die `_prepare()` anschließend verweigert, ist ein Fehlerpfad ohne
+Nutzen. `test_the_organizer_export_form_never_offers_a_switched_off_events_report`
+prüft beides: `OFFONLY` (nur im abgeschalteten Event) fehlt in den Choices,
+`LIVEONE` ist da, und kein Label verrät den Namen.
+
+`exporter-dev` hat denselben Sachverhalt aus eigener Sicht in
+`tests/test_exporters.py::test_an_event_with_the_plugin_switched_off_contributes_no_rows`
+und zwei Nachbartests. Doppelt und aus zwei Richtungen ist hier richtig: mein
+Test greift über `init_organizer_exporters` und `render()` an, also über den
+Weg, den `ScheduledOrganizerExport` nimmt.
 
 ---
 
@@ -462,24 +580,44 @@ Beide sind noch nicht verdrahtet (`integrator`, Welle 4). Sämtliche
 View- und Exporter-Befunde betreffen deshalb Code, der produktiv derzeit nicht
 erreichbar ist. Das ändert die *Dringlichkeit*, nicht den Befund — und es heißt,
 dass S-001 und S-002 vor dem Verdrahten am billigsten zu beheben sind.
+*Erledigt:* genau das ist am 2026-08-02 passiert, beide sind vor der Verdrahtung
+behoben. Für S-003 bis S-006 gilt der Absatz unverändert weiter.
 
 ---
 
 ## Zusammenfassung nach Zuständigkeit
 
-| Agent | Befunde |
+Stand 2026-08-02. „behoben" heißt: Fix gelesen, Beweistest ohne `xfail` grün,
+und bei künstlich entferntem Fix fällt derselbe Test wieder am ursprünglichen
+Leck.
+
+| Befund | Schweregrad | Zuständig | Status |
+| --- | --- | --- | --- |
+| S-001 CRUD-Views ohne Plugin-Gate | mittel | persistence-dev | **behoben** (2026-08-02) |
+| S-002 Organizer-Export ohne Plugin-Gate | mittel | exporter-dev | **behoben** (2026-08-02) |
+| S-003 Ungepaarte Surrogate | mittel | portability-dev (Gate), frontend-dev (`views/api.py:353`) | offen |
+| S-004 Doppelter Identifier → IntegrityError | niedrig | persistence-dev | offen |
+| S-005 Query-Amplifikation bei `join`-Spalten | niedrig | query-dev | offen |
+| S-006 `keep`-Strategie per POST erreichbar | niedrig | portability-dev | offen |
+
+| Agent | Offene Befunde |
 | --- | --- |
-| persistence-dev | S-001 (mittel), S-004 (niedrig) |
-| exporter-dev | S-002 (mittel) |
 | portability-dev | S-003 (mittel, gemeinsam mit frontend-dev), S-006 (niedrig) |
 | frontend-dev | S-003, Teil 2 (`views/api.py:353`) |
+| persistence-dev | S-004 (niedrig) — S-001 geschlossen |
 | query-dev | S-005 (niedrig) |
+| exporter-dev | keine — S-002 geschlossen |
 | contract-architect | keine — die Contracts haben gehalten |
 | registry-dev | keine — die Event-Bindung der Annotationen ist die stärkste Naht im Plugin |
 
 ## Ausführen
 
 ```
-pytest tests/test_security.py -q          # 123 passed, 8 xfailed
-pytest tests/test_security.py --runxfail  # zeigt die acht echten Fehler
+pytest tests/test_security.py -q          # 128 passed, 6 xfailed
+pytest tests/test_security.py --runxfail  # zeigt die sechs echten Fehler
 ```
+
+Die sechs verbleibenden `xfail(strict=True)` sind vier zu S-003, einer zu S-004
+und einer zu S-006. Wer einen davon behebt, macht die Suite rot (`XPASS`) — das
+ist Absicht und erzwingt, den Marker zu entfernen und den Befund zu schließen,
+so wie es hier für S-001 und S-002 geschehen ist.

@@ -703,6 +703,238 @@ def test_a_single_event_export_never_skips(registered, event, user_with_perms, o
 
 
 # ---------------------------------------------------------------------------
+# 3b. The plugin gate (security review S-002)
+# ---------------------------------------------------------------------------
+#
+# On event level pretix gates us itself: ``register_data_exporters`` is an
+# ``EventPluginSignal`` and does not fire for an event without the plugin, so
+# ``init_event_exporters`` never builds us there (asserted in
+# tests/test_security.py, which owns that control group).
+#
+# On organizer level nothing gates us. ``register_multievent_data_exporters`` is
+# an ``OrganizerPluginSignal(allow_legacy_plugins=True)``, so an event-level
+# plugin counts as active for *every* organizer (pretix/base/signals.py:100-113),
+# and ``self.events`` is filtered by permission only
+# (``init_organizer_exporters``, services/export.py:266-287). Until S-002 that
+# meant an event whose administrator had switched the plugin off still delivered
+# its orders into the organizer export file -- and through
+# ``ScheduledOrganizerExport`` into a recurring mail nobody was reviewing.
+#
+# The gate is ``self.plugin_module in event.get_plugins()``, per event, applied
+# in ``report_choices`` and at the very top of ``_prepare``.
+
+
+def disable_plugin(event):
+    """Switch the plugin off for *event*, the way the plugin page does."""
+    with scopes_disabled():
+        event.plugins = ""
+        event.save(update_fields=["plugins"])
+    return event
+
+
+@pytest.mark.django_db
+def test_an_event_with_the_plugin_switched_off_contributes_no_rows(
+    registered, event, two_events, user_with_perms, orders
+):
+    """The finding itself: order data of a switched-off event in the file.
+
+    Both events hold the report and both hold orders, so the only thing that can
+    keep ``ZZZZZ`` out of the result is the plugin gate. The rest of the export
+    has to keep working -- one deactivated event must not cost an organizer the
+    other four.
+    """
+    with scopes_disabled():
+        make_report(event=event, identifier="codes")
+        make_report(event=two_events, identifier="codes")
+    disable_plugin(two_events)
+
+    with scope(organizer=event.organizer):
+        ex = exporter_for_organizer(event.organizer, user_with_perms)
+        rows = rows_of(ex, csv_form_data())
+
+    assert {row[0] for row in rows[1:]} == {"dummy"}
+    assert "ZZZZZ" not in {row[2] for row in rows[1:]}
+    assert "AAAAA" in {row[2] for row in rows[1:]}
+
+
+@pytest.mark.django_db
+def test_the_switched_off_event_is_skipped_through_the_documented_mechanism(
+    registered, event, two_events, user_with_perms, orders
+):
+    """Not a silent drop: the same ``_EventProblem`` path as a deleted report.
+
+    Which matters twice. Under the strict policy the export fails and the
+    message has to say *why* an event is missing -- "the plugin is not enabled"
+    and "the report does not exist there" call for entirely different repairs.
+    And when nothing at all can be exported, the reason has to survive into
+    ``ExportError``, because that string is what the schedule owner receives by
+    mail.
+    """
+    with scopes_disabled():
+        make_report(event=event, identifier="codes")
+        make_report(event=two_events, identifier="codes")
+    disable_plugin(two_events)
+
+    with scope(organizer=event.organizer):
+        ex = exporter_for_organizer(event.organizer, user_with_perms)
+        with pytest.raises(ExportError) as strict:
+            ex.render(
+                csv_form_data(
+                    **{exporters.FORM_KEY_ON_UNAVAILABLE: exporters.ON_UNAVAILABLE_FAIL}
+                )
+            )
+    message = str(strict.value)
+    assert "second" in message
+    assert "plugin is not enabled" in message
+
+    # And with every event switched off there is no file, not an empty one.
+    disable_plugin(event)
+    with scope(organizer=event.organizer):
+        ex = exporter_for_organizer(event.organizer, user_with_perms)
+        with pytest.raises(ExportError) as everything:
+            ex.render(csv_form_data())
+    assert "plugin is not enabled" in str(everything.value)
+    assert "dummy" in str(everything.value)
+
+
+@pytest.mark.django_db
+def test_the_plugin_gate_comes_before_the_report_lookup(
+    registered, event, two_events, user_with_perms, orders
+):
+    """A switched-off event is refused for a reason of its own.
+
+    Order of the two checks in ``_prepare`` is observable: here the report does
+    exist in the deactivated event, so if the lookup ran first the message would
+    talk about columns or produce rows. The plugin is the more fundamental
+    answer and has to be the one reported.
+    """
+    with scopes_disabled():
+        make_report(event=two_events, identifier="only-there")
+    disable_plugin(two_events)
+
+    with scope(organizer=event.organizer):
+        ex = exporter_for_organizer(event.organizer, user_with_perms)
+        with pytest.raises(ExportError) as excinfo:
+            ex.render(csv_form_data(identifier="only-there"))
+    message = str(excinfo.value)
+    assert "plugin is not enabled" in message
+    assert "second" in message
+
+
+@pytest.mark.django_db
+def test_report_choices_hide_reports_of_events_with_the_plugin_switched_off(
+    registered, event, two_events, user_with_perms
+):
+    """Offering a choice that ``_prepare`` will refuse is its own bug."""
+    with scopes_disabled():
+        make_report(event=event, identifier="codes")
+        make_report(event=two_events, identifier="only-there", name="Only there")
+
+    with scope(organizer=event.organizer):
+        before = dict(
+            exporter_for_organizer(event.organizer, user_with_perms).report_choices()
+        )
+    assert set(before) == {"codes", "only-there"}
+
+    disable_plugin(two_events)
+    with scope(organizer=event.organizer):
+        after = dict(
+            exporter_for_organizer(event.organizer, user_with_perms).report_choices()
+        )
+    assert set(after) == {"codes"}
+
+
+@pytest.mark.django_db
+def test_the_plugin_gate_is_not_a_substring_match(
+    registered, event, two_events, user_with_perms, orders
+):
+    """``plugins__contains`` would have accepted a longer, foreign plugin name.
+
+    ``Event.plugins`` is one comma-separated string, so a ``contains`` filter
+    matches any plugin whose name merely starts with ours. pretix itself splits
+    the list and compares whole entries (``get_plugins()``,
+    base/models/event.py:794-800), and so do we.
+    """
+    with scopes_disabled():
+        make_report(event=event, identifier="codes")
+        make_report(event=two_events, identifier="codes")
+        two_events.plugins = "pretix_custom_reports_extra"
+        two_events.save(update_fields=["plugins"])
+
+    with scope(organizer=event.organizer):
+        ex = exporter_for_organizer(event.organizer, user_with_perms)
+        rows = rows_of(ex, csv_form_data())
+    assert {row[0] for row in rows[1:]} == {"dummy"}
+
+
+@pytest.mark.django_db
+def test_a_neighbouring_plugin_in_the_same_list_does_not_disable_us(
+    registered, event, two_events, user_with_perms, orders
+):
+    """The counter-test to the one above -- the gate must not be too narrow.
+
+    An event normally carries several plugins, and ours can sit anywhere in that
+    comma-separated list.
+    """
+    with scopes_disabled():
+        make_report(event=event, identifier="codes")
+        make_report(event=two_events, identifier="codes")
+        two_events.plugins = "pretix.plugins.banktransfer,pretix_custom_reports"
+        two_events.save(update_fields=["plugins"])
+
+    with scope(organizer=event.organizer):
+        ex = exporter_for_organizer(event.organizer, user_with_perms)
+        rows = rows_of(ex, csv_form_data())
+    assert {row[0] for row in rows[1:]} == {"dummy", "second"}
+
+
+@pytest.mark.django_db
+def test_a_scheduled_organizer_export_stops_sending_a_deactivated_event(
+    registered, event, two_events, schedule_user, orders
+):
+    """The reason S-002 is worth more than a UI nit.
+
+    A ``ScheduledOrganizerExport`` keeps mailing on its own; a schedule created
+    while both events ran the plugin must not keep attaching the orders of an
+    event that has since been switched off. This is the same run the finding was
+    measured on, only through the scheduler instead of ``render``.
+    """
+    djmail.outbox = []
+    with scopes_disabled():
+        make_report(event=event, identifier="codes")
+        make_report(event=two_events, identifier="codes")
+        schedule = ScheduledOrganizerExport(
+            organizer=event.organizer, owner=schedule_user
+        )
+        schedule.export_identifier = exporters.CustomReportExporter.identifier
+        schedule.export_form_data = {
+            contracts.EXPORT_FORM_REPORT_KEY: "codes",
+            "_format": "default",
+            "all_events": True,
+        }
+        schedule.locale = "en"
+        schedule.mail_subject = "All events"
+        schedule.mail_template = "Here you go."
+        schedule.schedule_rrule = (
+            "DTSTART:20260118T000000\nRRULE:FREQ=DAILY;INTERVAL=1;WKST=MO"
+        )
+        schedule.schedule_rrule_time = datetime.time(2, 30, 0)
+        schedule.schedule_next_run = now() - datetime.timedelta(minutes=5)
+        schedule.save()
+    disable_plugin(two_events)
+
+    run_scheduled_exports(None)
+
+    schedule.refresh_from_db()
+    assert schedule.error_counter == 0, schedule.error_last_message
+    payload = djmail.outbox[0].attachments[0][1]
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8")
+    assert "AAAAA" in payload
+    assert "ZZZZZ" not in payload
+
+
+# ---------------------------------------------------------------------------
 # 4. Scheduled exports -- the deleted report case
 # ---------------------------------------------------------------------------
 

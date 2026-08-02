@@ -1,4 +1,187 @@
-# Status: exporter-dev — Welle 2
+# Status: exporter-dev
+
+Zwei Läufe, chronologisch: [Welle 2](#welle-2) (Aufbau) und darüber der
+Nacharbeits-Lauf zu Befund S-002 aus dem Security-Review.
+
+---
+
+# Nacharbeit S-002 — das Plugin-Gate im Organizer-Export
+
+Gezielter Lauf vor Welle 4. Geändert: `pretix_custom_reports/exporters.py` und
+`tests/test_exporters.py` (33 → 40 Tests). `tests/test_security.py` nicht
+angefasst, `signals.py` nicht angefasst, kein Commit, keine Migration.
+
+## Was der Befund war
+
+`register_multievent_data_exporters` ist ein
+`OrganizerPluginSignal(allow_legacy_plugins=True)`; ein Plugin auf Event-Ebene
+gilt dort für **jeden** Organizer als aktiv (pretix `base/signals.py:100-113`).
+`self.events` kommt aus `init_organizer_exporters` und ist ausschließlich nach
+**Berechtigung** gefiltert (`services/export.py:266-287`) — nicht danach, ob das
+Plugin im jeweiligen Event läuft. Damit lieferte ein Event, für das jemand das
+Plugin abgeschaltet hatte, weiterhin Bestelldaten in die Organizer-Exportdatei,
+und über `ScheduledOrganizerExport` in eine wiederkehrende Mail, die niemand
+mehr anschaut.
+
+Auf Event-Ebene bestand das Problem nie: `register_data_exporters` ist ein
+`EventPluginSignal` und feuert für ein Event ohne Plugin gar nicht, und ein
+`ScheduledEventExport` läuft dort in pretix' eigenes
+„Export type not found or permission denied." (`services/export.py:365-366`).
+
+## Was jetzt drin steht
+
+**1. Ein Gate, an der Stelle, die pretix selbst benutzt.**
+
+```python
+plugin_module = "pretix_custom_reports"          # == apps.PluginApp.name
+
+def _plugin_is_active(self, event) -> bool:
+    return self.plugin_module in event.get_plugins()
+```
+
+Verifiziert im Source, nicht aus dem Gedächtnis: `is_app_active` vergleicht für
+ein Event-Plugin genau `app.name in sender.get_plugins()`
+(`pretix/base/signals.py:100-103`), und `Event.get_plugins()` splittet das
+kommaseparierte Feld (`base/models/event.py:794-800`). `BaseExporter` hat **kein**
+`plugin_module` und keine Plugin-Information — das Attribut ist unseres, mit
+demselben Wert und derselben Prüfung wie die `PluginActiveMixin` der
+View-Module.
+
+Ausdrücklich **kein** `plugins__contains`: das Feld ist ein einziger String, ein
+Teilstringtreffer würde auch ein `pretix_custom_reports_extra` als „wir" zählen.
+Beide Richtungen sind getestet (zu eng / zu weit), siehe unten.
+
+**2. `report_choices()`** baut die Auswahl nur noch aus Events mit aktivem
+Plugin. Eine Auswahl anzubieten, die `_prepare` anschließend ablehnt, wäre eine
+eigene Fehlerquelle.
+
+**3. `_prepare()`** prüft das Gate als **erstes**, vor dem Report-Lookup, und
+wirft das bestehende `_EventProblem` mit
+
+```
+The report "codes" cannot be exported for event second: the plugin is not
+enabled for this event.
+```
+
+Damit nimmt der Fall exakt denselben Weg wie ein gelöschter Report: Voreinstellung
+überspringen mit `WARNING` im Log, unter `on_unavailable=fail` ein `ExportError`,
+und wenn **kein** Event liefern kann, steht der Grund in der Mail an den
+Zeitplan-Eigentümer. Kein stiller Skip.
+
+Die Reihenfolge ist Absicht und getestet: ein abgeschaltetes Event soll auch
+dann „Plugin ist aus" melden, wenn der Report dort noch existiert — sonst liest
+der Empfänger eine Diagnose, die zu einer anderen Reparatur führt. Nebeneffekt:
+in einem abgeschalteten Event werden nicht einmal mehr die Reports gelesen.
+
+**4. Docstrings korrigiert.** Der Docstring von
+`register_multievent_report_exporter` nannte die organizerweite Aktivierung
+bisher „harmless and deliberate". Das war der eigentliche Denkfehler und steht
+jetzt richtig da, mit Verweis auf das Gate; der Modul-Docstring hat einen
+entsprechenden Absatz unter „Permissions".
+
+**Neuer übersetzbarer String** (englisch, `gettext`, nicht lazy — er entsteht
+zur Laufzeit unter `language(schedule.locale)`), für den `de`-Katalog des
+`integrator`:
+
+```
+The report "{identifier}" cannot be exported for event {event}: the plugin is
+not enabled for this event.
+```
+
+## Tests
+
+`pytest tests/test_exporters.py -q` → **40 passed** (vorher 33, alle 33 weiter
+grün, insbesondere die Multi-Event-Läufe über zwei Events). Neuer Abschnitt
+„3b. The plugin gate (security review S-002)":
+
+| Test | Was er festhält |
+| --- | --- |
+| `…_with_the_plugin_switched_off_contributes_no_rows` | der Befund selbst: Report und Bestellungen in **beiden** Events, Plugin in einem aus → `ZZZZZ` fehlt, `AAAAA` ist da |
+| `…_skipped_through_the_documented_mechanism` | `fail`-Politik nennt Event **und** Grund; alle Events aus → `ExportError`, keine leere Datei |
+| `…_gate_comes_before_the_report_lookup` | Report existiert im abgeschalteten Event → trotzdem „plugin is not enabled" |
+| `…_choices_hide_reports_of_events_with_the_plugin_switched_off` | vorher/nachher an derselben Auswahl |
+| `…_gate_is_not_a_substring_match` | `plugins="pretix_custom_reports_extra"` zählt **nicht** als aktiv |
+| `…_neighbouring_plugin_…_does_not_disable_us` | Gegenprobe: `"pretix.plugins.banktransfer,pretix_custom_reports"` zählt sehr wohl |
+| `…_scheduled_organizer_export_stops_sending_a_deactivated_event` | derselbe Lauf über `ScheduledOrganizerExport`, geprüft wird der **Mailanhang** |
+
+Gesamtsuite `pytest tests/ -q -m "not performance"` → **999 passed, 2 failed,
+9 xfailed**. Beide Fehlschläge sind fremd und unverändert:
+`test_smoke.py::test_no_migration_created_yet` (Welle-0-Gate) und
+`test_security.py::test_every_event_view_404s_when_the_plugin_is_off`
+(**XPASS(strict)** — S-001 ist in `views/crud.py` offenbar bereits behoben, der
+xfail-Marker dort ist jetzt zu entfernen; gehört dem `security-reviewer`).
+
+Lint über die eigenen zwei Dateien: `flake8` rc 0, `isort -c` rc 0,
+`black --check` unchanged. Kein `black .` / `isort .` über das Repo.
+
+## ⚠ Der xfail-Test zu S-002 wird **nicht** XPASS — bitte lesen
+
+`tests/test_security.py::test_an_organizer_export_skips_events_with_the_plugin_switched_off`
+bleibt nach dem Fix **XFAIL**, nicht XPASS. Nicht weil das Leck offen wäre, es
+ist zu — sondern weil der Test es nicht messen kann:
+
+Der Test benutzt nur die Fixtures `event` (Plugin an, **kein** Report, **keine**
+Bestellung) und `event_without_plugin` (Plugin aus, Report `LEFTOVER`, Bestellung
+`OFFEV`). Nach dem Fix kann **kein** Event `LEFTOVER` liefern:
+
+- `dummy`: Report existiert dort nicht,
+- `plain`: Plugin aus.
+
+Also greift der bewusste Endpunkt „lieber laut scheitern als leer liefern" und
+`render()` wirft
+
+```
+ExportError: This report could not be run for any of the selected events.
+The report "LEFTOVER" does not exist in event dummy. …
+The report "LEFTOVER" cannot be exported for event plain: the plugin is not
+enabled for this event.
+```
+
+Der Test packt den Rückgabewert von `render()` aber unbedingt aus
+(`_name, _mime, data = …`), erreicht sein `assert b"OFFEV" not in data` also nie.
+Ergebnis:
+
+```
+pytest tests/test_security.py -q -k plugin_switched_off --runxfail   ->  1 failed
+```
+
+— mit der ExportError oben statt mit `OFFEV` in der Datei. Ohne `--runxfail`
+bleibt die Suite grün (der Test „scheitert" weiter, nur aus dem richtigen Grund),
+`strict=True` schlägt also **nicht** an.
+
+Das ist keine Design-Frage, sondern eine Lücke im Testaufbau: mit *null*
+lieferfähigen Events kann es keine Datei geben, in der `OFFEV` fehlen könnte.
+Ich habe `test_security.py` nicht angefasst (fremdes Gebiet). Zwei Wege, beide
+eine Minute Arbeit — für den `security-reviewer`:
+
+1. **Absicht beibehalten** (empfohlen, entspricht dem gemessenen Szenario): im
+   Test zusätzlich einen Report `LEFTOVER` **und** eine Bestellung in `event`
+   anlegen. Dann liefert `dummy` Zeilen, die Datei entsteht, und
+   `assert b"OFFEV" not in data` misst genau das Leck. Genau so liegt der Fall
+   als `test_an_event_with_the_plugin_switched_off_contributes_no_rows` in
+   `tests/test_exporters.py`.
+2. **Oder** die Erwartung umdrehen:
+   `with pytest.raises(ExportError) as e: found[0].render(...)` plus
+   `assert "plugin is not enabled" in str(e.value)`.
+
+In beiden Fällen kann der `xfail`-Marker weg.
+
+## Nicht geändert
+
+- `register_multievent_report_exporter` gibt weiter für jeden Organizer die
+  Klasse zurück. Das Gate pro Event ist die Stelle, die der Review empfiehlt,
+  und sie ist die belastbarere: eine Prüfung im Empfänger („hat der Organizer
+  irgendein Event mit dem Plugin?") müsste beim Bauen **jeder** Exportseite über
+  alle Events laufen und würde trotzdem nichts verhindern, was das Gate nicht
+  schon verhindert. Ein Organizer ohne aktives Plugin sieht den Eintrag, findet
+  dort eine leere Report-Auswahl und bekommt bei einem erzwungenen Lauf einen
+  `ExportError`.
+- Kein Eingriff in `iterate_list` über `_prepare` hinaus. Der Skip-Mechanismus
+  war schon da; der neue Fall benutzt ihn, statt einen zweiten zu bauen.
+
+---
+
+# Welle 2
 
 `pretix_custom_reports/exporters.py` (eine Klasse, zwei Empfänger-Funktionen)
 und `tests/test_exporters.py` (33 Tests). Contracts unangetastet, `signals.py`

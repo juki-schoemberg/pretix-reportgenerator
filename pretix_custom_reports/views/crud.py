@@ -29,6 +29,9 @@ memory.
 Every queryset goes through ``request.event.custom_reports``, so a report of
 another event answers 404 even for a user who has permission in both events
 (CLAUDE.md rule 4).
+
+On top of that, every view here is behind the "is the plugin on for this event?"
+gate (:class:`PluginActiveMixin`), the same one the other view modules use.
 """
 
 from django.contrib import messages
@@ -48,6 +51,7 @@ __all__ = [
     "CHANGE_PERMISSION",
     "ORGANIZER_CHANGE_PERMISSION",
     "EventReportMixin",
+    "PluginActiveMixin",
     "ReportCreateView",
     "ReportDeleteView",
     "ReportDuplicateView",
@@ -91,7 +95,34 @@ def report_url(name: str, event, **kwargs) -> str:
     )
 
 
-class EventReportMixin:
+class PluginActiveMixin:
+    """404 unless this plugin is enabled for the event in the URL.
+
+    Same reasoning as ``views/api.py`` and ``views/portability.py``: pretix only
+    wraps a plugin's *presale* URLs with the "is the plugin on?" check
+    (pretix/multidomain/plugin_handler.py, ``_event_view(require_plugin=...)``),
+    control URLs are included at the URL root and stay reachable for an event
+    that has the plugin switched off. SPEC.md F1 wants the opposite: switching
+    the plugin off is the emergency brake, so neither the list nor any of the
+    write forms may answer 200 afterwards.
+
+    Deliberately duplicated rather than imported from ``views/api.py``, exactly
+    as ``views/portability.py`` already does it: five lines are cheaper than a
+    dependency between two agents' modules, and a divergence would show up in
+    the tests of both. Owning the mixin in one shared place is an ownership
+    change and belongs to the integrator (security review S-001).
+    """
+
+    plugin_module = "pretix_custom_reports"
+
+    def dispatch(self, request, *args, **kwargs):
+        event = getattr(request, "event", None)
+        if event is None or self.plugin_module not in event.get_plugins():
+            raise Http404("This plugin is not active for this event.")
+        return super().dispatch(request, *args, **kwargs)
+
+
+class EventReportMixin(PluginActiveMixin):
     """Shared queryset, 404 behaviour and template context."""
 
     model = ReportDefinition

@@ -303,3 +303,98 @@ außerhalb von `tests/test_security.py`, `docs/security-review.md`,
    `connect()`-Zeilen fehlen, sind beide produktiv nicht erreichbar, danach
    sofort. Außerdem U-06: die Browser-Tests skippen auf einem CI ohne Browser
    **still**.
+
+
+---
+
+# Nachtrag 2026-08-02 — Verifikation der Fixes zu S-001 und S-002
+
+Kein neuer Review-Durchgang, sondern ein gezielter Verifikationslauf auf
+Anforderung des Orchestrators: `persistence-dev` und `exporter-dev` waren vor
+dem Verdrahten von `urls.py`/`signals.py` reaktiviert worden, um die beiden
+Plugin-Gate-Befunde zu schließen (meine eigene Empfehlung aus U-07).
+
+## Was ich geprüft habe
+
+**S-001 (`views/crud.py`).** Fix gelesen, nicht nur den Diff: neues
+`PluginActiveMixin` (Zeile 98), `EventReportMixin` erbt davon, damit hängen alle
+fünf Views daran. Bewusst dupliziert statt aus `views/api.py` importiert — die
+Begründung (keine Modulabhängigkeit zwischen zwei Agentengebieten) trägt, das
+Vorbild `views/portability.py` gab es schon.
+
+Feindlich gegengelesen, drei Punkte:
+
+1. `ReportDuplicateView` ist POST-only. Ein GET dagegen ist 405, ob das Gate
+   existiert oder nicht — meine ursprüngliche Fassung des Tests hätte dort also
+   **strukturell nicht fehlschlagen können**. `persistence-dev` hat genau das
+   selbst gemeldet; der Hinweis war richtig. Der Test greift jetzt jede der fünf
+   Ansichten mit der Methode an, die schreibt, und prüft danach die Tabelle:
+   nichts angelegt, nichts umbenannt, nichts gelöscht.
+2. Routen sind nicht die Klassenhierarchie. Eine sechste View, die morgen in
+   `views/crud.py` entsteht und in meinem Testmodul nicht geroutet ist, würde
+   den Requesttest nie erreichen. Deshalb zusätzlich
+   `test_no_crud_view_is_missing_the_plugin_gate` über `crud.__all__`.
+3. Fix zur Laufzeit entfernt (Wegwerf-Pytest-Plugin, Produktivcode unangetastet)
+   → der Test fällt wieder mit `200 == 404` auf der Reportliste des
+   abgeschalteten Events. Er misst also weiterhin das Leck, nicht sich selbst.
+
+**Gefunden dabei:** die Begründung des Fixes ist falsch, das Ergebnis richtig.
+`EventPermissionRequiredMixin` implementiert kein `dispatch`, sondern wickelt in
+`as_view()` die fertige View in `event_permission_required(...)`
+(`pretix/control/permissions.py:81-91`). Die Rechteprüfung läuft damit **vor**
+dem Plugin-Gate, nicht danach; ein Nutzer ohne Schreibrecht bekommt 403, nicht
+404. Kein Befund (die Reihenfolge ist die vorsichtigere), aber festgenagelt in
+`test_the_permission_check_runs_before_the_plugin_gate_not_after`, damit die
+Begründung nicht weitergereicht wird.
+
+**S-002 (`exporters.py`).** `_plugin_is_active` benutzt
+`self.plugin_module in event.get_plugins()` — die Prüfung, die pretix selbst vor
+der Zustellung eines Event-Plugin-Signals macht, und ausdrücklich **nicht**
+`plugins__contains`. Angewandt in `report_choices()` und ganz oben in
+`_prepare()`, also vor dem Report-Lookup: ein abgeschaltetes Event bekommt seine
+Reports gar nicht erst gelesen. Der `_EventProblem`-Pfad nennt den Grund, und der
+Grund überlebt bis in den `ExportError`, den der Eigentümer eines terminierten
+Exports per Mail liest.
+
+`exporter-dev` hat gemeldet, dass mein Beweistest nach dem Fix nicht mehr das
+Leck misst, sondern an einem `ExportError` stirbt. Nachgeprüft: stimmt, und es
+ist der wichtigere der beiden Punkte dieses Laufs. Der alte Aufbau legte
+`LEFTOVER` nur im abgeschalteten Event an; nach dem Fix kann kein Event mehr
+etwas liefern, `render()` bricht ab, und `assert b"OFFEV" not in data` wird nie
+erreicht. Der Test wäre grün geworden, **ohne je etwas nachgewiesen zu haben**.
+Umgebaut nach Variante 1: beide Events halten denselben Identifier und je eine
+Bestellung. Gegenprobe mit neutralisiertem Gate: die CSV enthält wieder
+`"plain","Plain Event","OFFEV"`, der Test fällt an genau dieser Zeile.
+
+Zweite Facette neu abgedeckt: `report_choices()`. Der Reportname eines
+abgeschalteten Events ist selbst eine Auskunft, und eine Auswahl anzubieten, die
+`_prepare()` gleich darauf verweigert, ist ein Fehlerpfad ohne Nutzen —
+`test_the_organizer_export_form_never_offers_a_switched_off_events_report`.
+
+## Regel, die ich daraus mitnehme
+
+Ein `xfail`-Marker fällt erst, wenn drei Dinge gelten: der Test ist ohne
+`--runxfail` grün, er misst noch dasselbe wie vorher, **und** mit künstlich
+entferntem Fix fällt er wieder an derselben Stelle. Punkt zwei ist der, an dem
+S-002 fast durchgerutscht wäre. Steht jetzt so in `docs/security-review.md`,
+Abschnitt „Wie die Tests gebaut sind".
+
+## Zahlen
+
+* `pytest tests/test_security.py -q` → **128 passed, 6 xfailed** (vorher 123/8;
+  zwei Marker entfernt, drei Tests dazu).
+* `pytest tests -q -m "not performance"` → **1004 passed, 1 failed, 8 xfailed**.
+  Der Fehlschlag ist `test_smoke.py::test_no_migration_created_yet`, das
+  vorbestehende Welle-0-Gate — nicht meins und nicht durch diesen Lauf
+  verursacht.
+* `flake8`, `black --check`, `isort -c` über `tests/test_security.py`: grün.
+* Geänderte Dateien: `tests/test_security.py`, `docs/security-review.md`,
+  `handoff/blockers.md` (angehängt), diese Datei. Kein Produktivcode, kein
+  Commit.
+
+## Offen
+
+S-003 (mittel), S-004, S-005, S-006 (niedrig) unverändert. Die sechs
+verbleibenden `xfail(strict=True)` verteilen sich auf S-003 (vier), S-004 (einer)
+und S-006 (einer). Nacharbeit an den `integrator`: das Plugin-Gate steht jetzt
+dreimal wörtlich im Repo — Kandidat für ein gemeinsames `views/_mixins.py`.

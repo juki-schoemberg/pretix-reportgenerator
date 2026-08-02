@@ -192,3 +192,82 @@ Vorschlag an den Orchestrator: PostgreSQL-Container starten, `pretix.cfg` auf
 `tests/test_registry.py`, `tests/test_query_compile.py`,
 `tests/test_query_registry.py`, `tests/test_integration.py`. Umgebungsentscheidung,
 keine Codeänderung.
+
+
+---
+
+# S-001 und S-002 verifiziert und geschlossen (security-reviewer, 2026-08-02)
+
+Nachtrag zu den beiden Plugin-Gate-Befunden aus dem Wellen-3-Review. **Kein
+neuer Blocker** — dieser Abschnitt schließt zwei alte und hält eine Nacharbeit
+fest, die vor Welle 4 anfällt.
+
+## Ergebnis
+
+| Befund | Fix von | Datei | Status |
+| --- | --- | --- | --- |
+| S-001 CRUD-Views ohne Plugin-Gate | persistence-dev | `views/crud.py:98` (`PluginActiveMixin`) | behoben, verifiziert |
+| S-002 Organizer-Export ohne Plugin-Gate | exporter-dev | `exporters.py:263` (`_plugin_is_active`), angewandt in `report_choices()` und `_prepare()` | behoben, verifiziert |
+
+Beide Beweistests in `tests/test_security.py` tragen kein `xfail` mehr:
+
+* `test_every_event_view_404s_when_the_plugin_is_off` — erweitert auf alle fünf
+  Views inklusive `POST` auf add/edit/duplicate/delete, mit Nachprüfung der
+  Tabelle. `ReportDuplicateView` ist POST-only und war deshalb vorher gar nicht
+  abgedeckt (der Hinweis von `persistence-dev` war korrekt).
+* `test_an_organizer_export_skips_events_with_the_plugin_switched_off` — Aufbau
+  umgebaut, beide Events halten jetzt denselben Report und je eine Bestellung
+  (Variante 1 aus dem Vorschlag von `exporter-dev`). Vorher hätte der Test nach
+  dem Fix an einem `ExportError` grün ausgesehen, ohne das Leck je zu messen.
+
+Neu dazu, weil beim Gegenlesen Lücken sichtbar wurden:
+`test_no_crud_view_is_missing_the_plugin_gate` (Klassenhierarchie statt Routen),
+`test_the_organizer_export_form_never_offers_a_switched_off_events_report`
+(`report_choices()` ist die zweite Facette von S-002),
+`test_the_permission_check_runs_before_the_plugin_gate_not_after`.
+
+Gegenprobe für beide: mit zur Laufzeit neutralisiertem Gate (Wegwerf-Plugin,
+**kein** Produktivcode angefasst) fallen beide Tests wieder genau am
+ursprünglichen Leck — `200` statt `404` bzw. die Zeile
+`"plain","Plain Event","OFFEV"` in der CSV.
+
+Suitenstand: `pytest tests/test_security.py -q` → 128 passed, 6 xfailed.
+`pytest tests -q -m "not performance"` → 1004 passed, 1 failed; der eine
+Fehlschlag ist `test_smoke.py::test_no_migration_created_yet`, das vorbestehende
+Welle-0-Gate.
+
+## Eine Korrektur, die vor Welle 4 gehört (kein Sicherheitsproblem)
+
+`handoff/status/persistence-dev.md` begründet den S-001-Fix damit, die MRO
+stelle das Plugin-Gate **vor** die Rechteprüfung, es gebe deshalb „404 statt
+403". Die MRO-Aussage stimmt; die Schlussfolgerung nicht.
+`EventPermissionRequiredMixin` hat **kein** `dispatch`, sondern überschreibt
+`as_view()` und wickelt die fertige View in `event_permission_required(...)`
+(`pretix/control/permissions.py:81-91`). Der Rechte-Decorator läuft damit
+außerhalb der Dispatch-Kette und **vor** jedem Mixin.
+
+Gemessen: ein Nutzer ohne `event.settings.general:write` bekommt auf
+`.../plain/customreports/reports/add/` **403**, nicht 404.
+
+Kein Befund — beide Tore weisen ab, und diese Reihenfolge verrät einem
+Unberechtigten nichts über den Plugin-Zustand. Aber die falsche Begründung darf
+nicht bei der nächsten View wiederverwendet werden, und sie gilt wortgleich für
+`views/api.py`, `views/portability.py` und `views/templates.py`. Festgenagelt in
+`test_the_permission_check_runs_before_the_plugin_gate_not_after`.
+
+## Nacharbeit an den `integrator` (Welle 4)
+
+Das Plugin-Gate steht jetzt **dreimal wörtlich** im Repo (`views/api.py`,
+`views/portability.py`, `views/crud.py`), plus die Organizer-Variante in
+`views/templates.py` und `_plugin_is_active` im Exporter. Jede Duplikation war
+einzeln begründet (keine Modulabhängigkeit zwischen Agentengebieten), in Summe
+ist es eine Stelle, an der eine Divergenz unbemerkt bleiben kann. Vorschlag:
+`views/_mixins.py` beim `integrator`. Bis dahin gilt: wer eines ändert, ändert
+alle.
+
+## Weiter offen
+
+S-003 (mittel, `portability-dev` + `frontend-dev`), S-004, S-005, S-006
+(niedrig) — unverändert, siehe `docs/security-review.md`. Die vier
+`xfail(strict=True)`-Tests zu S-003 und je einer zu S-004 und S-006 stehen
+weiterhin scharf.

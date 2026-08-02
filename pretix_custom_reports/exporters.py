@@ -71,6 +71,23 @@ global one would be a cross-organizer leak (ADR 0001 section 5.1).
 We keep the inherited ``get_required_event_permission() == 'event.orders:read'``,
 which is the key ``persistence-dev`` chose for reading and running reports.
 
+Permission is not the only gate, though. ``self.events`` is filtered by
+*permission* only, never by whether this plugin is switched on for an event --
+and on organizer level nothing else filters it either, because
+``register_multievent_data_exporters`` is an
+``OrganizerPluginSignal(allow_legacy_plugins=True)`` and therefore hands an
+event-level plugin to *every* organizer (pretix/base/signals.py:100-113). Without
+a check of our own, an event whose administrator switched the plugin off would
+keep feeding order data into an organizer export -- and, through
+``ScheduledOrganizerExport``, into a recurring mail. So every event that reaches
+:meth:`CustomReportExporter.report_choices` or
+:meth:`CustomReportExporter._prepare` is checked with
+:meth:`CustomReportExporter._plugin_is_active`, which is the very test pretix
+performs before delivering an event-level plugin signal
+(``app.name in event.get_plugins()``, signals.py:100-103). Not
+``plugins__contains``: that is a substring match and would also accept an event
+carrying a *longer* plugin name that merely starts with ours.
+
 django-scopes
 -------------
 
@@ -235,6 +252,31 @@ class CustomReportExporter(ListExporter):
     #: ``WaitingListExporter`` does.
     repeatable_read = False
 
+    #: Our Django app label, exactly as it appears in ``Event.plugins`` (see
+    #: ``apps.PluginApp.name``). Same constant and same comparison the view
+    #: modules use in their ``PluginActiveMixin``; kept as a class attribute so a
+    #: test can point it elsewhere without patching a module global.
+    plugin_module = "pretix_custom_reports"
+
+    # -- plugin gate --------------------------------------------------------
+
+    def _plugin_is_active(self, event: Any) -> bool:
+        """Is this plugin switched on for *event*?
+
+        The check pretix itself performs before it delivers an event-level
+        plugin signal (``is_app_active``, pretix/base/signals.py:91-113):
+        membership in ``Event.get_plugins()``, which splits the stored
+        comma-separated list (base/models/event.py:794-800). Deliberately not a
+        ``plugins__contains`` query -- that matches substrings and would count a
+        hypothetical ``pretix_custom_reports_extra`` as us.
+
+        On event level this can only ever be ``True`` when pretix built us,
+        because ``register_data_exporters`` is an ``EventPluginSignal`` and does
+        not even fire for an event without the plugin. On organizer level it is
+        the only gate there is.
+        """
+        return self.plugin_module in event.get_plugins()
+
     # -- form ---------------------------------------------------------------
 
     @property
@@ -325,10 +367,14 @@ class CustomReportExporter(ListExporter):
 
         Deliberately built from ``self.events`` rather than from
         ``self.organizer.events``: the former is already restricted to the
-        events the acting account may read.
+        events the acting account may read. That restriction is about
+        *permission* only, so events without the plugin are dropped here as well
+        -- offering a report that :meth:`_prepare` is going to refuse would be a
+        choice that cannot be honoured.
         """
+        events = [event for event in self.events if self._plugin_is_active(event)]
         reports = (
-            ReportDefinition.objects.filter(event__in=self.events)
+            ReportDefinition.objects.filter(event__in=events)
             .order_by("name", "identifier", "pk")
             .values_list("identifier", "name")
         )
@@ -464,9 +510,25 @@ class CustomReportExporter(ListExporter):
     ) -> Tuple[ReportDefinition, Any]:
         """Look the report up in *event* and compile it. Never raises anything else.
 
-        :raises _EventProblem: the report is gone, its stored JSON no longer
-            validates, or a field it uses does not exist in this event.
+        :raises _EventProblem: the plugin is switched off for this event, the
+            report is gone, its stored JSON no longer validates, or a field it
+            uses does not exist in this event.
         """
+        if not self._plugin_is_active(event):
+            # Checked *before* the report lookup, not after: an event whose
+            # administrator switched the plugin off must not have its reports
+            # read at all, let alone its orders. On organizer level this is the
+            # only thing standing between a leftover report and a recurring mail
+            # -- self.events is permission-filtered, nothing more (see the
+            # "Permissions" section of the module docstring).
+            raise _EventProblem(
+                event,
+                gettext(
+                    'The report "{identifier}" cannot be exported for event '
+                    "{event}: the plugin is not enabled for this event."
+                ).format(identifier=identifier, event=event.slug),
+            )
+
         try:
             report = (
                 ReportDefinition.objects.for_event(event)
@@ -713,8 +775,14 @@ def register_multievent_report_exporter(sender, **kwargs):
     ``OrganizerPluginSignal(allow_legacy_plugins=True)`` and this plugin is
     event level, so connecting emits a ``DeprecationWarning`` and the exporter is
     considered active for every organizer (pretix/base/plugins.py:107-113). The
-    consequence is harmless and deliberate: the export appears in the organizer
-    UI even for an organizer that has never enabled the plugin, where it then
-    offers an empty list of reports.
+    export therefore appears in the organizer UI even for an organizer that has
+    never enabled the plugin.
+
+    That is *not* harmless by itself, and this docstring used to claim it was
+    (security review S-002): the events the exporter is handed are filtered by
+    permission only, so the per-event gate has to be ours.
+    :meth:`CustomReportExporter._plugin_is_active` is that gate; it applies to
+    the choices in the form and to every event of a run, so an organizer with no
+    plugin-enabled event sees an empty report list and can export nothing.
     """
     return CustomReportExporter

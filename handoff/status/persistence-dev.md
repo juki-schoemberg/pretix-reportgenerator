@@ -183,3 +183,85 @@ solange die anderen Welle-1-Agents schreiben.
    `portability-dev` gegen `duplicate()` und `templates_for_organizer()`.
 3. Bei Bedarf `report.log_executed(...)` aus Exporter und Vorschau aufrufen —
    der Aufrufer ist noch nicht verdrahtet, weil er in fremdem Gebiet liegt.
+
+---
+
+# Nacharbeit vor Welle 4 — S-001 (Plugin-Gate in den CRUD-Views)
+
+Anlass: Befund **S-001** des `security-reviewer` (`docs/security-review.md`,
+Schweregrad mittel). Kein Wellen-3-Beitrag, sondern ein gezielter Fix-Lauf.
+
+## Was war
+
+`views/api.py`, `views/portability.py` und `views/templates.py` haben je einen
+Plugin-Aktiv-Check, `views/editor.py` erbt ihn. `views/crud.py` hatte keinen.
+Folge: Liste, Anlege-, Änderungs-, Duplizier- und Löschansicht antworteten in
+einem Event mit abgeschaltetem Plugin weiter mit 200. SPEC.md F1 verlangt das
+Gegenteil — „Plugin aus" ist im pretix-Modell die Notbremse, und
+Control-Panel-URLs eines Plugins liegen an der URL-Wurzel, also greift der
+Presale-Wrapper aus `pretix/multidomain/plugin_handler.py` dort nicht.
+
+## Was ich geändert habe
+
+Genau eine Datei: `pretix_custom_reports/views/crud.py`.
+
+* Neues `PluginActiveMixin` (404, wenn `"pretix_custom_reports" not in
+  event.get_plugins()`) — **wörtlich dieselbe Semantik** wie in `views/api.py`.
+* `EventReportMixin` erbt davon. Damit hängen alle fünf Views am Gate, ohne dass
+  eine einzelne Klasse angefasst werden musste.
+* `PluginActiveMixin` in `__all__`, Modul-Docstring um einen Satz ergänzt.
+
+Bewusst **dupliziert statt importiert**, wie `views/portability.py` es schon
+tut: ein Import aus `views/api.py` (Gebiet `frontend-dev`) würde eine
+Modulabhängigkeit zwischen zwei Agentengebieten aufmachen. Das Mixin an einer
+gemeinsamen Stelle zu besitzen wäre sauberer, ist aber ein Eigentumswechsel und
+liegt laut Security-Review beim `integrator`. Der Kommentar im Code sagt das so.
+
+MRO-Reihenfolge geprüft: `ReportListView(EventReportMixin,
+EventPermissionRequiredMixin, ListView)` linearisiert zu
+`… → EventReportMixin → PluginActiveMixin → EventPermissionRequiredMixin → …`.
+Das Plugin-Gate läuft also **vor** der Rechteprüfung — identisch zu
+`views/api.py` (`_ApiView(PluginActiveMixin, EventPermissionRequiredMixin, View)`)
+und zu `views/portability.py`. Für ein abgeschaltetes Event gibt es damit 404
+statt 403, was die richtige Auskunft ist: die Ressource existiert dort nicht.
+
+Keine Migration. Reine View-Logik, kein Modellfeld angefasst.
+`urls.py` und `signals.py` unverändert, die Routenliste am Dateiende ist
+dieselbe wie zuvor.
+
+## Tests
+
+* `pytest tests/test_security.py -q -k plugin_is_off --runxfail` → **2 passed**.
+  Damit läuft `test_every_event_view_404s_when_the_plugin_is_off` jetzt echt
+  grün, nicht nur „nicht mehr rot".
+* `pytest tests/test_models.py tests/test_permissions.py -q` → **67 passed**,
+  unverändert. Kein Bestandstest hat sich auf 200 bei abgeschaltetem Plugin
+  verlassen (`-k crud` über `tests/` selektiert nichts, geprüft).
+* Gesamtlauf `pytest tests -q -m "not performance"` → **992 passed, 2 failed,
+  9 xfailed**. Die zwei Fehlschläge:
+  1. `test_security.py::test_every_event_view_404s_when_the_plugin_is_off` —
+     `XPASS(strict)`. **Erwartet**: der Test trägt noch
+     `@pytest.mark.xfail(strict=True)`, und die Datei gehört dem
+     `security-reviewer`, nicht mir. Marker entfernen ist Sache des
+     Orchestrators.
+  2. `test_smoke.py::test_no_migration_created_yet` — vorbestehend seit Welle 1
+     (das Welle-0-Gate, das genau dann fällt, wenn ich Migrationen anlege).
+     Nicht durch diesen Lauf verursacht.
+* `flake8`, `black --check`, `isort -c` über `views/crud.py`: grün.
+* `python -m pretix makemigrations --check` meldet für
+  `pretix_custom_reports` **nichts Ausstehendes** (die Meldung betrifft
+  `pretix.base` selbst, Locale-Choices im Kern-Klon — umgebungsbedingt und
+  unabhängig vom Plugin).
+
+## Offen / für den Orchestrator
+
+1. `@pytest.mark.xfail(strict=True)` an
+   `test_every_event_view_404s_when_the_plugin_is_off` entfernen — bis dahin ist
+   die Suite durch diesen Fix rot. Absichtlich nicht von mir angefasst.
+2. Das Plugin-Gate steht nun **dreimal** wörtlich im Repo (`api.py`,
+   `portability.py`, `crud.py`). Kandidat für ein gemeinsames
+   `views/_mixins.py` beim `integrator` in Welle 4; bis dahin gilt: wer eines
+   ändert, ändert alle drei.
+3. `ReportDuplicateView` ist POST-only und daher vom Regressionstest des
+   `security-reviewer` (nur GETs) nicht abgedeckt — hängt aber über
+   `EventReportMixin` am selben Gate.
