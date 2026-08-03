@@ -28,11 +28,17 @@ No aggregate over a joined relation is used: everything is a correlated
 (``pretix/base/models/orders.py:510-575``). That is what keeps a report with
 several money columns from multiplying rows, and it is why ``SPEC.md`` section 4
 (six-digit position counts) stays achievable.
+
+**Every money expression carries** :class:`MoneyField` **as its output field.**
+That is what makes an aggregated amount come back as ``Decimal("20.50")`` rather
+than ``Decimal("20.5")`` -- see the class docstring for why a plain
+``DecimalField`` is not enough and why the same report otherwise produces two
+different files on SQLite and on PostgreSQL (blockers T-002).
 """
 
 from typing import Any, Callable, Mapping, Optional, Tuple
 
-from decimal import Decimal
+from decimal import Context, Decimal, InvalidOperation
 from django.db.models import (
     BooleanField,
     Case,
@@ -40,6 +46,7 @@ from django.db.models import (
     Count,
     DateField,
     DecimalField,
+    ExpressionWrapper,
     F,
     IntegerField,
     Max,
@@ -89,6 +96,9 @@ __all__ = [
     "COUNTED_PAYMENT_STATES",
     "COUNTED_REFUND_STATES",
     "ISO_DATE_REGEX",
+    "MONEY_DECIMAL_PLACES",
+    "MONEY_MAX_DIGITS",
+    "MoneyField",
     "PAYMENT_STATE_CHOICES",
     "age_at_event_annotation",
     "alias_for",
@@ -185,8 +195,81 @@ _ZERO = Decimal("0.00")
 ISO_DATE_REGEX = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}"
 
 
-def _money() -> DecimalField:
-    return DecimalField(max_digits=13, decimal_places=2)
+#: Scale of every money column pretix stores. Verified field by field against
+#: the installed source rather than assumed: ``Order.total``
+#: (``pretix/base/models/orders.py:266``), ``OrderPayment.amount`` (:1764),
+#: ``OrderRefund.amount`` (:2182), ``AbstractPosition.price`` (:1525) and
+#: ``OrderPosition.tax_value`` (:2571) are all
+#: ``DecimalField(max_digits=13, decimal_places=2)``.
+MONEY_MAX_DIGITS = 13
+MONEY_DECIMAL_PLACES = 2
+
+
+class MoneyField(DecimalField):
+    """``DecimalField`` that guarantees its scale no matter what produced it.
+
+    Django's SQLite backend quantises a ``DecimalField`` result to its
+    ``decimal_places`` **only when the expression is a plain column**; for a
+    ``Subquery``, ``Coalesce``, ``Sum`` or any combined expression it hands the
+    raw value through (``get_decimalfield_converter`` in
+    ``django/db/backends/sqlite3/operations.py``, verified in Django 5.2.16).
+    PostgreSQL keeps the scale of ``numeric(13, 2)`` across ``SUM``. So the very
+    same report writes ``20.50`` into one installation's CSV and ``20.5`` into
+    another's, and even mixes both inside one file next to ``order.total``,
+    which *is* a plain column. That is blockers T-002.
+
+    Nothing about this is fixable in SQL. ``Cast(expr, DecimalField(13, 2))``
+    was measured and does **not** help: ``CAST(x AS decimal)`` gives SQLite's
+    NUMERIC affinity, which drops trailing zeros just the same, and the Python
+    side still sees a ``Func`` rather than a ``Col`` and still skips the
+    quantisation. ``ROUND(x, 2)`` fails for the same reason. The scale is lost
+    in the *converter*, so the fix belongs in the converter.
+
+    ``Field.get_db_converters`` returns ``from_db_value`` whenever a field
+    defines it, and ``BaseExpression.get_db_converters`` appends the converters
+    of its ``output_field`` to the backend's own. Declaring this class as the
+    ``output_field`` of a money expression therefore quantises the result on
+    *every* backend, with no branch on the vendor anywhere in this plugin -- the
+    property we want is true by construction rather than by having remembered
+    to special-case SQLite.
+
+    On a backend that already returns the right scale the quantisation is a
+    no-op, so this cannot make a correct value wrong.
+    """
+
+    def from_db_value(self, value: Any, expression: Any, connection: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, Decimal):
+            # SQLite hands us a float; the backend converter in front of us has
+            # already turned it into a Decimal, but a third backend might not.
+            value = Decimal(str(value))
+        exponent = Decimal(1).scaleb(-self.decimal_places)
+        try:
+            return value.quantize(exponent, context=self.context)
+        except InvalidOperation:
+            # More significant digits than the column can hold. Unreachable from
+            # stored data -- it would take a sum wider than ``max_digits`` -- but
+            # an accounting export must not die on a large number, and widening
+            # the context keeps the result the same on every backend instead of
+            # raising on one of them.
+            precision = len(value.as_tuple().digits) + self.decimal_places + 1
+            return value.quantize(exponent, context=Context(prec=precision))
+
+
+def _money() -> MoneyField:
+    return MoneyField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES)
+
+
+def _as_money(expression: Any) -> ExpressionWrapper:
+    """Wrap a combined expression so it carries :class:`MoneyField`.
+
+    ``F("price") - F("tax_value")`` builds a ``CombinedExpression`` that resolves
+    its output field from its operands, which yields the *model's* plain
+    ``DecimalField`` -- correct in type, lossy in scale. There is no way to pass
+    an output field into ``-``, hence the wrapper.
+    """
+    return ExpressionWrapper(expression, output_field=_money())
 
 
 def _check(ctx: FieldContext, base: Base, event_pk: Optional[int] = None) -> None:
@@ -251,6 +334,21 @@ def _refund_sum_expression(base: Base) -> Subquery:
     return Subquery(queryset, output_field=_money())
 
 
+def _payment_sum_coalesced(base: Base) -> Coalesce:
+    """``payment_sum`` with the ``NULL`` of an unpaid order turned into ``0.00``.
+
+    One function rather than the same three lines in two places: the module
+    docstring promises that ``payment.sum_confirmed`` and
+    ``computed.payment_state`` emit ``pcr_payment_sum`` as the *identical*
+    expression so the compiler can merge them into a single ``annotate()``.
+    """
+    return Coalesce(
+        _payment_sum_expression(base),
+        Value(_ZERO, output_field=_money()),
+        output_field=_money(),
+    )
+
+
 def _pending_sum_expression(base: Base) -> Any:
     """Outstanding amount, mirroring ``Order.pending_sum``.
 
@@ -266,10 +364,18 @@ def _pending_sum_expression(base: Base) -> Any:
         default=F(_order_path(base, "total")),
         output_field=_money(),
     )
-    return (
+    return _as_money(
         total
-        - Coalesce(_payment_sum_expression(base), Value(_ZERO, output_field=_money()))
-        + Coalesce(_refund_sum_expression(base), Value(_ZERO, output_field=_money()))
+        - Coalesce(
+            _payment_sum_expression(base),
+            Value(_ZERO, output_field=_money()),
+            output_field=_money(),
+        )
+        + Coalesce(
+            _refund_sum_expression(base),
+            Value(_ZERO, output_field=_money()),
+            output_field=_money(),
+        )
     )
 
 
@@ -278,11 +384,7 @@ def payment_sum_annotation(base: Base) -> Callable[[FieldContext], Mapping[str, 
 
     def build(ctx: FieldContext) -> Mapping[str, Any]:
         _check(ctx, base)
-        return {
-            ALIAS_PAYMENT_SUM: Coalesce(
-                _payment_sum_expression(base), Value(_ZERO, output_field=_money())
-            )
-        }
+        return {ALIAS_PAYMENT_SUM: _payment_sum_coalesced(base)}
 
     return build
 
@@ -294,7 +396,9 @@ def refund_sum_annotation(base: Base) -> Callable[[FieldContext], Mapping[str, A
         _check(ctx, base)
         return {
             ALIAS_REFUND_SUM: Coalesce(
-                _refund_sum_expression(base), Value(_ZERO, output_field=_money())
+                _refund_sum_expression(base),
+                Value(_ZERO, output_field=_money()),
+                output_field=_money(),
             )
         }
 
@@ -323,9 +427,7 @@ def payment_state_annotation(base: Base) -> Callable[[FieldContext], Mapping[str
     def build(ctx: FieldContext) -> Mapping[str, Any]:
         _check(ctx, base)
         return {
-            ALIAS_PAYMENT_SUM: Coalesce(
-                _payment_sum_expression(base), Value(_ZERO, output_field=_money())
-            ),
+            ALIAS_PAYMENT_SUM: _payment_sum_coalesced(base),
             ALIAS_PENDING_SUM: _pending_sum_expression(base),
             ALIAS_PAYMENT_STATE: Case(
                 When(
@@ -375,11 +477,15 @@ def net_price_annotation(base: Base) -> Callable[[FieldContext], Mapping[str, An
     deliberately ignored: they express the value *before* rounding and would
     make a column disagree with the order total
     (docs/pretix-api-notes.md section 6.2, pitfall 8).
+
+    A subtraction of two columns is no longer a column, so this needs
+    :func:`_as_money` as much as the subquery sums do: ``23.50 - 3.50`` would
+    otherwise render as ``20`` next to a ``23.50`` from ``position.price``.
     """
 
     def build(ctx: FieldContext) -> Mapping[str, Any]:
         _check(ctx, base)
-        return {ALIAS_NET_PRICE: F("price") - F("tax_value")}
+        return {ALIAS_NET_PRICE: _as_money(F("price") - F("tax_value"))}
 
     return build
 

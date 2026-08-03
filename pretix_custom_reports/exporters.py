@@ -24,6 +24,43 @@ What this module deliberately does **not** do
 * **No permission logic.** pretix decides which events we may see and hands them
   to us; see "Permissions" below.
 
+Column formats live here, in a layer of their own (finding T-001)
+------------------------------------------------------------------
+
+``ColumnFormat.date_style``, ``number_style`` and ``boolean_style`` used to be
+applied by the preview and by nobody else, so "date only" showed a date on
+screen and a full timestamp in the file. The fix is *not* to move formatting
+into the query compiler: it hands back ``Decimal``/``datetime`` on purpose, and
+that is the only reason XLSX contains real numbers and real dates instead of
+text that merely looks like them (see the docstring of ``NumberStyle.RAW``).
+
+So formatting is a third layer, and it lives here as two module-level functions
+that anyone may import:
+
+* :func:`format_cell_value` -- value plus format in, display **string** out.
+  This is the shared one; ``views/api.py`` (preview) calls the same function, so
+  "the preview does not promise anything the file cannot keep" is a property of
+  the code rather than of two implementations agreeing by accident.
+* :func:`format_export_cell` -- the *policy* the export applies on top: format
+  only what the definition explicitly asked to be formatted, and hand every
+  other value through **untouched and natively typed**.
+
+That policy is what keeps two promises at once. A report saved before this
+existed has no styles set, so every one of its cells still travels as the raw
+value it always did; and ``NumberStyle.RAW`` keeps meaning what its docstring
+says, a real number in the spreadsheet, because it is the one style that is
+deliberately *not* rendered to a string on the way out.
+
+``ColumnFormat.separator`` is not handled here. It is applied by the compiler
+(``query/columns.py``), which is the only place that can: it joins the values of
+a one-to-many relation *before* they ever become a cell.
+
+One thing the *output format* decides, though, and only one:
+:func:`as_spreadsheet_value` strips the timezone off an aware ``datetime`` on
+the XLSX path, because openpyxl refuses to write one at all. Not on the CSV
+path, where an aware datetime is written correctly and changing it would only
+alter the bytes of every existing report.
+
 Injection: already handled, verified, not duplicated
 ----------------------------------------------------
 
@@ -138,11 +175,14 @@ receiver's ``__module__`` (pretix/base/signals.py:64-88).
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import dataclasses
+import datetime
+import decimal
 import logging
 import re
 from collections import OrderedDict
 from django import forms
 from django.core.exceptions import ObjectDoesNotExist
+from django.utils import formats, timezone
 from django.utils.translation import gettext, gettext_lazy as _, pgettext_lazy
 from pretix.base.exporter import ListExporter
 from pretix.base.models import Device, TeamAPIToken, User
@@ -150,6 +190,13 @@ from pretix.base.models.auth import UserWithStaffSession
 from pretix.base.services.export import ExportError
 
 from pretix_custom_reports import contracts
+from pretix_custom_reports.contracts import (
+    BooleanStyle,
+    ColumnFormat,
+    DataType,
+    DateStyle,
+    NumberStyle,
+)
 from pretix_custom_reports.models import ReportDefinition
 from pretix_custom_reports.query.compiler import ReportQueryCompiler
 from pretix_custom_reports.registry.library import field_registry
@@ -157,11 +204,15 @@ from pretix_custom_reports.registry.library import field_registry
 __all__ = [
     "CustomReportExporter",
     "EXPORT_FORMATS",
+    "FORMAT_XLSX",
     "FORM_KEY_INCLUDE_CANCELED",
     "FORM_KEY_INCLUDE_TESTMODE",
     "FORM_KEY_ON_UNAVAILABLE",
     "FORM_KEY_REPORT",
     "FORM_KEY_ROW_LIMIT",
+    "as_spreadsheet_value",
+    "format_cell_value",
+    "format_export_cell",
     "register_multievent_report_exporter",
     "register_report_exporter",
 ]
@@ -178,7 +229,11 @@ logger = logging.getLogger(__name__)
 #: ODS is **not** in this list because pretix 2026.6.0 does not offer it;
 #: ``ListExporter`` knows XLSX and three CSV dialects and nothing else. Adding
 #: ODS would mean hand-rolling a serialiser, which CLAUDE.md rule 6 forbids.
-EXPORT_FORMATS = ("xlsx", "default", "csv-excel", "semicolon")
+#:
+#: :data:`FORMAT_XLSX` is named because it is the one value that changes what a
+#: cell may contain, see :func:`as_spreadsheet_value`.
+FORMAT_XLSX = "xlsx"
+EXPORT_FORMATS = (FORMAT_XLSX, "default", "csv-excel", "semicolon")
 
 #: Key holding the report reference in ``export_form_data``. Frozen contract
 #: (``contracts.EXPORT_FORM_REPORT_KEY``), value ``"report"``. The value stored
@@ -224,6 +279,237 @@ class _EventProblem(Exception):
         self.event = event
         self.message = message
         super().__init__(message)
+
+
+# ---------------------------------------------------------------------------
+# Cell formatting (finding T-001)
+# ---------------------------------------------------------------------------
+#
+# Public on purpose: the preview in views/api.py renders the same cells and must
+# render them the same way. Two functions rather than one, because "how does a
+# value look once it is a string" and "which values does the export turn into
+# strings at all" are two different questions with two different answers.
+
+
+def format_cell_value(
+    value: Any,
+    fmt: Optional[ColumnFormat],
+    datatype: Optional[DataType] = None,
+    event: Optional[Any] = None,
+) -> str:
+    """Render one cell value as a display string, honouring *fmt*.
+
+    The single formatting implementation of this plugin. Called by the exporter
+    (through :func:`format_export_cell`) and by the editor preview, so that what
+    a user sees on screen is what lands in the file.
+
+    :param value: the raw cell value the compiler produced: ``None``, ``str``,
+        ``bool``, ``int``, ``float``, ``Decimal``, ``date``, ``datetime`` or
+        ``time``.
+    :param fmt: the column's
+        :class:`~pretix_custom_reports.contracts.ColumnFormat`, or ``None``.
+        Read with ``getattr``, so any object carrying the three style attributes
+        works and ``None`` means "every style at its default".
+    :param datatype: the column's
+        :class:`~pretix_custom_reports.contracts.DataType`. Only consulted to
+        decide whether an unstyled number is money.
+    :param event: the event the row belongs to; supplies the timezone for aware
+        datetimes and the currency for money. May be ``None``, in which case
+        both fall back to a plain rendering rather than failing.
+    :return: always a string. ``None`` becomes ``""``.
+
+    Note what this does **not** do: it never keeps a native type. A caller that
+    needs ``Decimal``/``datetime`` to survive -- XLSX does -- must decide *not to
+    call it*, which is exactly what :func:`format_export_cell` decides.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, bool):
+        style = getattr(fmt, "boolean_style", None)
+        if style is BooleanStyle.TRUE_FALSE:
+            return "true" if value else "false"
+        if style is BooleanStyle.ONE_ZERO:
+            return "1" if value else "0"
+        return str(_("Yes")) if value else str(_("No"))
+
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return _format_temporal(value, getattr(fmt, "date_style", None), event)
+
+    if isinstance(value, (decimal.Decimal, int, float)):
+        return _format_number(
+            value, getattr(fmt, "number_style", None), datatype, event
+        )
+
+    return str(value)
+
+
+def format_export_cell(
+    value: Any,
+    fmt: Optional[ColumnFormat],
+    datatype: Optional[DataType] = None,
+    event: Optional[Any] = None,
+) -> Any:
+    """Apply *fmt* to *value* for a file -- or hand the value back untouched.
+
+    Same arguments as :func:`format_cell_value`; the difference is the return
+    value, which is a formatted ``str`` only where the definition asked for one
+    and the **unchanged input** everywhere else.
+
+    Untouched means untouched, and each of the four cases below is a promise to
+    somebody:
+
+    * *No style for this value's type* -- including a ``fmt`` of ``None``, i.e.
+      every report saved before column formats reached the export. Its files do
+      not change.
+    * :attr:`~pretix_custom_reports.contracts.NumberStyle.RAW` -- the one style
+      whose documented meaning is "do not make a string out of me", so that XLSX
+      keeps a number a spreadsheet can add up.
+    * ``None`` -- stays ``None``, which CSV writes as an empty field and XLSX as
+      an empty cell. Turning it into ``""`` would fill an XLSX with strings.
+    * ``str`` -- already a string; the compiler formatted it (a ``join`` column
+      with its separator), and re-rendering it would be a second opinion.
+    """
+    if not _style_applies(value, fmt):
+        return value
+    try:
+        return format_cell_value(value, fmt, datatype, event)
+    except Exception:
+        # A stored definition can pair a style with a datatype it does not fit
+        # -- ``date_only`` on a time-of-day column, say -- and a definition is
+        # untrusted input that nothing revalidates on the way to a scheduled
+        # run. An unformatted cell is a cosmetic defect; an exception here would
+        # be five Celery retries and the word "Internal Error"
+        # (services/export.py:392-397).
+        logger.warning(
+            "pretix_custom_reports: could not apply the column format %r to a "
+            "value of type %s, exporting it unformatted",
+            fmt,
+            type(value).__name__,
+            exc_info=True,
+        )
+        return value
+
+
+def as_spreadsheet_value(value: Any, event: Optional[Any] = None) -> Any:
+    """Make one cell value acceptable to openpyxl. XLSX path only.
+
+    openpyxl refuses a timezone-aware ``datetime`` outright -- *"Excel does not
+    support timezones in datetimes. The tzinfo in the datetime/time object must
+    be set to None"* -- and ``ListExporter._render_xlsx`` hands our cell values
+    to ``ws.append`` unchanged (pretix/base/exporter.py:305-311). Our rows are
+    aware, because ``USE_TZ`` is on and the compiler returns native types on
+    purpose. Without this function, **every** XLSX export of a report with a
+    date column raised ``TypeError``: not an ``ExportError`` naming the problem,
+    but five Celery retries and the word "Internal Error", and after five of
+    those the schedule drops out of the periodic query unnoticed
+    (services/export.py:392-397, 502).
+
+    So an aware value is converted to *event-local* time and then stripped of
+    its ``tzinfo``. Local rather than UTC because the cell can no longer say
+    which zone it is in, and the event's own zone is the only one its organizer
+    reads a spreadsheet in -- and because
+    :func:`format_cell_value` localises the same value the same way, so a styled
+    and an unstyled datetime column of one report show the same wall clock.
+
+    Everything else is returned unchanged, including naive datetimes,
+    ``date`` (openpyxl accepts those) and every non-temporal type.
+
+    Deliberately *not* applied to the CSV path: there an aware ``datetime`` is
+    written as ``2026-04-24 09:00:00+00:00`` and works, so touching it would
+    change the bytes of every existing report for no gain.
+    """
+    if isinstance(value, datetime.datetime):
+        if not timezone.is_aware(value):
+            return value
+        try:
+            value = timezone.localtime(value, event.timezone)
+        except Exception:  # pragma: no cover - defensive
+            # No event, or a broken timezone setting. Dropping the tzinfo off
+            # the value we already have keeps the export alive; the cell then
+            # shows UTC, which is wrong by hours and not by a crash.
+            logger.warning(
+                "pretix_custom_reports: could not localise a datetime for the "
+                "XLSX export, writing it as it arrived",
+                exc_info=True,
+            )
+        return value.replace(tzinfo=None)
+    if isinstance(value, datetime.time) and value.tzinfo is not None:
+        # A time carries no date, so there is nothing to convert it *by*; the
+        # zone can only be dropped. Rare -- no core field produces one -- but a
+        # third-party registry field may.
+        return value.replace(tzinfo=None)
+    return value
+
+
+def _style_applies(value: Any, fmt: Optional[ColumnFormat]) -> bool:
+    """Does *fmt* say anything about a value of this type? See above for why."""
+    if fmt is None or value is None or isinstance(value, str):
+        return False
+    if isinstance(value, bool):  # before int: bool is an int in Python
+        return getattr(fmt, "boolean_style", None) is not None
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return getattr(fmt, "date_style", None) is not None
+    if isinstance(value, (decimal.Decimal, int, float)):
+        style = getattr(fmt, "number_style", None)
+        return style is not None and style is not NumberStyle.RAW
+    return False
+
+
+def _has_style(fmt: Optional[ColumnFormat]) -> bool:
+    """True if *fmt* sets any of the three styles.
+
+    ``separator`` alone does not count: the compiler has already applied it by
+    the time a value reaches us.
+    """
+    return fmt is not None and any(
+        (
+            getattr(fmt, "date_style", None),
+            getattr(fmt, "number_style", None),
+            getattr(fmt, "boolean_style", None),
+        )
+    )
+
+
+def _format_temporal(value: Any, style: Any, event: Any) -> str:
+    if isinstance(value, datetime.datetime) and timezone.is_aware(value):
+        try:
+            value = timezone.localtime(value, event.timezone)
+        except Exception:  # pragma: no cover - defensive
+            pass
+    is_datetime = isinstance(value, datetime.datetime)
+    is_time = isinstance(value, datetime.time) and not is_datetime
+
+    if style is DateStyle.ISO:
+        return value.isoformat()
+    if style is DateStyle.TIME_ONLY or (is_time and style is None):
+        return formats.date_format(value, "TIME_FORMAT")
+    if style is DateStyle.DATE_ONLY:
+        return formats.date_format(value, "SHORT_DATE_FORMAT")
+    if style is DateStyle.SHORT:
+        return formats.date_format(
+            value, "SHORT_DATETIME_FORMAT" if is_datetime else "SHORT_DATE_FORMAT"
+        )
+    if style is DateStyle.LONG:
+        return formats.date_format(value, "l, j F Y H:i" if is_datetime else "l, j F Y")
+    return formats.date_format(
+        value, "DATETIME_FORMAT" if is_datetime else "DATE_FORMAT"
+    )
+
+
+def _format_number(value: Any, style: Any, datatype: Any, event: Any) -> str:
+    if style is NumberStyle.CURRENCY or (style is None and datatype is DataType.MONEY):
+        try:
+            from pretix.base.templatetags.money import money_filter
+
+            return money_filter(decimal.Decimal(str(value)), event.currency)
+        except Exception:  # pragma: no cover - defensive
+            return str(value)
+    if style is NumberStyle.LOCALIZED:
+        return formats.number_format(value, use_l10n=True)
+    return str(value)
 
 
 class CustomReportExporter(ListExporter):
@@ -495,11 +781,27 @@ class CustomReportExporter(ListExporter):
         yield self.ProgressSetTotal(total=self._total_rows(prepared))
 
         fmt = form_data.get("_format")
+        # The only place the output format changes what a *cell* may hold: a
+        # spreadsheet cannot take a timezone-aware datetime, a CSV file can.
+        for_spreadsheet = fmt == FORMAT_XLSX
         for event, report, compiled in prepared:
             prefix = [event.slug, str(event.name)] if self.is_multievent else []
+            # Once per event, not once per row: the pairing is a property of the
+            # definition, and a six-digit report would otherwise rebuild it a
+            # six-digit number of times.
+            cell_formats = self._cell_formats(compiled)
             rows = 0
             for row in compiled.iter_rows(chunk_size=contracts.DEFAULT_CHUNK_SIZE):
                 rows += 1
+                if cell_formats is not None:
+                    row = [
+                        format_export_cell(value, column_format, datatype, event)
+                        for value, (column_format, datatype) in zip(row, cell_formats)
+                    ]
+                if for_spreadsheet:
+                    # After the formatting, not before: a styled cell is a
+                    # string by now and passes through untouched.
+                    row = [as_spreadsheet_value(value, event) for value in row]
                 yield prefix + row
             self._log_execution(report, rows=rows, fmt=fmt)
 
@@ -579,6 +881,36 @@ class CustomReportExporter(ListExporter):
             return definition
         options = dataclasses.replace(definition.options, **overrides)
         return dataclasses.replace(definition, options=options)
+
+    @staticmethod
+    def _cell_formats(
+        compiled: Any,
+    ) -> Optional[List[Tuple[Optional[ColumnFormat], Any]]]:
+        """Pair every output column with its ``ColumnFormat`` and its datatype.
+
+        Returns ``None`` -- meaning "yield the rows exactly as the compiler
+        produced them" -- when no column of this report sets a style. That is
+        the overwhelmingly common case, and it makes the old code path the
+        literal old code path rather than a formatting pass that happens to be a
+        no-op.
+
+        The pairing is by *position among the visible columns*, the same way the
+        preview does it (``views/api.py::_formats_by_index``):
+        ``CompiledReport.columns`` has hidden columns dropped already, so it does
+        not line up index-for-index with ``definition.columns``. The definition
+        read here is the compiled one, so the run-time overrides are included.
+        """
+        definition = getattr(compiled, "definition", None)
+        if definition is None:  # pragma: no cover - defensive
+            return None
+        visible = [column for column in definition.columns if not column.hidden]
+        pairs: List[Tuple[Optional[ColumnFormat], Any]] = []
+        for index, column in enumerate(compiled.columns):
+            column_format = visible[index].format if index < len(visible) else None
+            pairs.append((column_format, column.datatype))
+        if not any(_has_style(column_format) for column_format, _datatype in pairs):
+            return None
+        return pairs
 
     @staticmethod
     def _total_rows(prepared: Sequence[Tuple[Any, Any, Any]]) -> int:

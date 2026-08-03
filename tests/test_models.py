@@ -9,6 +9,7 @@ docs/adr/0001-contracts.md section 4). ``test_unresolvable_field_key_is_stored``
 pins that down so nobody "fixes" it later.
 """
 
+import json
 import pytest
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
@@ -17,6 +18,7 @@ from django_scopes import ScopeError, scope, scopes_disabled
 from pretix.base.models import Event, LogEntry, Organizer
 
 from pretix_custom_reports import contracts
+from pretix_custom_reports.forms import ReportDefinitionForm
 from pretix_custom_reports.models import (
     IDENTIFIER_CHARSET,
     IDENTIFIER_LENGTH,
@@ -181,6 +183,160 @@ def test_ensure_unique_identifier_keeps_free_identifier(event, second_event, org
             identifier="attendees",
         )
         assert moved.ensure_unique_identifier() == "attendees"
+
+
+# ---------------------------------------------------------------------------
+# Identifier uniqueness as seen through the form (security review S-004)
+# ---------------------------------------------------------------------------
+#
+# The constraints tested above are the last line of defence and they answer with
+# an IntegrityError -- i.e. a 500 in the middle of the view's transaction, not a
+# form error. Django's own ``validate_unique`` cannot catch the collision here,
+# because ``event``/``organizer`` are not form fields and every unique check
+# mentioning an excluded field is skipped. ``ReportDefinitionForm`` therefore
+# carries its own ``clean_identifier``. The tests live in this module because
+# the form is the model's gatekeeper and there is no separate ``test_forms.py``.
+
+
+def form_payload(identifier, name="Second report", base="order"):
+    """Exactly the fields ``ReportDefinitionForm`` renders."""
+    return {
+        "name": name,
+        "description": "",
+        "identifier": identifier,
+        "base": base,
+        "definition": json.dumps(make_definition(base=base)),
+    }
+
+
+def test_form_rejects_a_duplicate_identifier_in_the_same_event(event, organizer):
+    with scope(organizer=organizer):
+        report(event=event, identifier="attendees")
+        form = ReportDefinitionForm(data=form_payload("attendees"), event=event)
+        # No IntegrityError on the way to this verdict: the check runs in
+        # ``clean_identifier``, long before anything is written.
+        assert form.is_valid() is False
+        assert "identifier" in form.errors
+        assert ReportDefinition.objects.for_event(event).count() == 1
+
+
+def test_form_rejects_a_duplicate_template_identifier(organizer):
+    """Same form class, organizer side of the XOR (views/templates.py)."""
+    with scope(organizer=organizer):
+        report(organizer=organizer, identifier="attendees")
+        form = ReportDefinitionForm(data=form_payload("attendees"), organizer=organizer)
+        assert form.is_valid() is False
+        assert "identifier" in form.errors
+        assert ReportDefinition.objects.templates_for_organizer(organizer).count() == 1
+
+
+def test_form_allows_the_same_identifier_in_another_event(
+    event, second_event, organizer
+):
+    """Uniqueness is per event -- see ``test_identifier_may_repeat_in_another_event``."""
+    with scope(organizer=organizer):
+        report(event=event, identifier="attendees")
+        form = ReportDefinitionForm(data=form_payload("attendees"), event=second_event)
+        assert form.is_valid(), form.errors
+        saved = form.save()
+        assert saved.identifier == "attendees"
+        assert saved.event == second_event
+
+
+def test_form_allows_an_event_report_next_to_a_template_of_the_same_name(
+    event, organizer
+):
+    """Templates live in their own uniqueness scope (organizer, identifier)."""
+    with scope(organizer=organizer):
+        report(organizer=organizer, identifier="attendees", name="Template")
+        form = ReportDefinitionForm(data=form_payload("attendees"), event=event)
+        assert form.is_valid(), form.errors
+
+
+def test_form_lets_a_report_keep_its_own_identifier(event, organizer):
+    """The row must exclude itself, otherwise no report could ever be edited."""
+    with scope(organizer=organizer):
+        existing = report(event=event, identifier="attendees")
+        form = ReportDefinitionForm(
+            data=form_payload("attendees", name="Renamed"),
+            instance=existing,
+            event=event,
+        )
+        assert form.is_valid(), form.errors
+        saved = form.save()
+        assert saved.pk == existing.pk
+        assert saved.identifier == "attendees"
+        assert saved.name == "Renamed"
+
+
+def test_form_still_generates_an_identifier_when_the_field_is_left_empty(
+    event, organizer
+):
+    """The new check must not turn the optional field into a required one."""
+    with scope(organizer=organizer):
+        report(event=event, identifier="attendees")
+        form = ReportDefinitionForm(data=form_payload(""), event=event)
+        assert form.is_valid(), form.errors
+        saved = form.save()
+        assert saved.identifier
+        assert saved.identifier != "attendees"
+
+
+# ---------------------------------------------------------------------------
+# Rendering a stored definition back into the form (security review S-007)
+# ---------------------------------------------------------------------------
+#
+# A definition may legally contain a lone surrogate: it is valid JSON syntax,
+# ``contracts.validate_definition`` checks shapes and lengths and says nothing
+# about encodability, and this very textarea is a way to store one. What must
+# not happen is that the page which could *repair* such a report is the page
+# that dies on it -- ``ensure_ascii=False`` produced a str that HttpResponse
+# cannot encode, i.e. a 500 on the change form of report and template alike.
+
+
+#: Valid JSON syntax, not encodable as UTF-8. Same value the security tests use.
+LONE_SURROGATE = "\ud800"
+
+
+def poisoned_definition(text):
+    document = make_definition()
+    document["columns"][0]["label"] = text
+    return document
+
+
+@pytest.mark.parametrize("owner", ["event", "organizer"])
+def test_form_renders_a_stored_lone_surrogate_as_an_escape(event, organizer, owner):
+    with scope(organizer=organizer):
+        if owner == "event":
+            row = report(
+                event=event, definition=poisoned_definition("x" + LONE_SURROGATE)
+            )
+            form = ReportDefinitionForm(instance=row, event=event)
+        else:
+            row = report(
+                organizer=organizer,
+                name="Template",
+                definition=poisoned_definition("x" + LONE_SURROGATE),
+            )
+            form = ReportDefinitionForm(instance=row, organizer=organizer)
+
+        # First what ``HttpResponse`` does to the finished page: this is the
+        # line that used to raise UnicodeEncodeError, and it has to be the one
+        # that fails if the fix is ever reverted -- an assertion about escapes
+        # would fail earlier and for a less telling reason.
+        rendered = str(form["definition"]).encode("utf-8")
+        assert rb"\ud800" in rendered
+        # Escaping must not change the document the user gets to edit.
+        assert json.loads(form["definition"].value()) == row.definition
+
+
+def test_form_round_trips_text_outside_the_basic_plane(event, organizer):
+    """Control group: escaping everything is allowed to look ugly, not to lie."""
+    with scope(organizer=organizer):
+        row = report(event=event, definition=poisoned_definition("Grüße \U0001f600"))
+        form = ReportDefinitionForm(instance=row, event=event)
+        value = form["definition"].value()
+        assert json.loads(value)["columns"][0]["label"] == "Grüße \U0001f600"
 
 
 # ---------------------------------------------------------------------------

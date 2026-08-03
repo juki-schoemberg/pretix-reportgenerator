@@ -21,6 +21,12 @@ deeply nested JSON            :func:`_max_depth` scans the *text* and refuses
                               inside the C scanner is not something to rely on
 "JSON bomb" (many nodes)      :data:`MAX_NODES`, counted iteratively
 oversized strings             :data:`MAX_STRING_CHARS`
+unpaired surrogates           :func:`_walk` re-encodes every string to UTF-8.
+                              ``"\\ud800"`` is *syntactically valid JSON* and
+                              ``json.loads`` happily returns it, but the result
+                              cannot be encoded -- and every response that
+                              serialises with ``ensure_ascii=False`` would then
+                              raise ``UnicodeEncodeError`` (S-003)
 decimal explosion             :data:`MAX_NUMBER_DIGITS` on the literal, plus a
                               finiteness check -- ``1e999`` parses to ``inf``,
                               which then travels silently through comparisons
@@ -175,7 +181,7 @@ def _object_pairs(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
 
 
 def _walk(root: Any) -> None:
-    """Count nodes and check string lengths without recursing."""
+    """Count nodes, check string lengths and encodability, without recursing."""
     stack: List[Any] = [root]
     nodes = 0
     while stack:
@@ -192,6 +198,21 @@ def _walk(root: Any) -> None:
                     REASON_STRING_TOO_LONG,
                     "A text in this file is longer than "
                     f"{MAX_STRING_CHARS} characters.",
+                )
+            # ``json.loads`` turns the escape ``\ud800`` into a lone surrogate.
+            # That is a valid Python ``str`` and an invalid piece of text: it
+            # stores fine (Django's JSONField writes with ``ensure_ascii=True``)
+            # and then breaks every reader that does not. Refusing it here is
+            # the only place where "this document is text" is still a statement
+            # about the whole document rather than about one field.
+            try:
+                node.encode("utf-8")
+            except UnicodeEncodeError:
+                raise _reject(
+                    REASON_NOT_UTF8,
+                    "A text in this file contains a character that is not "
+                    "valid Unicode (an unpaired surrogate). Report files are "
+                    "UTF-8 JSON.",
                 )
         elif isinstance(node, dict):
             for key, value in node.items():

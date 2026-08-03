@@ -405,12 +405,21 @@ def _dedupe_prefetches(entries: List[Any]) -> Tuple[Any, ...]:
     over ``all_positions`` all want that lookup. Two rules resolve it:
 
     * a :class:`~pretix_custom_reports.query.relations.PrefetchSpec` is keyed by
-      ``(lookup, to_attr)``. Intermediate levels have no ``to_attr`` and therefore
-      collapse into one query however many columns need them; leaf levels have a
-      per-column ``to_attr`` and stay independent, so their filters cannot
-      interfere.
+      ``(lookup, to_attr)``, and the leaf ``to_attr`` is derived from the *identity
+      of the queryset* -- relation, condition, canceled rule, inner
+      ``select_related`` -- by
+      :func:`~pretix_custom_reports.query.relations.join_leaf_to_attr`. So two
+      columns that want the same related rows collapse into one query, two columns
+      that want different rows stay apart and their filters cannot interfere, and
+      intermediate levels (no ``to_attr``) collapse as they always did.
     * anything else -- a plain path or a ``Prefetch`` a registry field declared in
       ``prefetch_related`` -- is de-duplicated by equality and passed through.
+
+    Keying on the column index instead, as this did until S-005
+    (docs/security-review.md), made the first rule unreachable: twenty ``join``
+    columns over one relation with one condition cost twenty prefetch queries per
+    chunk, which is the only place in the plugin where the cost of a preview grew
+    linearly with a number the user picks.
 
     Order is preserved, which matters: Django needs the parent of a nested prefetch
     to come first.

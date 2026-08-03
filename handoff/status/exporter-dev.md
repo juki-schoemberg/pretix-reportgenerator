@@ -649,3 +649,211 @@ Fixture sie sauber selbst herstellt und wieder abräumt.
 `pytest tests/test_exporters.py tests/test_smoke.py -q` → 64 passed.
 Gesamtsuite `pytest -m "not performance" -q` → 1016 passed, 8 deselected,
 8 xfailed. `flake8`/`isort -c`/`black --check` auf der Datei sauber.
+
+---
+
+# Nacharbeit T-001 — `ColumnFormat` wirkt jetzt auch im Export
+
+Dritter und jüngster Lauf, gezielt nach `handoff/blockers.md` T-001. Geändert:
+`pretix_custom_reports/exporters.py` und `tests/test_exporters.py` (42 → 53
+Tests). Nicht angefasst: `query/columns.py`, `views/api.py`, `signals.py`,
+`tests/test_integration.py`. Kein Commit, keine Migration.
+
+## Entscheidung
+
+Umgesetzt ist Option 2 des Reviews, vom Orchestrator bestätigt: die Formatierung
+ist eine **dritte Schicht** in `exporters.py`, kein Umbau des Compilers.
+`query/columns.py` liefert weiterhin `Decimal`/`datetime` — das ist der einzige
+Grund, warum XLSX echte Zahlen und echte Daten enthält
+(`NumberStyle.RAW`-Docstring). `ColumnFormat.separator` bleibt unverändert im
+Compiler; er wird angewandt, *bevor* aus einer 1:n-Relation eine Zelle wird, und
+kann deshalb gar nicht hierher wandern.
+
+## Für `frontend-dev`: die Signatur, kopierfertig
+
+Modulpfad `pretix_custom_reports.exporters`, beide Funktionen stehen in
+`__all__`:
+
+```python
+from pretix_custom_reports.exporters import format_cell_value
+
+def format_cell_value(
+    value: Any,
+    fmt: Optional[ColumnFormat],
+    datatype: Optional[DataType] = None,
+    event: Optional[Any] = None,
+) -> str: ...
+```
+
+Argumentreihenfolge, Typen und Rückgabe sind **identisch** zu
+`views/api.py::format_cell`; der Aufruf in `PreviewView._rows` bleibt also
+wörtlich stehen, nur der Import ändert sich. `_format_temporal` und
+`_format_number` in `views/api.py` werden damit ersatzlos überflüssig. Details,
+Beispielaufruf und Randfälle:
+`handoff/requests/exporter-dev-an-frontend-dev-t001-renderer.md`.
+
+Zweite, exporterseitige Funktion — für die Vorschau **nicht** gedacht, hier nur
+der Vollständigkeit halber:
+
+```python
+def format_export_cell(value, fmt, datatype=None, event=None) -> Any: ...
+```
+
+Sie entscheidet, *ob* formatiert wird, und gibt sonst den Rohwert unverändert
+zurück. Genau das hält XLSX-Zahlen nativ und alte Reports byte-gleich.
+
+## Was geändert wurde
+
+| Stelle | Was |
+| --- | --- |
+| `exporters.py:294` | `format_cell_value()` — die eine Formatierungsimplementierung, 1:1 aus `views/api.py::format_cell` übernommen |
+| `exporters.py:349` | `format_export_cell()` — Policy: formatieren nur, wo die Definition es ausdrücklich verlangt |
+| `exporters.py:447` | `_style_applies()` — die vier „nicht anfassen"-Fälle |
+| `exporters.py:461` | `_has_style()` — `separator` allein ist kein Stil |
+| `exporters.py:476/502` | `_format_temporal` / `_format_number`, ebenfalls unverändert übernommen |
+| `exporters.py:792` | `iterate_list` wendet die Formate an; die Paarung entsteht einmal pro Event, nicht pro Zeile |
+| `exporters.py:886` | `_cell_formats()` — Paarung Spalte ↔ Format über die **sichtbaren** Definitionsspalten, wie in der Vorschau; `None`, wenn kein Stil gesetzt ist |
+| Modul-Docstring | neuer Abschnitt „Column formats live here, in a layer of their own" |
+
+Die Policy in `format_export_cell`, vier Fälle, jeder ist ein Versprechen an
+jemanden:
+
+1. **Kein Stil für diesen Werttyp** (inkl. `fmt is None`) → Rohwert. Damit
+   ändert sich an keiner Datei eines vor T-001 gespeicherten Reports etwas.
+2. **`NumberStyle.RAW`** → Rohwert. Der eine Stil, dessen dokumentierte Bedeutung
+   „mach keinen String aus mir" ist; sonst könnte die Tabellenkalkulation die
+   Spalte nicht mehr summieren.
+3. **`None`** → bleibt `None`. CSV schreibt ein leeres Feld, XLSX eine leere
+   Zelle; `""` würde ein XLSX mit Strings füllen.
+4. **`str`** → bleibt. Der Compiler hat schon gerendert (`join` mit Separator),
+   ein zweites Rendern wäre eine zweite Meinung.
+
+Zusätzlich fängt `format_export_cell` eine Exception aus dem Renderer ab, loggt
+sie mit `exc_info` und exportiert die Zelle unformatiert. Grund: eine
+gespeicherte Definition kann einen Stil mit einem Datentyp paaren, zu dem er
+nicht passt (`date_only` auf einer Uhrzeit lässt Django nach dem Tag einer
+`datetime.time` fragen), und Definitionen werden vor einem terminierten Lauf von
+niemandem revalidiert. Eine unformatierte Zelle ist ein Schönheitsfehler; eine
+Exception wären fünf Celery-Retries und das Wort „Internal Error".
+
+## Geprüft
+
+`pytest tests/test_exporters.py -q` → **53 passed, 1 xfailed**. Neu:
+
+* `test_a_date_style_chosen_in_the_editor_reaches_the_csv` — die Reproduktion aus
+  dem Blocker, jetzt als Assertion: `iso` und `date_only` erzeugen verschiedene
+  CSV-Zeilen, und in der `date_only`-Zeile steht keine Uhrzeit.
+* `test_a_number_style_reaches_the_export` — `currency`/`localized` werden
+  Strings, `raw` und „kein Format" bleiben `Decimal`, alles in **einer** Zeile.
+* `test_a_boolean_style_reaches_the_export` und
+  `test_a_boolean_style_is_visible_in_the_csv_bytes`.
+* `test_a_report_without_a_column_format_is_exported_exactly_as_before` — die
+  Kontrollgruppe. Prüft beide Hälften von „unverändert": native Typen in der
+  Zeile *und* `_cell_formats() is None`, der alte Pfad ist also wörtlich der
+  alte Pfad. Inklusive Gegenprobe, dass ein reiner `separator` die Formatierung
+  nicht einschaltet.
+* `test_a_hidden_column_does_not_shift_the_formats` — versteckte Spalten sind in
+  `CompiledReport.columns` schon weg; eine Paarung über den rohen
+  Definitionsindex wäre derselbe Fehler eine Schicht tiefer.
+* `test_number_style_raw_keeps_a_native_number_in_the_xlsx` — echte XLSX-Datei,
+  `raw` ist eine Zahl, `currency` ein String, `date_only` ein String.
+* drei Renderer-Tests ohne Datenbank (`format_export_cell`-Policy in beide
+  Richtungen, unpassender Stil ≠ Celery-Crash).
+* `test_the_preview_and_the_export_share_one_renderer` — vergleicht meine
+  Funktion mit `views/api.py::format_cell` über 800 Kombinationen aus zehn
+  Werttypen, 14 Formaten und vier Datentypen, Ergebnis **und** ggf.
+  Exceptiontyp. Der Test wird zum No-Op, sobald `frontend-dev` dedupliziert hat
+  (er erkennt beide Endzustände), und schlägt bis dahin fehl, sobald die zwei
+  Implementierungen auseinanderlaufen.
+
+`tests/test_integration.py::test_finding_a_column_format_chosen_in_the_editor_reaches_the_export`
+läuft mit `--runxfail` grün und schlägt in der normalen Suite folgerichtig als
+**XPASS(strict)** um. Das ist der angekündigte Moment für `test-engineer`, das
+`xfail` zu entfernen; nicht meine Datei, nicht angefasst.
+
+Gesamtsuite `pytest -m "not performance" -q` → 1092 passed, 6 failed. Fünf der
+sechs liegen in `tests/test_security.py` (vier XPASS(strict) zu S-003/S-004/S-006
+und eine Query-Zählung) und sind **nicht meine**: mit gestashten Änderungen
+schlagen exakt dieselben fünf fehl. Der sechste ist der XPASS oben.
+`flake8`/`isort -c`/`black --check` auf beiden geänderten Dateien sauber.
+
+## Neuer Befund, angrenzend, nicht behoben
+
+**Ein XLSX-Export einer Datumsspalte ohne `date_style` kracht heute — und zwar
+als Celery-Crash, nicht als `ExportError`.** openpyxl weist zeitzonenbewusste
+`datetime`s ab (`TypeError: Excel does not support timezones in datetimes`,
+openpyxl 3.1.5), `_render_xlsx` reicht unsere Zellwerte unverändert an
+`ws.append` weiter (pretix `base/exporter.py:305-311`), und unsere Zeilen sind
+bewusst nativ typisiert. Nachgestellt in
+`test_a_datetime_column_without_a_style_survives_the_xlsx_path`, markiert als
+`xfail(strict=True)`, also jederzeit mit `--runxfail` vorführbar.
+
+Reichweite: jeder Report mit einer Datums-/Zeitspalte, der als XLSX läuft — im
+Teilnehmerreport der Normalfall. Genau die Fehlerklasse, gegen die dieses Modul
+gebaut ist (fünf Retries, „Internal Error", nach fünf Fehlläufen fällt der Termin
+still aus der Abfrage). Behelf für Betroffene: irgendeinen `date_style` setzen,
+dann verlässt die Zelle uns als String.
+
+**Nicht behoben, weil der Auftrag den Fall „kein Format gewählt" ausdrücklich
+unverändert lassen wollte.** Der Fix gehört in `format_export_cell` und ist
+klein: aware `datetime` nach `event.timezone` umrechnen und `tzinfo` entfernen,
+damit XLSX ein echtes Datum bekommt statt eines Strings. Betrifft nur den
+XLSX-Pfad, CSV schreibt aware `datetime`s heute korrekt. Bitte einplanen — ich
+mache das gern in einer eigenen Runde, sobald die Entscheidung da ist.
+
+## Nachtrag: der XLSX-Datetime-Crash ist behoben
+
+Vom Orchestrator direkt nachgezogen, gleicher Lauf, gleiche zwei Dateien
+(53 → 59 Tests). Der Befund aus dem Abschnitt darüber ist damit **geschlossen**;
+der `xfail(strict=True)` ist weg, der Test grün.
+
+**Fix:** neue Funktion `as_spreadsheet_value(value, event=None) -> Any`
+(`exporters.py:396`, in `__all__`). Sie rechnet einen zeitzonenbewussten
+`datetime` auf `event.timezone` um und entfernt danach `tzinfo`; eine `time` mit
+`tzinfo` verliert sie ersatzlos, weil es ohne Datum nichts gibt, *womit* man
+umrechnen könnte. Alles andere — naive `datetime`, `date` (openpyxl akzeptiert
+die), Strings, Zahlen, `None` — kommt unverändert zurück.
+
+Lokale Zeit statt UTC, weil die Zelle danach nicht mehr sagen kann, in welcher
+Zone sie steht, und weil `format_cell_value` denselben Wert genauso lokalisiert:
+eine formatierte und eine unformatierte Datumsspalte desselben Reports zeigen
+damit dieselbe Wanduhr. Schlägt die Lokalisierung fehl (kein Event, kaputte
+Zeitzoneneinstellung), wird geloggt und die `tzinfo` trotzdem entfernt — eine um
+Stunden falsche Zelle ist besser als ein Absturz.
+
+**Nur auf dem XLSX-Pfad.** `iterate_list` schaltet über
+`for_spreadsheet = fmt == FORMAT_XLSX` (`exporters.py:786`), und zwar **nach**
+der T-001-Formatierung: eine gestylte Zelle ist dann längst ein String und geht
+unberührt durch. CSV bleibt Byte für Byte wie vorher, dort ist ein aware
+`datetime` korrekt geschrieben. Neu ist nur die benannte Konstante
+`FORMAT_XLSX`; `EXPORT_FORMATS` ist inhaltlich unverändert.
+
+**Tests** (neuer Abschnitt „2c. Timezones and XLSX"):
+
+* `test_a_datetime_column_without_a_style_survives_the_xlsx_path` — ohne `xfail`.
+  Prüft nicht nur „kracht nicht", sondern dass die Zelle ein echter `datetime`
+  ohne `tzinfo` ist *und* die Ortszeit des Events zeigt; das Event steht dafür
+  auf `Europe/Berlin`, UTC und Ortszeit liegen also auseinander. Verglichen wird
+  auf die Sekunde genau, weil XLSX ein Datum als Seriennummer speichert und die
+  Mikrosekunden der gespeicherten Bestellung den Rundlauf nicht überleben.
+* `test_without_the_naive_conversion_the_xlsx_path_fails_at_openpyxl` — die
+  Gegenprobe, dauerhaft in der Suite statt einmalig von Hand: mit einer per
+  `monkeypatch` auf die Identität gesetzten `as_spreadsheet_value` fällt der
+  Export wieder mit **`TypeError`** und dem Wort `timezone` in der Meldung, also
+  am ursprünglichen Fehler und nicht an etwas anderem.
+* `test_a_chosen_date_style_is_unaffected_by_the_xlsx_conversion` — Kontrollgruppe
+  1: `iso` und `date_only` liefern in XLSX weiterhin genau die Strings von vorher,
+  inklusive `+02:00` im ISO-Wert, und sind **zeichengleich** mit dem, was der
+  CSV-Export derselben Spalten produziert.
+* `test_the_csv_path_still_writes_the_timezone` — Kontrollgruppe 2: in der
+  CSV-Zeile steht weiterhin `+00:00`.
+* zwei Funktionstests ohne Datenbank für alles, was `as_spreadsheet_value`
+  *nicht* anfassen darf, und für den Fall ohne Event.
+
+**Geprüft.** `pytest tests/test_exporters.py -q` → **59 passed**, kein xfail mehr.
+Gesamtsuite `pytest -m "not performance" -q` → 1098 passed, 7 failed: die fünf
+vorbestehenden aus `tests/test_security.py`, der XPASS(strict) zu T-001
+(`test-engineer`) und neu ein XPASS(strict) zu **T-002**
+(`test_finding_an_aggregated_money_column_keeps_its_two_decimal_places`) — den
+hat `registry-dev`/`query-dev` parallel behoben, nicht ich. `flake8`/`isort -c`/
+`black --check` auf beiden Dateien sauber. Kein Commit.

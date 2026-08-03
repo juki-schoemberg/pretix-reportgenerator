@@ -339,17 +339,30 @@ def test_a_join_column_costs_one_prefetch_per_chunk_not_one_per_row(perf_data):
     (``query/columns.py``). ``QuerySet.iterator(chunk_size=1000)`` runs the
     prefetches **once per chunk**, so the wide order report costs
 
-        1 + (prefetch levels) x ceil(rows / 1000)
+        1 + levels x ceil(rows / chunk_size)
 
-    queries -- 4 at 500 rows, 151 at 49.484 rows. That is not an N+1: the cost
+    queries -- 4 at 494 rows, 151 at 49.484 rows. That is not an N+1: the cost
     per row falls as the report grows, and dropping the two ``join`` columns puts
     it back to a single query at any size (asserted below, so that the difference
     is attributed to the ``join`` and not to the report being wide).
 
-    It is, however, not what ``query/columns.py`` promises ("costs exactly one
-    query per prefetch level, independent of the number of rows"), and 151 round
-    trips is a different proposition on a networked PostgreSQL than on SQLite.
-    Recorded as finding 3 in handoff/blockers.md.
+    *levels* counts **distinct** prefetch levels, not ``join`` columns. Since the
+    S-005 fix in ``query/relations.py::join_leaf_to_attr`` the leaf ``to_attr``
+    is derived from what the leaf queryset does rather than from which column
+    asked first, so ``join`` columns that select the same rows share one level --
+    twenty identical ones now cost what one costs. The two here are genuinely
+    different (``item.name`` needs ``select_related("item")`` on the prefetched
+    positions, ``answer.bulk-question`` carries a question condition), which is
+    why the number below is unchanged by that fix and why ``levels`` is 3 and
+    not 2.
+
+    This test was the measurement behind **T-003**, which was not a defect in the
+    design but a wrong promise: ``query/columns.py`` used to say "costs exactly
+    one query per prefetch level, independent of the number of rows", which holds
+    for one chunk. ``query-dev`` corrected the docstring to the formula above on
+    2026-08-03 and the finding is closed. The test itself never carried an
+    ``xfail`` -- it asserts the real behaviour as an equation, so it goes red if
+    the behaviour changes rather than if the documentation does.
     """
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -562,6 +575,169 @@ def _exporter_for(event):
     from pretix_custom_reports.exporters import CustomReportExporter
 
     return CustomReportExporter(event, event.organizer)
+
+
+@pytest.mark.django_db
+def test_writing_a_hundred_thousand_rows_as_xlsx(perf_data):
+    """The XLSX path at full size -- the number ``docs/performance.md`` lacked.
+
+    Left unmeasured in wave 3 because ``_render_xlsx`` without ``output_file``
+    cannot run on Windows (it reopens a ``NamedTemporaryFile`` by name). With an
+    ``output_file`` -- the way pretix' export service writes any file -- it runs
+    here as well, so the gap was in the call, not in the platform.
+
+    Worth having for a second reason since 2026-08-03: every row of this report
+    carries three aware ``datetime`` values, and openpyxl rejects those outright.
+    ``as_spreadsheet_value()`` converts each of them, once per cell, on the one
+    path where the whole export used to die with ``TypeError`` inside a Celery
+    task. This is that conversion done 284.000 times rather than once.
+    """
+    import os
+    import tempfile
+    from pretix.base.models import OrderPosition
+
+    from pretix_custom_reports.models import ReportDefinition
+
+    with scopes_disabled():
+        ReportDefinition.objects.create(
+            event=perf_data["big_event"],
+            name="Sheet",
+            identifier="sheet",
+            definition=WIDE_POSITION,
+        )
+        exporter = _exporter_for(perf_data["big_event"])
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as handle:
+            path = handle.name
+        started = time.perf_counter()
+        with open(path, "wb") as handle:
+            exporter.render(
+                {"_format": "xlsx", contracts.EXPORT_FORM_REPORT_KEY: "sheet"},
+                output_file=handle,
+            )
+        seconds = time.perf_counter() - started
+        expected = OrderPosition.objects.filter(
+            order__event=perf_data["big_event"], order__testmode=False
+        ).count()
+
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    os.unlink(path)
+    record(
+        "XLSX through the exporter (22 columns)",
+        expected,
+        None,
+        seconds,
+        f"{size_mb:.1f} MiB of XLSX; {expected / seconds:.0f} rows/s",
+    )
+
+
+#: One style per datatype, applied to three of the wide report's columns.
+_STYLES = {
+    "order.datetime": {"date_style": "date_only"},
+    "order.total": {"number_style": "currency"},
+    "position.price": {"number_style": "localized"},
+}
+
+
+def _styled(column: Dict[str, Any]) -> Dict[str, Any]:
+    style = _STYLES.get(column["field"])
+    return dict(column, format=style) if style else dict(column)
+
+
+#: The wide position report with a style on each of the three datatypes. Same
+#: columns, same rows, same queries -- the only difference is that
+#: ``CustomReportExporter._cell_formats()`` stops returning ``None``.
+WIDE_POSITION_STYLED = _document(
+    "orderposition", [_styled(column) for column in WIDE_POSITION["columns"]]
+)
+
+
+@pytest.mark.django_db
+def test_what_the_column_format_renderer_costs_at_a_hundred_thousand_rows(
+    perf_data,
+):
+    """What the T-001 fix costs at 100.000 rows, measured rather than assumed.
+
+    The fix put a per-cell Python function between the compiler and the file.
+    That is the right place for it -- see the module docstring of
+    ``exporters.py`` -- but it is also 2,1 million calls on this report, so the
+    price belongs in ``docs/performance.md`` next to everything else.
+
+    **It is not free: 11,6 s -> 50,4 s, a factor of 4,4**, for three styled
+    columns out of twenty-two. Almost all of it is one line -- ``_format_temporal``
+    resolves ``event.timezone`` per cell, and that is a hierarkey settings lookup
+    (178-345 us here) in front of a 1,8 us conversion. Recorded as **T-005** in
+    handoff/blockers.md, with a counted, row-count-independent reproducer in
+    ``tests/test_integration.py``; the number below is what makes it worth
+    fixing, and the count over there is what makes it provable.
+
+    Two things are asserted, both of them deterministic:
+
+    * A report with **no** styles anywhere costs nothing at all, because
+      ``_cell_formats()`` returns ``None`` and the rows are yielded exactly as
+      before. Asserted through ``_cell_formats()`` itself, not as a timing: a
+      wall clock cannot tell "no work" from "a little work" on a loaded machine,
+      and "the old path is literally the old path" is the stronger claim anyway.
+    * A styled report produces the same number of rows. The runtime goes into
+      the table; it is not asserted, because a threshold on wall-clock time is a
+      false-alarm generator -- and because the ratio is expected to *change* once
+      T-005 is fixed, which must not be a red test.
+    """
+    from pretix.base.exporter import ListExporter
+    from pretix.base.models import OrderPosition
+
+    from pretix_custom_reports.models import ReportDefinition
+
+    def run(identifier, document):
+        with scopes_disabled():
+            ReportDefinition.objects.create(
+                event=perf_data["big_event"],
+                name=identifier,
+                identifier=identifier,
+                definition=document,
+            )
+            exporter = _exporter_for(perf_data["big_event"])
+            started = time.perf_counter()
+            rows = 0
+            for line in exporter.iterate_list(
+                {"_format": "default", contracts.EXPORT_FORM_REPORT_KEY: identifier}
+            ):
+                if isinstance(line, ListExporter.ProgressSetTotal):
+                    continue
+                rows += 1
+            return rows, time.perf_counter() - started
+
+    plain_rows, plain_seconds = run("fmt-plain", WIDE_POSITION)
+    styled_rows, styled_seconds = run("fmt-styled", WIDE_POSITION_STYLED)
+
+    with scopes_disabled():
+        expected = OrderPosition.objects.filter(
+            order__event=perf_data["big_event"], order__testmode=False
+        ).count()
+    assert plain_rows == styled_rows == expected + 1
+
+    # The unstyled report is not merely fast, it is untouched: _cell_formats()
+    # answers None and iterate_list yields the compiler's own list objects.
+    with scopes_disabled():
+        exporter = _exporter_for(perf_data["big_event"])
+        compiled = compile_for(WIDE_POSITION, perf_data["small_event"])
+        assert exporter._cell_formats(compiled) is None
+        styled = compile_for(WIDE_POSITION_STYLED, perf_data["small_event"])
+        assert exporter._cell_formats(styled) is not None
+
+    record(
+        "CSV, 22 columns, no column format",
+        plain_rows - 1,
+        None,
+        plain_seconds,
+        "_cell_formats() -> None, rows pass through",
+    )
+    record(
+        "CSV, 22 columns, three column formats",
+        styled_rows - 1,
+        None,
+        styled_seconds,
+        f"x{styled_seconds / plain_seconds:.2f} of the unformatted run",
+    )
 
 
 # ---------------------------------------------------------------------------

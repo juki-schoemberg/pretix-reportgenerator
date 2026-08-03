@@ -265,3 +265,183 @@ dieselbe wie zuvor.
 3. `ReportDuplicateView` ist POST-only und daher vom Regressionstest des
    `security-reviewer` (nur GETs) nicht abgedeckt — hängt aber über
    `EventReportMixin` am selben Gate.
+
+---
+
+# Nacharbeit — S-004 (doppelter Identifier als Formularfehler statt 500)
+
+Datum: 2026-08-03. Geändert: `pretix_custom_reports/forms.py`,
+`tests/test_models.py`. Sonst nichts — kein `models.py`, keine Migration, keine
+fremden Dateien.
+
+## Was war
+
+`ReportDefinitionForm` rendert `identifier`, die Eindeutigkeit hängt aber an
+`UniqueConstraint(["event", "identifier"])` bzw.
+`UniqueConstraint(["organizer", "identifier"], condition=event IS NULL)`.
+Weder `event` noch `organizer` ist ein Formularfeld, also landen beide in
+`BaseModelForm._get_validation_exclusions`, und `Model.validate_unique`
+überspringt jede Unique-Prüfung, die ein ausgeschlossenes Feld erwähnt
+(`_get_unique_checks`). Der Konflikt schlug erst in der Datenbank auf —
+`IntegrityError` mitten im `transaction.atomic` der View, also 500 statt
+Feldfehler.
+
+## Was ich geändert habe
+
+`ReportDefinitionForm.clean_identifier()` (forms.py). Prüft vor dem Schreiben
+und wirft einen `ValidationError` mit `code="duplicate_identifier"` am Feld
+`identifier`.
+
+Abweichung von der Empfehlung des Reviews, bewusst: der Review schlägt
+`ReportDefinition.objects.for_event(...).by_identifier(...).exclude(pk=...)`
+vor. Alle drei Methoden gibt es wirklich (models.py, `ReportDefinitionQuerySet`),
+aber `ReportDefinition.objects` ist scope-abhängig — ohne aktiven
+Organizer-Scope liefert der Manager eine `DisabledQuerySet` und die Prüfung
+würde mit `ScopeError` platzen statt zu prüfen. Ich rufe stattdessen
+`self.instance._identifier_taken(value)` auf. Diese Modellmethode existiert seit
+Welle 1, bildet **beide** Constraints exakt ab (wählt die Event- oder die
+Organizer-Seite des XOR), schließt die eigene PK aus und läuft unter
+`scopes_disabled()` — was hier kein Scope-Loch ist, weil `__init__` den Besitzer
+vorher hart setzt und die Query damit nie unbegrenzt ist. Ein zweiter,
+leicht abweichender Nachbau derselben Regel im Formular wäre die schlechtere
+Variante gewesen.
+
+Leerer Identifier bleibt gültig: `ReportDefinition.save()` erzeugt weiterhin
+einen freien. Die Prüfung macht das optionale Feld nicht zum Pflichtfeld.
+
+Der Restrisiko-Rest ist die übliche TOCTOU-Lücke zwischen `clean` und `save`
+(zwei gleichzeitige Requests). Die Constraints in der Datenbank fangen das
+weiterhin ab — der Fix nimmt dem Normalfall den 500, er ersetzt die Constraints
+nicht.
+
+## Organizer-Vorlagen — betrifft mich, ist mit erledigt
+
+`views/templates.py:178` (`TemplateFormMixin.form_class`) benutzt **dieselbe**
+`ReportDefinitionForm`, nur mit `organizer=` statt `event=`. Es gibt keine
+Schwesterklasse für Vorlagen. Der Fix greift dort also mit, ohne dass ich
+fremde Dateien anfassen musste; `templates_for_organizer` brauchte ich dafür
+nicht, weil `_identifier_taken` die Organizer-Seite selbst wählt. Getestet in
+`test_form_rejects_a_duplicate_template_identifier`.
+
+Ebenfalls mit abgedeckt: der Editor. Er postet laut
+`handoff/status/frontend-dev.md` den Identifier als verstecktes Feld an
+`event.reports.edit` / `.add`, also an die CRUD-Views mit genau diesem Formular.
+
+## Tests
+
+Sechs neue Tests in `tests/test_models.py`, Abschnitt „Identifier uniqueness as
+seen through the form (S-004)": zwei Verweigerungsfälle (Event, Vorlage) und
+vier Kontrollfälle (gleicher Identifier in anderem Event, Vorlage blockiert
+Event-Report nicht, Bearbeiten behält den eigenen Identifier, leeres Feld wird
+weiter generiert).
+
+* `pytest tests/test_models.py -q` → **49 passed**.
+* Gegenprobe, dass die Tests aus dem richtigen Grund grün sind: mit zur Laufzeit
+  auf `if False:` gesetzter Prüfung (Produktivcode danach wiederhergestellt)
+  fallen **genau die zwei** Verweigerungstests, die vier Kontrollfälle bleiben
+  grün.
+* Ende-zu-Ende, ohne `test_security.py` anzufassen:
+  `pytest tests/test_security.py::test_a_duplicate_identifier_is_a_form_error_not_a_500`
+  → **XPASS(strict)**. Der Reproduktionstest des `security-reviewer` läuft jetzt
+  durch (200 mit Feldfehler statt 500); er ist nur deshalb rot, weil der
+  `xfail(strict=True)`-Marker noch dransteht. Entfernen ist Sache des
+  `security-reviewer` bzw. des Orchestrators, nicht meine.
+* `pytest tests/test_models.py tests/test_permissions.py tests/test_editor_api.py
+  tests/test_org_templates.py tests/test_integration.py tests/test_portability.py -q`
+  → **361 passed, 1 xfailed, 1 failed**. Der eine Fehlschlag ist
+  `test_integration.py::test_finding_a_column_format_chosen_in_the_editor_reaches_the_export`
+  (`XPASS(strict)`, ColumnFormat-Befund) und gehört nicht zu S-004.
+* `flake8`, `isort -c`, `black --check` über `forms.py` und `tests/test_models.py`:
+  grün. Kein repoweiter Formatierlauf.
+* `python -m pretix makemigrations pretix_custom_reports --check --dry-run` →
+  „No changes detected". `models.py` blieb unberührt.
+
+## Hinweis zum Gesamtlauf
+
+Während meines Laufs waren parallel weitere Agenten in anderen Dateien aktiv
+(`git status` zeigte u. a. `query/`, `portability/`, `exporters.py`,
+`views/templates.py` als geändert). Der Gesamtlauf `pytest -m "not performance"`
+schwankte deshalb zwischen Läufen (5–7 Fehlschläge, überwiegend
+`XPASS(strict)` zu S-003/S-006 und dem ColumnFormat-Befund). Aussagekräftig für
+S-004 sind die oben einzeln aufgeführten Läufe; ein sauberer Gesamtlauf gehört
+an den Orchestrator, wenn alle Nacharbeiten dieser Runde eingesammelt sind.
+
+---
+
+# Nacharbeit — S-007 (`ensure_ascii=False` im Änderungsformular)
+
+Datum: 2026-08-03. Geändert: `pretix_custom_reports/forms.py`,
+`tests/test_models.py`. Kein `models.py`, keine Migration, keine fremde Datei.
+
+## Was war
+
+`PrettyJSONFormField.prepare_value` gab die gespeicherte Definition mit
+`ensure_ascii=False` in die Textarea. Ein gespeichertes ungepaartes Surrogat
+(`"\ud800"` in einem Label) ergibt damit einen `str`, den `HttpResponse` nicht
+kodieren kann — 500 beim Öffnen von `.../reports/<pk>/edit/` **und**
+`.../templates/<pk>/edit/`, weil beide Seiten dieselbe Formularklasse benutzen.
+Die vierte und letzte Fundstelle von S-003; die drei anderen
+(`views/api.py`, `views/portability.py`, `views/templates.py`) waren in dieser
+Runde bereits umgestellt.
+
+Der Weg hinein ist nach dem Payload-Gate von `portability-dev` nur noch
+Selbstschaden über genau dieses JSON-Textfeld: `clean_definition` prüft über
+`contracts.validate_definition` Struktur, nicht Kodierbarkeit. Ausgerechnet die
+Seite, die so einen Report **reparieren** würde, war die, die daran starb.
+
+## Was ich geändert habe
+
+Eine Zeile: `ensure_ascii=True` in `PrettyJSONFormField.prepare_value`
+(forms.py:75), plus ein Kommentar, der erklärt, warum das kein Schönheitsdetail
+ist und nicht „für hübschere Umlaute" zurückgedreht werden darf. Escaptes JSON
+bleibt gültiges JSON und läuft unverändert durch `json.loads` zurück; der
+grafische Editor macht über pretix' `escapejson_dumps` seit jeher dasselbe.
+
+## Tests
+
+Zwei neue Tests in `tests/test_models.py`, Abschnitt „Rendering a stored
+definition back into the form (S-007)":
+
+* `test_form_renders_a_stored_lone_surrogate_as_an_escape` — parametrisiert über
+  `event` und `organizer`, weil eine Zeile zwei Seiten betrifft. Prüft in dieser
+  Reihenfolge: `str(form["definition"]).encode("utf-8")` (die Stelle, an der der
+  `UnicodeEncodeError` entstand), dann `\ud800` als Escape im gerenderten
+  Markup, dann Gleichheit von `json.loads(...)` mit der gespeicherten Definition.
+* `test_form_round_trips_text_outside_the_basic_plane` — Kontrollgruppe:
+  `"Grüße 😀"` kommt unverändert zurück. Alles zu escapen darf hässlich
+  aussehen, aber nicht das Dokument verändern.
+
+Ergebnisse:
+
+* `pytest tests/test_models.py -q` → **52 passed**.
+* Gegenprobe: mit zur Laufzeit auf `ensure_ascii=False` zurückgedrehter Zeile
+  (Produktivcode danach wiederhergestellt, per `grep` bestätigt) fallen genau
+  die zwei Surrogat-Parametrisierungen, und zwar mit
+  `UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800'` — also am
+  ursprünglichen Leck, nicht an einer Nebenwirkung. Die Assertion-Reihenfolge im
+  Test ist deswegen bewusst so gewählt; in der ersten Fassung fiel er eine Zeile
+  zu früh und aus dem weniger aussagekräftigen Grund.
+* `pytest tests/test_security.py -k "change_form_survives or poisoned_report or
+  editor_page_survives"` → beide Parametrisierungen von
+  `test_the_change_form_survives_a_stored_lone_surrogate` sind **XPASS(strict)**,
+  die zwei Kontrollgruppen grün. Marker nicht angefasst, gehört dem
+  `security-reviewer`.
+* `pytest tests/test_models.py tests/test_permissions.py tests/test_editor_api.py
+  tests/test_org_templates.py tests/test_portability.py tests/test_integration.py -q`
+  → **378 passed, 2 xfailed**, keine Fehlschläge.
+* Gesamtlauf `pytest -m "not performance" -q` → **1169 passed, 2 failed,
+  2 xfailed**. Die zwei Fehlschläge sind ausschließlich die beiden
+  `XPASS(strict)` zu S-007 oben. Der ColumnFormat-Fehlschlag aus meinem
+  S-004-Bericht ist inzwischen weg (Nebenläufigkeit anderer Agenten, nicht
+  meine Änderung).
+* `flake8`, `isort -c`, `black --check` über `forms.py` und
+  `tests/test_models.py`: grün. Kein repoweiter Lauf.
+* `python -m pretix makemigrations pretix_custom_reports --check --dry-run` →
+  „No changes detected".
+
+## Offen / für den Orchestrator
+
+`@pytest.mark.xfail(strict=True)` an
+`tests/test_security.py::test_the_change_form_survives_a_stored_lone_surrogate`
+entfernen (beide Parametrisierungen fallen mit einem Marker) — bis dahin ist die
+Suite durch diesen Fix rot. Absichtlich nicht von mir angefasst.

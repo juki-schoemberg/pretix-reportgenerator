@@ -477,3 +477,229 @@ mit dem alten connect/disconnect-Paar, und der Snapshot-Workaround in
 `tests/test_smoke.py:38-53` begruendet sich mit genau diesem Defekt. Beides
 stimmt ab jetzt nicht mehr; Nachziehen liegt bei `exporter-dev` bzw. dem
 Eigentuemer von `tests/test_smoke.py`.
+
+
+---
+
+# Lauf 3 -- Gegenpruefung der Fixes zu S-003 bis S-006 (2026-08-03)
+
+Auftrag: dasselbe wie fuer S-001/S-002 im Lauf davor, diesmal fuer die vier
+restlichen Befunde. Vier Fixes von vier Agents adversarial gegenpruefen, die
+sechs `xfail`-Reproduzierer entmarkieren, den einen rot gewordenen Nicht-xfail
+umdrehen, `docs/security-review.md` nachziehen.
+
+## Ergebnis in einem Satz
+
+Alle vier Fixes halten. Ein neuer Befund **S-007** -- die S-003-Behebung hat
+eine vierte Fundstelle uebersehen, und ausgerechnet die, die im Befund als
+mildernder Umstand gefuehrt war.
+
+## Befund fuer Befund
+
+**S-003 (Surrogate) -- behoben, verifiziert, mit Rest.**
+`payload._walk` re-encodiert jeden String; `ensure_ascii=True` in `views/api.py`,
+`views/portability.py`, `views/templates.py`. Vier `xfail` entfernt.
+Nachgebessert habe ich: der Gate-Test prueft jetzt `reason == REASON_NOT_UTF8`
+statt nur "irgendeine Ablehnung" (sonst haette ihn auch die Tiefenpruefung
+gruen gemacht) und deckt Label, verschachtelten Filterwert, Low-Surrogate und
+**Objektschluessel** ab. Die drei Endpunkt-Tests pruefen nicht mehr nur "200",
+sondern dass der Wert durch den Serialisierer *gelaufen* und escaped
+zurueckgekommen ist -- ein Fix, der das Zeichen entfernt haette, waere sonst
+gruen gewesen. Neu: Vorlagen-Export (im Befund genannt, nie gemessen),
+Import-Route, und die Kontrollgruppe "Surrogatpaar/Emoji wird weiterhin
+akzeptiert" (ein textuell vor dem Parsen ablehnendes Gate haette jedes Emoji
+verboten).
+Gegenprobe in drei Laeufen, jeweils genau am alten Leck.
+
+**S-004 (doppelter Identifier) -- behoben, verifiziert.**
+`clean_identifier` ueber `self.instance._identifier_taken(value)`. Die Wahl ist
+richtig und besser als meine Empfehlung (deckt den Vorlagenzweig ohne zweiten
+Pfad ab, haengt nicht am Scope). Die *Begruendung* stimmt nur halb: ich habe
+nachgeprueft, dass `pretix/control/middleware.py:199` jeden Control-Request in
+`scope(organizer=...)` legt -- der empfohlene Manager haette im Ansichtenpfad
+also funktioniert, der `ScopeError` waere nur ausserhalb eines Requests
+gekommen. Steht als Korrektur im Review, wie die MRO-Aussage bei S-001.
+Der Beweistest musste umgebaut werden: `b"identifier" in content` ist fuer
+*jedes* neu gerenderte Formular wahr. Jetzt: Meldungstext + Zeilenzahl vorher
+gleich nachher, ueber beide Eigentuemer parametrisiert, plus zwei
+Kontrollgruppen (eigener Identifier beim Bearbeiten erlaubt; derselbe
+Identifier in einem anderen Event erlaubt -- eine global fragende Pruefung
+haette die Event-Kopie still zerlegt).
+
+**S-005 (Query-Amplifikation) -- behoben, verifiziert.**
+`join_leaf_to_attr` leitet den `to_attr` aus der Queryset-Identitaet ab.
+Gemessen: 1, 2, 20 und 200 (`MAX_COLUMNS`) identische `join`-Spalten kosten
+dieselben zwei Queries. Beide Abweichungen von meiner Formulierung habe ich
+nachgeprueft und halte sie fuer richtig: `condition_signature()` statt `str(Q)`
+(faellt bei Modellinstanzen offen aus statt zwei Fragen zu verschmelzen), und
+der innere `select_related` als Teil der Identitaet (sonst waere die Ersparnis
+ein N+1). Eine Kollision der Signaturgrammatik habe ich durchgespielt und nicht
+gefunden; die Restunsicherheit steht als U-09.
+Mein rot gewordener Test ist umgedreht und heisst jetzt
+`test_a_report_full_of_join_columns_costs_what_one_column_costs` (alter Name im
+Docstring). Neu dazu: die *Gegenrichtung* -- zwei `join`-Spalten ueber
+verschiedene Fragen duerfen nicht verschmelzen, sonst waere es ein Datenleck
+zwischen zwei Spalten desselben Reports -- und das benannte Restrisiko (N
+verschiedene Bedingungen kosten weiterhin N Queries, aber der Eintrittspreis ist
+jetzt `event.can_change_items` statt `event.orders:read`).
+
+**S-006 (`keep` per POST) -- behoben, verifiziert.**
+`coerce_user_choice` in beiden Ansichten. Der Beweistest liest die *effektiv*
+verwendete Strategie ueber `response.context["plan"].strategy` zurueck; "nichts
+gespeichert" allein haette auch gehalten, wenn der Import aus einem anderen
+Grund gescheitert waere. Neu: die Vorlagen-Ansicht (im Befund als Fundstelle
+genannt, nie gemessen), die Coerce-Funktion ueber alle Formen, die ein POST-Feld
+annehmen kann (inkl. `" keep"`, `"keep "`, `"keep\x00"` -- "erst trimmen" ist der
+naheliegende naechste Refactor), und eine Syntaxbaum-Regel, die *jede* Ansicht
+in `views/` daran hindert, einen Request-Wert an das weite `coerce` zu geben.
+
+## Neuer Befund
+
+**S-007 -- `forms.py:65` (`PrettyJSONFormField.prepare_value`), niedrig,
+zustaendig: `persistence-dev`.**
+Die S-003-Behebung hat drei Leser umgestellt. Der vierte rendert die
+gespeicherte Definition weiter mit `ensure_ascii=False` in die Textarea des
+Aenderungsformulars -- `UnicodeEncodeError` in `django/http/response.py:324`,
+also 500, an *beiden* Stellen (Event-Report und Organizer-Vorlage, eine Klasse).
+`xfail(strict)`, ueber beide Eigentuemer parametrisiert.
+Warum *niedrig* und nicht wie S-003 *mittel*: der Weg hinein ist seit dem
+Payload-Gate nur noch der Selbstschaden ueber genau dieses Formular (gemessen,
+gruener Test), und der Report bleibt ueber die grafische Oberflaeche
+reparierbar (gemessen, gruener Test -- wird der rot, ist S-007 nicht mehr
+niedrig).
+Empfehlung: `ensure_ascii=True`, ein Zeichen. Nachgewiesen, dass genau diese
+Aenderung -- zur Laufzeit eingespielt -- beide Parametrisierungen auf
+`XPASS(strict)` hebt; die Fundstelle ist also die richtige.
+
+## Blinde Flecken, die ich gesucht und *nicht* gefunden habe
+
+Damit die Abwesenheit nicht mit fehlender Pruefung verwechselt wird:
+
+* XLSX-Export mit nicht encodierbarem Label -- haelt (openpyxl-Pfad, und es ist
+  der unbeaufsichtigte). Als Stolperdraht festgehalten.
+* pretix' eigene Event-Log-Seite -- haelt, obwohl `log_data()` die ganze
+  Definition in jeden `LogEntry` legt. Waere pretix' Log-Rendering anders,
+  haette ein Label eine Kernseite des Events zerlegt.
+* Editor-Seite -- haelt (`escapejson_dumps` ist `json.dumps` mit dem
+  voreingestellten `ensure_ascii=True`, im pretix-Source nachgelesen).
+* `contracts.ReportDefinition.as_json()` hat ebenfalls `ensure_ascii=False`,
+  wird produktiv aber von niemandem aufgerufen -- kein Befund, nur zur Kenntnis
+  an `contract-architect`, falls das je ein Ausgabepfad wird.
+* Weitere Aufrufer von `ResolutionStrategy.coerce` mit Request-Daten: keine
+  (Syntaxbaum-Test verhindert kuenftige).
+* Signaturkollision in `condition_signature` -- Grammatik durchgespielt, keine
+  konstruierbar.
+
+## Testzahlen
+
+* `pytest tests/test_security.py -q` -> **164 passed, 2 xfailed**, 0 failed.
+  (vorher: 128 passed, 6 xfailed; beim Uebernehmen: 128 passed, 7 failed --
+  6 `XPASS(strict)` plus der S-005-Test.)
+* `pytest tests/test_security.py --runxfail` -> die zwei echten S-007-Fehler,
+  beide `UnicodeEncodeError` in `django/http/response.py:324`.
+* `pytest -m "not performance" -q` -> **1166 passed, 10 deselected, 3 xfailed**,
+  0 failed. Der dritte `xfail` ist T-004 in `tests/test_integration.py`
+  (`test-engineer`), nicht meiner.
+* `flake8`, `isort -c`, `black --check` ueber `tests/test_security.py`: gruen.
+
+## Gegenprobe-Werkzeug
+
+Wegwerf-Pytest-Plugin ausserhalb des Repos, ueber `PYTHONPATH` und `-p` geladen,
+gesteuert per `PCR_NEUTRALISE=` (s003_gate | s003_api | s003_export | s004 |
+s005 | s006) bzw. `PCR_FIX=s007`. **Kein Produktivcode angefasst**, auch nicht
+kurzzeitig. Ergebnisse:
+
+| Neutralisiert | Fehlschlag |
+| --- | --- |
+| `payload._walk` | "DID NOT RAISE PayloadRejected"; Import speichert wieder (`302 != 200`) |
+| `_ApiView.json` -> `ensure_ascii=False` | `UnicodeEncodeError` in Validate und Vorschau |
+| `json`-Modul in beiden Export-Views | `UnicodeEncodeError` in Report- und Vorlagen-Export |
+| `clean_identifier` -> Durchreiche | `IntegrityError: UNIQUE constraint failed` fuer Event **und** Organizer |
+| `join_leaf_to_attr` -> `None` | `assert 3 == 2` -- eine Query pro Zusatzspalte ist zurueck |
+| `coerce_user_choice` -> `coerce` | beide Ansichten wieder `302`, Coerce liefert `'keep'` |
+| *umgekehrt:* S-007-Fix eingespielt | beide Parametrisierungen `XPASS(strict)` |
+
+## Geaendert
+
+Nur `tests/test_security.py`, `docs/security-review.md` und diese Datei. Kein
+Produktivcode, kein Commit. Kein Eintrag in `handoff/blockers.md`: kein
+kritischer Befund.
+
+## Zur Kenntnis, nicht mein Gebiet
+
+* `docs/adr/0005-editor.md:96` ist laut `frontend-dev` durch T-001 veraltet --
+  bestaetigt insofern, als `views/api.py` die Formatierung jetzt ueber
+  `get_cell_renderer()` aus `exporters.py` bezieht und `format_cell` dort
+  geloescht ist. ADRs gehoeren mir nicht; Orchestrator.
+* U-01 (Nullbyte) ist mit S-003 **nicht** miterledigt worden, obwohl ich das
+  empfohlen hatte: `"\x00".encode("utf-8")` gelingt, die neue Pruefung greift
+  also nicht. Im Review nachgetragen, weiterhin unbestaetigt (SQLite).
+* Neu unter "Unbestaetigt": U-08 (TOCTOU zwischen `clean_identifier` und
+  `save()` -- mit einer Formularpruefung grundsaetzlich nicht schliessbar) und
+  U-09 (`repr`-basierte Signatur bei `datetime`/`nan`; heute nicht erreichbar).
+
+
+## Nachtrag Lauf 3 -- S-007 gegengeprueft und geschlossen (2026-08-03, spaeter am Tag)
+
+`persistence-dev` hat S-007 behoben: `ensure_ascii=True` in
+`PrettyJSONFormField.prepare_value` (`forms.py:75`), die einfache der beiden von
+mir genannten Varianten, plus ein Kommentar, der sagt, warum das keine Kosmetik
+ist. Die Rueckfallloesung (erst `False`, bei `UnicodeEncodeError` auf `True`)
+wurde richtigerweise nicht gebaut.
+
+Meine drei Kriterien, einzeln:
+
+1. **Gruen ohne `--runxfail`:** ja, beide Parametrisierungen.
+2. **Misst noch das Ursprungsproblem:** *nicht* in der Fassung, mit der ich den
+   Befund gemeldet habe -- die prueft `status_code == 200`, und das ist beim
+   Schliessen zu wenig. Hier sogar deutlicher als bei den drei S-003-Endpunkten:
+   das Aenderungsformular **schreibt zurueck, was es anzeigt**. Ein "Fix", der
+   das Zeichen beim Rendern verwirft, haette den Test erfuellt und beim naechsten
+   Speichern die Definition still umgeschrieben -- aus einem 500 waere lautloser
+   Datenverlust geworden. Der Test schneidet die Textarea jetzt aus der Seite,
+   macht das HTML-Escaping rueckgaengig und verlangt Zeichengleichheit mit der
+   Datenbank, dazu die Escape-Sequenz `\ud800` im Body.
+3. **Faellt mit neutralisiertem Fix wieder an derselben Stelle:** ja.
+   `PCR_NEUTRALISE=s007` (neuer Zweig im Wegwerf-Plugin, Produktivcode
+   unangetastet) -> beide Parametrisierungen `UnicodeEncodeError` in
+   `django/http/response.py:324`, an denselben Byte-Positionen wie vor dem Fix
+   (33438 Event-Report, 27064 Vorlage).
+
+Marker entfernt. Zwei Nachbartests nachgezogen, weil ihre Docstrings S-007 als
+*offen* beschrieben: `test_the_editor_page_survives_a_stored_lone_surrogate`
+(war die Referenz, gegen die der Fix gemessen wurde) und
+`test_a_poisoned_report_is_still_repairable_through_the_editor` (trug das
+Argument fuer den Schweregrad; das ist verbraucht, der Weg Editor -> Speichern ->
+erneut oeffnen bleibt aber der einzige durchgehende in diesem Modul, und seine
+letzte Zusicherung ist genau die, die S-007 gefunden haette).
+`test_the_change_form_is_the_only_way_a_surrogate_still_gets_stored` bleibt
+gruen und dokumentiert weiterhin, dass der Schreibpfad offen ist -- das ist
+genau der Grund, warum der Lesepfad und nicht der Schreibpfad zu reparieren war.
+
+### Zahlen
+
+* `pytest tests/test_security.py -q` -> **166 passed, 0 xfailed**, 0 failed.
+  Zum ersten Mal seit Welle 3 traegt kein Test in diesem Modul einen
+  `xfail(strict=True)`.
+* `pytest -m "not performance" -q` -> **1171 passed, 10 deselected, 2 xfailed**,
+  0 failed. Die zwei sind T-004 und T-005 in `tests/test_integration.py`
+  (`test-engineer`), nicht meine. Die Gesamtzahl wandert, solange andere Agents
+  parallel schreiben.
+* `flake8`, `isort -c`, `black --check` ueber `tests/test_security.py`: gruen.
+
+### Stand des Reviews
+
+Alle sieben Befunde geschlossen. `docs/security-review.md` hat den Status-Block
+fuer S-007 im gleichen Format wie S-001 bis S-006, die Zusammenfassungstabelle
+weist fuer jeden Agent "keine" aus, und der Ausfuehren-Abschnitt nennt die neuen
+Zahlen. Was bleibt, sind die neun Punkte unter "Unbestaetigt".
+
+Eine Einordnung, weil eine Tabelle ohne offene Zeile leicht wie ein Freibrief
+aussieht: geprueft ist, was in "Geprueft und in Ordnung" steht, auf SQLite,
+gegen pretix v2026.6.0. Nicht geprueft sind PostgreSQL (U-05), Verhalten unter
+Last (U-04) und alles, was nach diesem Commit dazukommt. Ein gruenes
+Security-Modul beweist, dass die *gefundenen* Angriffe abgewehrt werden -- nicht
+mehr.
+
+Geaendert: nur `tests/test_security.py`, `docs/security-review.md` und diese
+Datei. Kein Produktivcode, kein Commit.

@@ -49,7 +49,9 @@ REASON_TOO_LARGE = "too_large"
 #: Nothing was uploaded or pasted.
 REASON_EMPTY = "empty"
 
-#: The bytes are not valid UTF-8.
+#: The bytes are not valid UTF-8, or a parsed string cannot be encoded back to
+#: UTF-8 -- ``"\ud800"`` is legal JSON syntax and an unpaired surrogate in
+#: Python (S-003).
 REASON_NOT_UTF8 = "not_utf8"
 
 #: The text is not a JSON document, or not a JSON *object*.

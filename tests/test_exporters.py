@@ -57,8 +57,16 @@ from pretix.base.signals import (
     register_data_exporters,
     register_multievent_data_exporters,
 )
+from zoneinfo import ZoneInfo
 
 from pretix_custom_reports import contracts, exporters
+from pretix_custom_reports.contracts import (
+    BooleanStyle,
+    ColumnFormat,
+    DataType,
+    DateStyle,
+    NumberStyle,
+)
 from pretix_custom_reports.models import ReportDefinition
 
 DISPATCH_UID = "pretix_custom_reports_exporter"
@@ -584,6 +592,551 @@ def test_a_missing_or_malformed_report_reference_is_an_exporterror(
         for bad in (None, "", 17, {"pk": 1}, "not a valid identifier!"):
             with pytest.raises(ExportError):
                 ex.render({"_format": "default", contracts.EXPORT_FORM_REPORT_KEY: bad})
+
+
+# ---------------------------------------------------------------------------
+# 2b. Column formats reach the file (finding T-001)
+# ---------------------------------------------------------------------------
+#
+# The bug these tests were written for: ``date_style`` was offered by the
+# editor, honoured by the preview and dropped by the export, so "date only"
+# produced a full timestamp in the file. Two styles, one output line
+# (handoff/blockers.md, T-001).
+#
+# What is asserted here is the *pipeline*: a style saved in a definition changes
+# the bytes. The parity between this pipeline and the preview is asserted
+# separately, in test_the_preview_and_the_export_share_one_renderer.
+
+
+def make_format_report(event, columns, identifier="fmt"):
+    """A report over exactly one order (``AAAAA``) with the given columns.
+
+    Filtered down to a single row on purpose: these tests compare cells, and a
+    second row would only add ordering questions that have nothing to do with
+    formatting.
+    """
+    return make_report(
+        event=event,
+        identifier=identifier,
+        name="Formats",
+        definition={
+            "schema_version": contracts.SCHEMA_VERSION,
+            "base": "order",
+            "columns": columns,
+            "filters": {
+                "op": "and",
+                "children": [
+                    {"field": "order.code", "operator": "exact", "value": "AAAAA"}
+                ],
+            },
+        },
+    )
+
+
+def first_data_row(event, user_with_perms, columns):
+    """The one data row of a report with *columns*, as the exporter yields it.
+
+    Cell values before ``ListExporter`` serialises them, which is where the
+    native/formatted distinction is still visible.
+    """
+    with scopes_disabled():
+        ReportDefinition.objects.filter(event=event, identifier="fmt").delete()
+        make_format_report(event, columns)
+    with scope(organizer=event.organizer):
+        ex = exporter_for_event(event, user_with_perms)
+        rows = rows_of(ex, csv_form_data(identifier="fmt"))
+    assert len(rows) == 2, rows  # header plus the single order
+    return rows[1]
+
+
+def csv_data_line(event, user_with_perms, columns):
+    """The one data line of a report with *columns*, as bytes-turned-text."""
+    with scopes_disabled():
+        ReportDefinition.objects.filter(event=event, identifier="fmt").delete()
+        make_format_report(event, columns)
+    with scope(organizer=event.organizer):
+        ex = exporter_for_event(event, user_with_perms)
+        _fn, _mime, content = ex.render(csv_form_data(identifier="fmt"))
+    return content.decode("utf-8").splitlines()[1]
+
+
+@pytest.mark.django_db
+def test_a_date_style_chosen_in_the_editor_reaches_the_csv(
+    registered, event, user_with_perms, orders
+):
+    """The reproduction from the blocker, as an assertion instead of an xfail.
+
+    ``iso`` and ``date_only`` used to produce the identical line, both carrying
+    the full timestamp. They now differ, and they differ in the direction the
+    user asked for: no time of day in the date-only file.
+    """
+    columns = [{"field": "order.code"}, {"field": "order.datetime"}]
+    lines = {}
+    for style in ("iso", "date_only"):
+        columns[1]["format"] = {"date_style": style}
+        lines[style] = csv_data_line(event, user_with_perms, columns)
+
+    assert lines["iso"] != lines["date_only"], "both styles produced %r" % (
+        lines["iso"],
+    )
+    assert "T" in lines["iso"]  # ISO 8601 separates date and time with a T
+    assert "T" not in lines["date_only"]
+    assert ":" not in lines["date_only"]  # no time of day at all
+
+
+@pytest.mark.django_db
+def test_a_number_style_reaches_the_export(registered, event, user_with_perms, orders):
+    """``currency`` and ``localized`` become strings, ``raw`` stays a number.
+
+    The three cases in one row of one report, because the interesting property
+    is that they are *different from each other* -- a renderer that formatted
+    everything, or nothing, would satisfy any one of them alone.
+    """
+    row = first_data_row(
+        event,
+        user_with_perms,
+        [
+            {"field": "order.total"},
+            {"field": "order.total", "format": {"number_style": "currency"}},
+            {"field": "order.total", "format": {"number_style": "localized"}},
+            {"field": "order.total", "format": {"number_style": "raw"}},
+        ],
+    )
+    plain, currency, localized, raw = row
+
+    assert plain == Decimal("23.00")
+    assert isinstance(plain, Decimal), "no format must not touch the value"
+    assert isinstance(currency, str) and "23" in currency
+    assert currency != str(plain), "currency formatting did not happen"
+    assert isinstance(localized, str) and "23" in localized
+    assert isinstance(raw, Decimal), "raw is the one style that keeps the type"
+
+
+@pytest.mark.django_db
+def test_a_boolean_style_reaches_the_export(registered, event, user_with_perms, orders):
+    """``order.testmode`` is ``False`` for order AAAAA -- four ways of saying so."""
+    row = first_data_row(
+        event,
+        user_with_perms,
+        [
+            {"field": "order.testmode"},
+            {"field": "order.testmode", "format": {"boolean_style": "one_zero"}},
+            {"field": "order.testmode", "format": {"boolean_style": "true_false"}},
+            {"field": "order.testmode", "format": {"boolean_style": "yes_no"}},
+        ],
+    )
+    plain, one_zero, true_false, yes_no = row
+
+    assert plain is False, "no format must not touch the value"
+    assert one_zero == "0"
+    assert true_false == "false"
+    # Translated, so this asserts the shape rather than the English word, the
+    # same way the preview test in tests/test_editor_api.py does.
+    assert yes_no not in ("0", "false", "False")
+    assert isinstance(yes_no, str) and yes_no
+
+
+@pytest.mark.django_db
+def test_a_boolean_style_is_visible_in_the_csv_bytes(
+    registered, event, user_with_perms, orders
+):
+    """Not only in the row list: the file itself has to contain it.
+
+    ``_render_csv`` writes ``False`` as ``False`` and ``"0"`` as ``"0"``; this
+    is the assertion that nothing between the renderer and the bytes undoes the
+    formatting.
+    """
+    line = csv_data_line(
+        event,
+        user_with_perms,
+        [{"field": "order.testmode", "format": {"boolean_style": "one_zero"}}],
+    )
+    assert line.strip('"') == "0"
+    assert "False" not in line
+
+
+@pytest.mark.django_db
+def test_a_report_without_a_column_format_is_exported_exactly_as_before(
+    registered, event, user_with_perms, orders
+):
+    """The control group: every report saved before T-001 keeps its old file.
+
+    Two assertions, because "unchanged" has two halves. The row still carries
+    the native types the compiler produced -- and the exporter does not even
+    build a formatting pass for such a report, so the old path is literally the
+    old path rather than a formatter that happens to be a no-op.
+    """
+    columns = [
+        {"field": "order.code"},
+        {"field": "order.datetime"},
+        {"field": "order.total"},
+        {"field": "order.testmode"},
+    ]
+    row = first_data_row(event, user_with_perms, columns)
+    assert row[0] == "AAAAA"
+    assert isinstance(row[1], datetime.datetime)
+    assert isinstance(row[2], Decimal)
+    assert row[3] is False
+
+    with scope(organizer=event.organizer):
+        ex = exporter_for_event(event, user_with_perms)
+        _report, compiled = ex._prepare(event, "fmt", {})
+        assert ex._cell_formats(compiled) is None
+
+    # A ``separator`` is not a style: the compiler applies it, so it must not
+    # switch the formatting pass on either.
+    with scopes_disabled():
+        ReportDefinition.objects.filter(event=event, identifier="sep").delete()
+        make_format_report(
+            event,
+            [{"field": "order.code", "format": {"separator": " / "}}],
+            identifier="sep",
+        )
+    with scope(organizer=event.organizer):
+        ex = exporter_for_event(event, user_with_perms)
+        _report, compiled = ex._prepare(event, "sep", {})
+        assert ex._cell_formats(compiled) is None
+
+
+@pytest.mark.django_db
+def test_a_hidden_column_does_not_shift_the_formats(
+    registered, event, user_with_perms, orders
+):
+    """Formats are paired with the *visible* columns, like in the preview.
+
+    ``CompiledReport.columns`` has hidden columns dropped already. Pairing by
+    the raw definition index would hand column 0's (absent) format to the first
+    output column and silently drop the style the user set -- the T-001 bug
+    again, one layer down and much harder to see.
+    """
+    row = first_data_row(
+        event,
+        user_with_perms,
+        [
+            {"field": "order.code", "hidden": True},
+            {"field": "order.testmode", "format": {"boolean_style": "one_zero"}},
+        ],
+    )
+    assert row == ["0"]
+
+
+@pytest.mark.django_db
+def test_number_style_raw_keeps_a_native_number_in_the_xlsx(
+    registered, event, user_with_perms, orders
+):
+    """The reason formatting is not in the compiler, asserted in a real file.
+
+    A spreadsheet can add up column 1 and cannot add up column 2. If the
+    renderer stringified everything, both would be text and ``NumberStyle.RAW``
+    would be a lie (its own docstring promises the opposite).
+    """
+    import io
+    from openpyxl import load_workbook
+
+    with scopes_disabled():
+        make_format_report(
+            event,
+            [
+                {"field": "order.total", "format": {"number_style": "raw"}},
+                {"field": "order.total", "format": {"number_style": "currency"}},
+                {"field": "order.datetime", "format": {"date_style": "date_only"}},
+            ],
+        )
+    with scope(organizer=event.organizer):
+        ex = exporter_for_event(event, user_with_perms)
+        _fn, _mime, content = render_xlsx(
+            ex, {"_format": "xlsx", contracts.EXPORT_FORM_REPORT_KEY: "fmt"}
+        )
+    sheet = load_workbook(io.BytesIO(content)).active
+    raw, currency, date_only = (sheet.cell(row=2, column=i).value for i in (1, 2, 3))
+
+    assert isinstance(raw, (int, float, Decimal)) and not isinstance(raw, bool)
+    assert float(raw) == 23.0
+    assert isinstance(currency, str) and "23" in currency
+    assert isinstance(date_only, str) and ":" not in date_only
+
+
+# ---------------------------------------------------------------------------
+# 2c. Timezones and XLSX
+# ---------------------------------------------------------------------------
+#
+# Found while fixing T-001 and fixed in the same file: openpyxl refuses a
+# timezone-aware datetime outright, so *every* XLSX export of a report with a
+# date column used to raise TypeError -- not an ExportError, so five Celery
+# retries and the word "Internal Error". Only the XLSX path is affected; CSV
+# writes an aware datetime correctly and is deliberately left alone.
+
+
+def xlsx_sheet(event, user_with_perms, columns, identifier="fmt"):
+    """Render a report to XLSX and hand back the loaded worksheet."""
+    import io
+    from openpyxl import load_workbook
+
+    with scopes_disabled():
+        ReportDefinition.objects.filter(event=event, identifier=identifier).delete()
+        make_format_report(event, columns, identifier=identifier)
+    with scope(organizer=event.organizer):
+        ex = exporter_for_event(event, user_with_perms)
+        _fn, _mime, content = render_xlsx(
+            ex, {"_format": "xlsx", contracts.EXPORT_FORM_REPORT_KEY: identifier}
+        )
+    return load_workbook(io.BytesIO(content)).active
+
+
+@pytest.mark.django_db
+def test_a_datetime_column_without_a_style_survives_the_xlsx_path(
+    registered, event, user_with_perms, orders
+):
+    """``Excel does not support timezones in datetimes``, says openpyxl.
+
+    ``_render_xlsx`` appends our cell values unchanged (pretix/base/exporter.py
+    :305-311) and ``SafeCell`` passes a ``datetime`` straight to openpyxl, which
+    rejects an aware one outright. Our rows are aware -- ``Order.datetime`` is a
+    ``DateTimeField`` and ``USE_TZ`` is on.
+
+    Two assertions, because "it does not crash" is only half of it: the cell has
+    to be a real ``datetime`` (a spreadsheet can sort and subtract it), and it
+    has to show the event's local wall clock rather than UTC. The event here is
+    deliberately not in UTC, so the two are three or four digits apart.
+    """
+    with scopes_disabled():
+        event.settings.timezone = "Europe/Berlin"
+        order = Order.objects.get(event=event, code="AAAAA")
+
+    sheet = xlsx_sheet(event, user_with_perms, [{"field": "order.datetime"}])
+    cell = sheet.cell(row=2, column=1)
+
+    assert isinstance(cell.value, datetime.datetime)
+    assert cell.value.tzinfo is None
+    # Compared to the second: XLSX stores a datetime as a serial number of days,
+    # so the microseconds of the stored order do not survive the round trip.
+    expected = order.datetime.astimezone(ZoneInfo("Europe/Berlin"))
+    assert cell.value.replace(microsecond=0) == expected.replace(
+        tzinfo=None, microsecond=0
+    )
+    assert cell.value.replace(microsecond=0) != order.datetime.replace(
+        tzinfo=None, microsecond=0
+    ), "written in UTC instead of the event's timezone"
+
+
+@pytest.mark.django_db
+def test_without_the_naive_conversion_the_xlsx_path_fails_at_openpyxl(
+    registered, event, user_with_perms, orders, monkeypatch
+):
+    """The counter-check: with the fix switched off, the old error comes back.
+
+    Not "some export fails" -- *this* error, from openpyxl, about timezones. A
+    test that only asserted "does not raise" would stay green if the datetime
+    column silently disappeared, and it is the fix, not the report, that has to
+    be doing the work.
+    """
+    import io
+
+    monkeypatch.setattr(exporters, "as_spreadsheet_value", lambda value, event: value)
+    with scopes_disabled():
+        make_format_report(event, [{"field": "order.datetime"}])
+    with scope(organizer=event.organizer):
+        ex = exporter_for_event(event, user_with_perms)
+        with pytest.raises(TypeError) as excinfo:
+            ex.render(
+                {"_format": "xlsx", contracts.EXPORT_FORM_REPORT_KEY: "fmt"},
+                output_file=io.BytesIO(),
+            )
+    assert "timezone" in str(excinfo.value).lower()
+
+
+@pytest.mark.django_db
+def test_a_chosen_date_style_is_unaffected_by_the_xlsx_conversion(
+    registered, event, user_with_perms, orders
+):
+    """Control group: the T-001 styles keep working, unchanged, in XLSX.
+
+    A styled cell is a string by the time the spreadsheet conversion sees it,
+    so it must pass through untouched -- and it must be the *same* string the
+    CSV export produces, which is the whole point of the shared renderer.
+    """
+    with scopes_disabled():
+        event.settings.timezone = "Europe/Berlin"
+
+    columns = [
+        {"field": "order.datetime", "format": {"date_style": "iso"}},
+        {"field": "order.datetime", "format": {"date_style": "date_only"}},
+    ]
+    sheet = xlsx_sheet(event, user_with_perms, columns)
+    iso, date_only = (sheet.cell(row=2, column=i).value for i in (1, 2))
+
+    assert isinstance(iso, str) and "T" in iso
+    assert iso.endswith("+02:00") or iso.endswith("+01:00"), iso
+    assert isinstance(date_only, str) and ":" not in date_only
+
+    csv_row = first_data_row(event, user_with_perms, columns)
+    assert csv_row == [iso, date_only]
+
+
+@pytest.mark.django_db
+def test_the_csv_path_still_writes_the_timezone(
+    registered, event, user_with_perms, orders
+):
+    """The other half of the control group: CSV bytes do not change at all.
+
+    The fix is XLSX-only on purpose. An aware datetime is written correctly by
+    ``csv.writer``, and making it naive here would rewrite every existing
+    report's file for no gain.
+    """
+    with scopes_disabled():
+        event.settings.timezone = "Europe/Berlin"
+    line = csv_data_line(event, user_with_perms, [{"field": "order.datetime"}])
+    assert "+00:00" in line, line  # unchanged: aware, and still UTC
+
+
+def test_as_spreadsheet_value_touches_nothing_else():
+    """Only aware temporal values change, and only in their tzinfo."""
+    naive = datetime.datetime(2026, 3, 1, 9, 30)
+    assert exporters.as_spreadsheet_value(naive) is naive
+    assert exporters.as_spreadsheet_value(datetime.date(2026, 3, 1)) == datetime.date(
+        2026, 3, 1
+    )
+    assert exporters.as_spreadsheet_value(Decimal("23.50")) == Decimal("23.50")
+    assert exporters.as_spreadsheet_value("2026-03-01T09:30:00+00:00") == (
+        "2026-03-01T09:30:00+00:00"
+    )
+    assert exporters.as_spreadsheet_value(None) is None
+    assert exporters.as_spreadsheet_value(True) is True
+
+    aware_time = datetime.time(9, 30, tzinfo=datetime.timezone.utc)
+    assert exporters.as_spreadsheet_value(aware_time) == datetime.time(9, 30)
+    assert exporters.as_spreadsheet_value(datetime.time(9, 30)) == datetime.time(9, 30)
+
+
+def test_as_spreadsheet_value_without_an_event_does_not_crash():
+    """A missing or broken timezone must cost a wrong hour, not the export."""
+    aware = datetime.datetime(2026, 3, 1, 9, 30, tzinfo=datetime.timezone.utc)
+    assert exporters.as_spreadsheet_value(aware, None) == datetime.datetime(
+        2026, 3, 1, 9, 30
+    )
+
+
+# --- the renderer itself, without a database in the way ---------------------
+
+
+def test_format_export_cell_hands_unstyled_values_through_untouched():
+    """The four "do not touch this" cases of the export policy.
+
+    Each one is somebody's promise: old reports keep their files, ``RAW`` keeps
+    a spreadsheet number, ``None`` keeps an empty XLSX cell instead of a string,
+    and a value the compiler already rendered is not rendered a second time.
+    """
+    when = datetime.datetime(2026, 3, 1, 9, 30, tzinfo=datetime.timezone.utc)
+
+    # No format at all.
+    assert exporters.format_export_cell(when, None) is when
+    assert exporters.format_export_cell(Decimal("23.50"), None) == Decimal("23.50")
+    assert exporters.format_export_cell(True, None) is True
+
+    # A format that says nothing about this type.
+    only_separator = ColumnFormat(separator=" / ")
+    assert exporters.format_export_cell(when, only_separator) is when
+    number_only = ColumnFormat(number_style=NumberStyle.CURRENCY)
+    assert exporters.format_export_cell(when, number_only) is when
+    assert exporters.format_export_cell(True, number_only) is True
+
+    # RAW: the one style whose meaning is "leave me alone".
+    raw = ColumnFormat(number_style=NumberStyle.RAW)
+    assert exporters.format_export_cell(Decimal("23.50"), raw) == Decimal("23.50")
+    assert isinstance(exporters.format_export_cell(Decimal("23.50"), raw), Decimal)
+
+    # None and str, whatever the format says.
+    iso = ColumnFormat(date_style=DateStyle.ISO)
+    assert exporters.format_export_cell(None, iso) is None
+    assert exporters.format_export_cell("2026", iso) == "2026"
+
+
+def test_format_export_cell_does_apply_the_three_styles():
+    """The other half of the policy, so the test above cannot pass vacuously."""
+    when = datetime.datetime(2026, 3, 1, 9, 30, tzinfo=datetime.timezone.utc)
+    assert exporters.format_export_cell(
+        when, ColumnFormat(date_style=DateStyle.ISO)
+    ).startswith("2026-03-01T")
+    assert (
+        exporters.format_export_cell(
+            Decimal("23.50"), ColumnFormat(number_style=NumberStyle.LOCALIZED)
+        )
+        == "23.50"
+    )
+    assert (
+        exporters.format_export_cell(
+            True, ColumnFormat(boolean_style=BooleanStyle.ONE_ZERO)
+        )
+        == "1"
+    )
+
+
+def test_a_style_that_does_not_fit_the_value_is_not_a_celery_crash():
+    """A definition is untrusted input, and nothing revalidates it per run.
+
+    ``date_only`` on a time-of-day value asks Django for the day number of a
+    ``datetime.time``. The export must survive that with an unformatted cell:
+    an ``AttributeError`` here would leave this module as something other than
+    an ``ExportError``, which costs five retries and produces the word
+    "Internal Error" (services/export.py:392-397).
+    """
+    value = datetime.time(9, 30)
+    fmt = ColumnFormat(date_style=DateStyle.DATE_ONLY)
+    with pytest.raises(Exception):
+        exporters.format_cell_value(value, fmt)  # the strict renderer does raise
+    assert exporters.format_export_cell(value, fmt) is value  # the export does not
+
+
+@pytest.mark.django_db
+def test_the_preview_and_the_export_share_one_renderer(event):
+    """The preview must not be prettier than the export -- as an equality.
+
+    Two ways to satisfy this, and both are accepted: ``views/api.py`` imports
+    :func:`~pretix_custom_reports.exporters.format_cell_value` (the intended end
+    state, frontend-dev's follow-up round), or it still has its own function --
+    in which case the two are compared cell by cell over the whole matrix of
+    value types and styles. What is *not* accepted is two renderers that
+    disagree.
+    """
+    from pretix_custom_reports.views import api
+
+    preview_renderer = getattr(api, "format_cell", None)
+    if preview_renderer is None or preview_renderer is exporters.format_cell_value:
+        return  # deduplicated; there is only one renderer left to compare
+
+    values = [
+        None,
+        "text",
+        True,
+        False,
+        Decimal("23.50"),
+        17,
+        4.5,
+        datetime.datetime(2026, 3, 1, 9, 30, tzinfo=datetime.timezone.utc),
+        datetime.date(2026, 3, 1),
+        datetime.time(9, 30),
+    ]
+    column_formats = [None, ColumnFormat()]
+    column_formats += [ColumnFormat(date_style=style) for style in DateStyle]
+    column_formats += [ColumnFormat(number_style=style) for style in NumberStyle]
+    column_formats += [ColumnFormat(boolean_style=style) for style in BooleanStyle]
+    datatypes = [None, DataType.MONEY, DataType.DATETIME, DataType.BOOLEAN]
+
+    def outcome(fn, *args):
+        try:
+            return ("ok", fn(*args))
+        except Exception as e:  # both may legitimately refuse the same input
+            return ("raised", type(e).__name__)
+
+    compared = 0
+    for value in values:
+        for fmt in column_formats:
+            for datatype in datatypes:
+                mine = outcome(exporters.format_cell_value, value, fmt, datatype, event)
+                theirs = outcome(preview_renderer, value, fmt, datatype, event)
+                assert mine == theirs, (value, fmt, datatype, mine, theirs)
+                compared += 1
+    assert compared == len(values) * len(column_formats) * len(datatypes)
 
 
 # ---------------------------------------------------------------------------

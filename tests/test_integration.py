@@ -42,7 +42,10 @@ import csv
 import datetime as dt
 import io
 import json
+import openpyxl
+import os
 import pytest
+import tempfile
 import warnings
 import weakref
 from decimal import Decimal
@@ -354,6 +357,42 @@ def export_rows(exporter, form_data):
         for line in exporter.iterate_list(form_data)
         if not isinstance(line, ListExporter.ProgressSetTotal)
     ]
+
+
+def export_xlsx(event: Any, user: Any, identifier: str, **form_extra: Any):
+    """Run the report as XLSX and read the sheet back. Returns a list of rows.
+
+    Written into a file handle we opened ourselves, deliberately.
+    ``ListExporter._render_xlsx`` *without* ``output_file`` saves into a
+    ``NamedTemporaryFile`` and then opens it a second time by name, which raises
+    ``PermissionError`` on Windows -- a platform limit of pretix, not of this
+    plugin (``handoff/status/exporter-dev.md``). Passing ``output_file`` is the
+    path pretix' own export service uses for anything that goes to a file, so
+    this is the realistic call and not a workaround.
+    """
+    with scope(organizer=event.organizer):
+        exporter = init_event_exporter(
+            identifier=exporters.CustomReportExporter.identifier,
+            event=event,
+            user=user,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as handle:
+            path = handle.name
+        with open(path, "wb") as handle:
+            exporter.render(
+                {
+                    "_format": "xlsx",
+                    contracts.EXPORT_FORM_REPORT_KEY: identifier,
+                    **form_extra,
+                },
+                output_file=handle,
+            )
+    book = openpyxl.load_workbook(path)
+    try:
+        return [list(row) for row in book.active.values]
+    finally:
+        book.close()
+        os.unlink(path)
 
 
 # ===========================================================================
@@ -1283,44 +1322,56 @@ def test_the_voucher_and_the_invoice_address_reach_their_columns(world):
 
 
 # ===========================================================================
-# 2b. Two findings, as reproducers
+# 2b. The findings: two closed (T-001, T-002), one new (T-004)
 # ===========================================================================
 #
-# Both are cross-agent gaps: each component behaves as its own suite says, and
-# the defect only exists at the seam. They are recorded in handoff/blockers.md.
+# All of them are cross-agent gaps: each component behaves as its own suite
+# says, and the defect only exists at the seam. Recorded in handoff/blockers.md.
 #
-# ``xfail(strict=True)`` rather than a plain failing test, on purpose. The brief
-# asks for a failing test with the finding; a strict xfail *is* that test -- it
-# runs, it fails, the failure is recorded -- while keeping the suite green so
-# that the next agent's real regression is not buried under a known one. It also
-# fails loudly (XPASS) the moment somebody fixes the bug, which is when this test
-# should be turned into a normal assertion. To watch them fail for real:
+# T-001 and T-002 were ``xfail(strict=True)`` from wave 3 until 2026-08-03, when
+# ``exporter-dev``/``frontend-dev`` and ``registry-dev``/``query-dev`` fixed
+# them. The markers are gone and the assertions are unchanged: a reproducer that
+# has been verified to fall over with the fix neutralised is the best regression
+# guard the finding can leave behind, and rewriting its assertion at the moment
+# it turns green would throw exactly that away. What each of them is *worth* is
+# recorded in the docstring, so that a later failure is read as "the fix was
+# undone" rather than as "some test about formats broke".
+#
+# The tests around them are new and adversarial: they exist because a fix that
+# makes one reproducer pass is not the same thing as a fix that holds. See
+# handoff/status/test-engineer.md, "Verifikation T-001 bis T-003".
+#
+# T-004 is new, found while verifying T-002, and is a strict xfail for the same
+# reason T-002 was. To watch the open one fail for real:
 #
 #     pytest tests/test_integration.py -k finding --runxfail
 
 
 @pytest.mark.django_db
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding 1: ColumnFormat.date_style/number_style/boolean_style are "
-    "applied by the preview (views/api.py) but by nothing in the export path, "
-    "so the editor shows a formatting the file does not have",
-)
 def test_finding_a_column_format_chosen_in_the_editor_reaches_the_export(
     registered, user_with_perms, world
 ):
-    """The same column, three date styles, three identical files.
+    """The same column, two date styles, two different files. **T-001, closed.**
 
     ``ColumnFormat`` is part of the frozen contract, the editor offers it per
-    datatype and the live preview honours it (``test_preview_applies_the_column_format``
-    in ``tests/test_editor_api.py``). ``query/columns.py`` reads only
-    ``format.separator``; ``exporters.py`` deliberately holds no rendering logic
-    at all. So the setting is visible, previewed and silently dropped -- which is
-    worse than not offering it, because the preview vouches for it.
+    datatype and the live preview honoured it -- and until 2026-08-03 nothing in
+    the export path did, so "date only" showed a date on screen and a full
+    timestamp in the file. ``exporters.py`` now holds the single renderer
+    (``format_cell_value``/``format_export_cell``), the exporter applies it via
+    ``CustomReportExporter._cell_formats()`` and ``views/api.py`` imports the
+    same function instead of keeping its own copy.
 
-    Whose fix it is: whoever owns the single rendering point. ``query-dev``'s
-    module docstring and ``frontend-dev``'s open question from wave 1 both say
-    the mapping belongs in *one* place; nobody has claimed it.
+    The measured before/after, both lines from one and the same report::
+
+        before:  iso -> "2026-04-24 09:00:00+00:00"
+                 date_only -> "2026-04-24 09:00:00+00:00"
+        after:   iso -> "2026-04-24T09:00:00+00:00"
+                 date_only -> "2026-04-24"
+
+    Verified to fail again at this assertion with the renderer neutralised at run
+    time (``exporters.format_export_cell`` replaced by the identity, no
+    production code touched): both styles collapse back onto the first pair of
+    lines above.
     """
     rendered = {}
     for style in ("iso", "date_only"):
@@ -1357,29 +1408,43 @@ def test_finding_a_column_format_chosen_in_the_editor_reaches_the_export(
     assert rendered["date_only"] != rendered["iso"], "both styles produced %r" % (
         rendered["iso"],
     )
+    # Not just "different": the two strings a reader would expect. "Different"
+    # alone would also be satisfied by a renderer that mangles both.
+    assert rendered["iso"] == ["PAID1", "2026-04-24T09:00:00+00:00"]
+    assert rendered["date_only"] == ["PAID1", "2026-04-24"]
 
 
 @pytest.mark.django_db
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding 2: a money column that comes from an expression (Sum, "
-    "Coalesce, Subquery) loses its scale on SQLite, so one file mixes '23.50' "
-    "and '20.5' in two money columns",
-)
-def test_finding_an_aggregated_money_column_keeps_its_two_decimal_places(world):
-    """``order.total`` says ``23.50``, ``payment.sum_confirmed`` says ``20.5``.
+def test_finding_an_aggregated_money_column_keeps_its_two_decimal_places(
+    registered, user_with_perms, world
+):
+    """``order.total`` said ``23.50``, ``payment.sum_confirmed`` said ``20.5``.
+    **T-002, closed.**
 
     Django's SQLite backend quantises a ``DecimalField`` to its ``decimal_places``
     only when the expression is a plain column; for a ``Subquery``/``Coalesce`` it
     hands the raw value through (``django/db/backends/sqlite3/operations.py``,
     ``get_decimalfield_converter``). PostgreSQL keeps the scale of
-    ``numeric(13,2)`` through ``SUM``, so **the same report produces two
+    ``numeric(13,2)`` through ``SUM``, so **the same report produced two
     different files on two installations** -- the same class of problem as the
     ``nulls_last`` divergence ``query-dev`` guarded against deliberately.
 
-    Visible without a database difference at all: within one file, "Order total"
-    reads ``23.50`` while "Amount paid" reads ``20.5``. For an accounting export
-    that is not cosmetic.
+    Fixed on 2026-08-03 by ``registry/annotations.py::MoneyField`` (a
+    ``DecimalField`` with a ``from_db_value`` that quantises, so the guarantee
+    hangs on the output field rather than on a backend branch) and, for the
+    aggregate the *user* picks, by ``query/relations.py::aggregate_expression``.
+
+    Verified to fail again at the assertion below with either half of the fix
+    neutralised at run time, and each half fails on its own columns -- which is
+    what says the two fixes are not covering for each other::
+
+        MoneyField.from_db_value removed  -> ['23.50', '20.5',  '23.50']
+        aggregate_expression bypassed     -> ['23.50', '20.50', '23.5']
+
+    The file is checked as well as the values: ``Decimal("23.5") ==
+    Decimal("23.50")`` is ``True`` in Python, so the defect is only ever visible
+    in the *characters* an export writes, and a test that compared ``Decimal``
+    objects would have stayed green through all of it.
     """
     with scopes_disabled():
         order = factories.make_order(
@@ -1406,6 +1471,664 @@ def test_finding_an_aggregated_money_column_keeps_its_two_decimal_places(world):
     _, rows = run_report(document, world.event)
     cells = [str(cell) for cell in rows[0][1:]]
     assert cells == ["23.50", "20.50", "23.50"], cells
+
+    # And once through the real file, because that is where the finding lived.
+    store_report(world.event, document, identifier="cents")
+    _, lines = export_csv(world.event, user_with_perms, "cents")
+    assert lines[1] == ["CENTS", "23.50", "20.50", "23.50"]
+
+
+@pytest.mark.django_db
+def test_every_money_column_the_editor_offers_keeps_two_decimal_places(world):
+    """All fourteen money cells of one row, not just the three of the finding.
+
+    A fix verified against its own reproducer proves the reproducer. This is the
+    enumeration instead: every field the registry declares
+    ``DataType.MONEY`` for, in every aggregate it allows, in a single row -- the
+    four registry expressions (``payment.sum_confirmed``, ``refund.sum_done``,
+    ``order.pending_sum``, ``position.net_price``) plus the twelve
+    field-by-aggregate combinations the editor lets a user pick, plus
+    ``order.total`` as the plain column that always kept its scale and is
+    therefore the yardstick the others have to match *inside the same row*.
+
+    The numbers, by pencil, for the order built below (23.50 + 10.00 gross,
+    3.50 + 1.60 tax, 20.50 paid, 0.50 refunded, product list price 23.00):
+
+    ======================  =======  ======================================
+    column                  value    why
+    ======================  =======  ======================================
+    order.total             23.50    stored on the order
+    payment.sum_confirmed   20.50    one confirmed payment
+    refund.sum_done         0.50     one done refund
+    order.pending_sum       3.50     23.50 - 20.50 + 0.50
+    sum(position.price)     33.50    23.50 + 10.00
+    min/max(position.price) 10.00 /  the two positions
+                            23.50
+    avg(position.price)     16.75    33.50 / 2
+    sum(position.tax_value) 5.10     3.50 + 1.60
+    avg(position.tax_value) 2.55     5.10 / 2
+    sum(item.default_price) 46.00    the same product twice, 23.00 each
+    ======================  =======  ======================================
+
+    ``join`` is not in the table because no money field offers it, and
+    ``count``/``count_distinct`` are not because a cardinality has no scale to
+    lose -- both checked against the registry rather than assumed.
+    """
+    with scopes_disabled():
+        order = factories.make_order(
+            world.event, "MONEY", Order.STATUS_PENDING, Decimal("23.50")
+        )
+        factories.add_position(
+            order, world.catalog.ticket, Decimal("23.50"), 1, tax_value=Decimal("3.50")
+        )
+        factories.add_position(
+            order, world.catalog.ticket, Decimal("10.00"), 2, tax_value=Decimal("1.60")
+        )
+        factories.add_payment(order, Decimal("20.50"))
+        factories.add_refund(order, Decimal("0.50"))
+
+    document = definition(
+        base="order",
+        columns=columns(
+            "order.code",
+            "order.total",
+            "payment.sum_confirmed",
+            "refund.sum_done",
+            "order.pending_sum",
+            ("position.price", "sum"),
+            ("position.price", "min"),
+            ("position.price", "max"),
+            ("position.price", "avg"),
+            ("position.tax_value", "sum"),
+            ("position.tax_value", "min"),
+            ("position.tax_value", "max"),
+            ("position.tax_value", "avg"),
+            ("item.default_price", "sum"),
+            ("item.default_price", "min"),
+            ("item.default_price", "max"),
+            ("item.default_price", "avg"),
+        ),
+        filters={
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "MONEY"}
+            ],
+        },
+    )
+    _, rows = run_report(document, world.event)
+    assert [str(cell) for cell in rows[0]] == [
+        "MONEY",
+        "23.50",
+        "20.50",
+        "0.50",
+        "3.50",
+        "33.50",
+        "10.00",
+        "23.50",
+        "16.75",
+        "5.10",
+        "1.60",
+        "3.50",
+        "2.55",
+        "46.00",
+        "23.00",
+        "23.00",
+        "23.00",
+    ]
+
+
+@pytest.mark.django_db
+def test_the_average_of_a_money_column_is_rounded_to_cents(world):
+    """43,00 over three positions is 14,33 -- a decision, not a rounding error.
+
+    ``query-dev`` chose to quantise ``AVG`` on a money field, and that deserves a
+    test of its own rather than hiding inside the table above, because it is the
+    one place in T-002's fix where a *value* changes rather than its notation.
+    Measured with the quantisation bypassed at run time, the same cell reads
+    ``Decimal("14.3333333333333")`` -- thirteen digits of SQLite's float path,
+    which PostgreSQL would answer differently. That is the argument: the
+    unrounded number is an artefact of the installation, so it is not more
+    precise, only less comparable. Anyone who needs the exact quotient has
+    ``sum`` and ``count`` as two columns.
+    """
+    with scopes_disabled():
+        order = factories.make_order(
+            world.event, "THIRD", Order.STATUS_PENDING, Decimal("43.00")
+        )
+        for index, price in enumerate(("10.00", "13.00", "20.00"), start=1):
+            factories.add_position(order, world.catalog.ticket, Decimal(price), index)
+    document = definition(
+        base="order",
+        columns=columns(
+            "order.code",
+            ("position.price", "avg"),
+            ("position.price", "sum"),
+            ("position.price", "count"),
+        ),
+        filters={
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "THIRD"}
+            ],
+        },
+    )
+    _, rows = run_report(document, world.event)
+    assert [str(cell) for cell in rows[0]] == ["THIRD", "14.33", "43.00", "3"]
+
+
+@pytest.mark.django_db
+def test_an_aggregate_over_no_rows_stays_empty_instead_of_becoming_zero(world):
+    """The other half of the quantisation: ``None`` must survive it.
+
+    A converter that runs on every value of a money expression is one ``if`` away
+    from turning "this order has no positions" into ``0.00``, and an empty cell
+    and a zero mean different things in an accounting export -- an order with no
+    positions is not an order worth nothing. ``count`` is the deliberate
+    exception and stays ``0``, because a missing count really is zero
+    (``_COALESCE_TO_ZERO`` in ``query/relations.py``).
+    """
+    with scopes_disabled():
+        factories.make_order(
+            world.event, "NOPOS", Order.STATUS_PENDING, Decimal("0.00")
+        )
+    document = definition(
+        base="order",
+        columns=columns(
+            "order.code",
+            ("position.price", "sum"),
+            ("position.price", "min"),
+            ("position.price", "max"),
+            ("position.price", "avg"),
+            ("position.price", "count"),
+        ),
+        filters={
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "NOPOS"}
+            ],
+        },
+    )
+    _, rows = run_report(document, world.event)
+    assert rows[0] == ["NOPOS", None, None, None, None, 0]
+
+
+@pytest.mark.django_db
+@pytest.mark.xfail(
+    strict=True,
+    reason="T-004: aggregate_expression pins the scale for DataType.MONEY only, "
+    "so an aggregate over position.tax_rate (DataType.DECIMAL, decimal(7,2) in "
+    "pretix) writes '19' where the plain column writes '19.00'",
+)
+def test_finding_an_aggregated_decimal_column_keeps_its_scale(world):
+    """T-002 one datatype over: ``position.tax_rate``, aggregated.
+
+    Found while enumerating the money paths for the T-002 verification. The fix
+    for T-002 keys on ``DataType.MONEY``
+    (``query/relations.py::aggregate_expression``), and ``DataType.DECIMAL`` goes
+    through the same ``Sum``/``Min``/``Max``/``Avg`` with the model's plain
+    ``DecimalField`` as its output field -- which is exactly the state money was
+    in before. ``position.tax_rate`` is a core registry field, the editor offers
+    it with all six aggregates, and pretix declares it
+    ``DecimalField(max_digits=7, decimal_places=2)``
+    (``pretix/base/models/orders.py:2558``).
+
+    Measured for one order with a 19,00 % and a 7,00 % position::
+
+        base orderposition, plain column   -> "19.00", "7.00"
+        base order, min/max/sum/avg        -> "7", "19", "26", "13"
+
+    Same two symptoms as T-002, and both of them: one file that disagrees with
+    itself (``Tax rate`` says ``19.00``, ``Highest tax rate`` says ``19``), and
+    two installations that disagree with each other, because PostgreSQL keeps the
+    scale of ``numeric(7,2)`` through ``SUM`` and SQLite does not.
+
+    Deliberately *not* the same one-line fix: ``MoneyField`` may hard-code two
+    decimal places because every money column in pretix has two, while
+    ``DataType.DECIMAL`` covers fields of different scales, and the registry does
+    not declare a scale today. Whoever picks this up decides between "carry the
+    scale in ``ReportField``" and "quantise ``DECIMAL`` to the model field's own
+    ``decimal_places``". Owner: ``query-dev`` with ``registry-dev``; severity
+    lower than T-002, because a tax rate is not an amount anybody adds up.
+    """
+    with scopes_disabled():
+        order = factories.make_order(
+            world.event, "TAXRT", Order.STATUS_PENDING, Decimal("20.00")
+        )
+        factories.add_position(
+            order, world.catalog.ticket, Decimal("10.00"), 1, tax_rate=Decimal("19.00")
+        )
+        factories.add_position(
+            order, world.catalog.ticket, Decimal("10.00"), 2, tax_rate=Decimal("7.00")
+        )
+    document = definition(
+        base="order",
+        columns=columns(
+            "order.code",
+            ("position.tax_rate", "min"),
+            ("position.tax_rate", "max"),
+            ("position.tax_rate", "sum"),
+        ),
+        filters={
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "TAXRT"}
+            ],
+        },
+    )
+    _, rows = run_report(document, world.event)
+    assert [str(cell) for cell in rows[0]] == ["TAXRT", "7.00", "19.00", "26.00"]
+
+
+# ===========================================================================
+# 2c. What the T-001 fix has to keep promising
+# ===========================================================================
+#
+# Written while verifying the fix, not while reporting the finding. Each of them
+# is a place where a renderer that satisfies the reproducer could still be
+# wrong: the wrong column, the wrong output format, the wrong event, or a
+# preview that has quietly drifted apart from the file again.
+
+
+#: Every style the contract offers, paired with a column of the matching
+#: datatype. Written out rather than derived from the enums, so that adding a
+#: style to the contract makes this list visibly incomplete instead of silently
+#: covering it.
+STYLE_MATRIX = (
+    ("order.datetime", {"date_style": "iso"}, "2026-04-24T09:00:00+00:00"),
+    ("order.datetime", {"date_style": "date_only"}, "2026-04-24"),
+    ("order.datetime", {"date_style": "time_only"}, "09:00"),
+    ("order.datetime", {"date_style": "short"}, "2026-04-24 09:00"),
+    ("order.datetime", {"date_style": "long"}, "Friday, 24 April 2026 09:00"),
+    ("order.total", {"number_style": "raw"}, "33.00"),
+    ("order.total", {"number_style": "localized"}, "33.00"),
+    ("order.total", {"number_style": "currency"}, "€33.00"),
+    ("payment.sum_confirmed", {"number_style": "currency"}, "€33.00"),
+    ("order.testmode", {"boolean_style": "yes_no"}, "No"),
+    ("order.testmode", {"boolean_style": "true_false"}, "false"),
+    ("order.testmode", {"boolean_style": "one_zero"}, "0"),
+)
+
+
+@pytest.mark.django_db
+def test_every_column_format_renders_the_same_string_in_the_preview_and_in_the_file(
+    wired_urls, registered, client_with_perms, user_with_perms, world
+):
+    """Twelve styles, one row, two paths, the same twelve strings.
+
+    The reproducer for T-001 uses two date styles; a renderer wired into the
+    export for those two and not for the rest would satisfy it. So this walks the
+    whole contract: five ``DateStyle``, three ``NumberStyle``, three
+    ``BooleanStyle``, once through ``api/preview/`` over HTTP and once through
+    ``ListExporter`` into a CSV, compared cell by cell **and** against the
+    literal strings above.
+
+    Both halves are load-bearing. Comparing preview to export alone would be
+    satisfied by two renderers that are equally broken -- which is precisely the
+    shape T-001 had, only inverted. Comparing to the literals alone would not
+    notice the preview drifting off again, which is what
+    ``get_cell_renderer()`` exists to prevent.
+    """
+    cells = [{"field": "order.code"}] + [
+        {"field": key, "format": fmt} for key, fmt, _expected in STYLE_MATRIX
+    ]
+    document = definition(
+        base="order",
+        columns=cells,
+        filters={
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "PAID1"}
+            ],
+        },
+    )
+    store_report(world.event, document, identifier="styles")
+
+    response = post_json(
+        client_with_perms,
+        url_for("api.preview", world.event),
+        {"definition": document},
+    )
+    assert response.status_code == 200
+    preview = response.json()["rows"][0]
+
+    _, lines = export_csv(world.event, user_with_perms, "styles")
+    expected = ["PAID1"] + [text for _key, _fmt, text in STYLE_MATRIX]
+    assert lines[1] == expected
+    assert preview == expected
+
+
+@pytest.mark.django_db
+def test_a_hidden_column_does_not_shift_the_formats_of_the_columns_behind_it(
+    registered, user_with_perms, world
+):
+    """A format is paired with a column by position -- among the *visible* ones.
+
+    ``CompiledReport.columns`` has hidden columns dropped already, so pairing the
+    exporter's rows against ``definition.columns`` index for index would apply
+    every format one column too far to the left as soon as a report hides
+    anything. That is a silent wrong answer, not a crash, and hidden columns are
+    common: they are how a report filters or sorts by something it does not
+    print.
+
+    The hidden column here sits *between* the two visible ones and carries a
+    format of its own, so an off-by-one would be visible twice over -- the date
+    column would come out unformatted and the code column would be handed a
+    date style.
+    """
+    document = definition(
+        base="order",
+        columns=[
+            {"field": "order.code"},
+            {
+                "field": "order.total",
+                "hidden": True,
+                "format": {"number_style": "currency"},
+            },
+            {"field": "order.datetime", "format": {"date_style": "date_only"}},
+        ],
+        sorting=[{"field": "order.total", "direction": "desc"}],
+        filters={
+            "op": "and",
+            "children": [
+                {"field": "order.code", "operator": "exact", "value": "PAID1"}
+            ],
+        },
+    )
+    store_report(world.event, document, identifier="hidden-fmt")
+    _, lines = export_csv(world.event, user_with_perms, "hidden-fmt")
+    assert lines == [
+        ["Order code", "Order date"],
+        ["PAID1", "2026-04-24"],
+    ]
+
+
+@pytest.mark.django_db
+def test_a_multi_event_export_formats_each_events_rows_in_that_events_timezone(
+    registered, user_with_perms, organizer
+):
+    """Two events, two formats, two time zones, one file.
+
+    The organizer-level export compiles once per event and then writes all the
+    rows into a single table. Both inputs to the renderer therefore have to be
+    re-read per event and not hoisted out of the loop: the ``ColumnFormat`` comes
+    from *that* event's report (identifiers are unique per event, so the same
+    identifier can hold two different definitions), and the timezone an aware
+    datetime is localised into comes from *that* event.
+
+    Same instant in both rows -- 2026-04-24 09:00 UTC. Berlin is +02:00 in April
+    and Auckland +12:00, so a renderer using the server zone, the first event's
+    zone or the first event's format would produce a table in which one of these
+    two lines is wrong, and nothing about the file would say so.
+    """
+    for slug, timezone, style in (
+        ("berlin", "Europe/Berlin", "short"),
+        ("auckland", "Pacific/Auckland", "iso"),
+    ):
+        event = factories.make_event(
+            organizer, slug=slug, name=slug.title(), timezone=timezone
+        )
+        with scopes_disabled():
+            catalog = factories.make_catalog(event)
+            order = factories.make_order(
+                event, slug[:5].upper(), Order.STATUS_PAID, Decimal("10.00")
+            )
+            factories.add_position(order, catalog.ticket, Decimal("10.00"), 1)
+        store_report(
+            event,
+            definition(
+                base="order",
+                columns=[
+                    {"field": "order.code"},
+                    {"field": "order.datetime", "format": {"date_style": style}},
+                ],
+            ),
+            identifier="zones",
+        )
+
+    from pretix.base.services.export import init_organizer_exporters
+
+    with scope(organizer=organizer):
+        exporter = next(
+            ex
+            for ex in init_organizer_exporters(
+                organizer=organizer, user=user_with_perms
+            )
+            if ex.identifier == exporters.CustomReportExporter.identifier
+        )
+        rows = export_rows(
+            exporter,
+            {"_format": "default", contracts.EXPORT_FORM_REPORT_KEY: "zones"},
+        )
+
+    assert rows == [
+        ["Event slug", "Event name", "Order code", "Order date"],
+        ["auckland", "Auckland", "AUCKL", "2026-04-24T21:00:00+12:00"],
+        ["berlin", "Berlin", "BERLI", "2026-04-24 11:00"],
+    ]
+
+
+@pytest.mark.django_db
+def test_a_scheduled_export_mails_a_file_with_the_chosen_column_formats(
+    registered, user_with_perms, world
+):
+    """The unattended path, because that is where nobody looks at the screen.
+
+    A column format is set in the editor and read back out of the **mail
+    attachment** a ``ScheduledEventExport`` produces, through the real
+    ``run_scheduled_exports`` receiver. The whole point of T-001 was that a user
+    trusts what the preview showed; for a scheduled report there is no preview at
+    the moment it runs, only the file that arrives, and it is the one path where
+    a formatting bug can survive for months without anybody noticing.
+    """
+    from django.core import mail as djmail
+
+    store_report(
+        world.event,
+        definition(
+            base="order",
+            columns=[
+                {"field": "order.code"},
+                {"field": "order.datetime", "format": {"date_style": "date_only"}},
+                {"field": "order.total", "format": {"number_style": "currency"}},
+            ],
+            sorting=[{"field": "order.code", "direction": "asc"}],
+        ),
+        identifier="nightly",
+    )
+    with scopes_disabled():
+        ScheduledEventExport.objects.create(
+            event=world.event,
+            owner=user_with_perms,
+            export_identifier=exporters.CustomReportExporter.identifier,
+            export_form_data={
+                "_format": "default",
+                contracts.EXPORT_FORM_REPORT_KEY: "nightly",
+            },
+            locale="en",
+            mail_additional_recipients="",
+            mail_subject="Nightly",
+            mail_template="Attached.",
+            schedule_rrule="DTSTART:20260101T000000\nRRULE:FREQ=DAILY",
+            schedule_rrule_time="04:00:00",
+            schedule_next_run="2026-01-01T04:00:00Z",
+            error_counter=0,
+        )
+
+    djmail.outbox = []
+    run_scheduled_exports(None)
+
+    assert len(djmail.outbox) == 1
+    attachments = djmail.outbox[0].attachments
+    assert len(attachments) == 1
+    name, content, _mime = attachments[0]
+    assert name.endswith(".csv")
+    if isinstance(content, bytes):  # pragma: no cover - depends on the backend
+        content = content.decode("utf-8-sig")
+    assert list(csv.reader(io.StringIO(content.lstrip("﻿")))) == [
+        ["Order code", "Order date", "Order total"],
+        ["CANC5", "2026-04-26", "€23.00"],
+        ["EXPI4", "2026-05-02", "€15.00"],
+        ["OVER6", "2026-05-03", "€23.00"],
+        ["PAID1", "2026-04-24", "€33.00"],
+        ["PART2", "2026-04-29", "€46.00"],
+        ["PEND3", "2026-05-01", "€23.00"],
+    ]
+
+
+@pytest.mark.django_db
+def test_a_date_column_reaches_the_xlsx_path_with_and_without_a_style(
+    registered, user_with_perms, organizer
+):
+    """XLSX is the output format that can reject a value the CSV accepts.
+
+    Two things at once, and they belong together because one is the other's
+    counter-check:
+
+    * A **styled** datetime arrives as the string the style asks for -- the same
+      claim as for CSV, on the path where the exporter also has to decide *not*
+      to touch anything else.
+    * An **unstyled** datetime arrives as a real ``datetime`` a spreadsheet can
+      compute with, and does so at all: openpyxl refuses a timezone-aware value
+      outright ("Excel does not support timezones in datetimes"), and
+      ``ListExporter._render_xlsx`` passes our cells to ``ws.append`` unchanged.
+      Before ``as_spreadsheet_value()`` this raised ``TypeError`` inside a Celery
+      task -- not an ``ExportError`` naming the column, but five retries and
+      "Internal Error", after which the schedule drops out of the periodic query.
+      Found by ``exporter-dev`` alongside T-001 and pinned here at the level
+      where it hurt: a whole export, not a function.
+
+    The instant is 09:00 UTC and the event is in Auckland (+12:00 in April), so
+    the naive value written into the sheet has to read 21:00. A spreadsheet cell
+    cannot say which zone it is in, so writing UTC would be wrong by twelve hours
+    and look perfectly plausible. The money cell is checked in the same row for
+    the opposite reason: an unstyled number must stay a **number**, not become a
+    string that only looks like one, which is the whole reason the formatting
+    lives in the exporter and not in the compiler.
+    """
+    event = factories.make_event(
+        organizer, slug="sheet", name="Sheet", timezone="Pacific/Auckland"
+    )
+    with scopes_disabled():
+        catalog = factories.make_catalog(event)
+        order = factories.make_order(
+            event, "XLS01", Order.STATUS_PAID, Decimal("23.50")
+        )
+        factories.add_position(order, catalog.ticket, Decimal("23.50"), 1)
+    store_report(
+        event,
+        definition(
+            base="order",
+            columns=[
+                {"field": "order.code"},
+                {"field": "order.datetime"},
+                {"field": "order.datetime", "format": {"date_style": "date_only"}},
+                {"field": "order.total"},
+                {"field": "order.total", "format": {"number_style": "currency"}},
+            ],
+        ),
+        identifier="sheet",
+    )
+
+    rows = export_xlsx(event, user_with_perms, "sheet")
+    assert rows[0] == [
+        "Order code",
+        "Order date",
+        "Order date",
+        "Order total",
+        "Order total",
+    ]
+    code, unstyled_date, styled_date, unstyled_total, styled_total = rows[1]
+    assert code == "XLS01"
+    assert unstyled_date == dt.datetime(2026, 4, 24, 21, 0)
+    assert unstyled_date.tzinfo is None
+    assert styled_date == "2026-04-24"
+    assert unstyled_total == 23.5 and not isinstance(unstyled_total, str)
+    assert styled_total == "€23.50"
+
+
+@pytest.mark.django_db
+@pytest.mark.xfail(
+    strict=True,
+    reason="T-005: format_cell_value and as_spreadsheet_value resolve "
+    "event.timezone per cell, so a formatted date column costs one settings "
+    "lookup per row where one per export would do",
+)
+def test_finding_the_export_resolves_the_event_timezone_once_not_once_per_row(
+    monkeypatch, registered, user_with_perms, world
+):
+    """A formatted date column reads ``Event.timezone`` once per row.
+
+    Found while measuring what the T-001 fix costs, and it is the only thing in
+    that fix that scales with the row count. ``Event.timezone`` is not an
+    attribute: it is ``pytz_deprecation_shim.timezone(self.settings.timezone)``
+    (``pretix/base/models/event.py:233-235``), i.e. a hierarkey settings lookup
+    that walks event -> organizer -> global defaults. ``_format_temporal()`` and
+    ``as_spreadsheet_value()`` each call it for **every cell they touch**.
+
+    Counted here rather than timed, because a count is deterministic and a wall
+    clock on a shared machine is not. The baseline is whatever the compiler and
+    the exporter need anyway; the question is only whether adding a *style* adds
+    a fixed amount or a per-row amount, and the answer today is per-row:
+
+    ======================  =========  ===========================
+    report                  1 row      6 rows
+    ======================  =========  ===========================
+    unstyled date column    22 reads   22 reads   (flat, not ours)
+    ``date_only`` on it     23 reads   28 reads   (+1 per row)
+    ======================  =========  ===========================
+
+    What it costs: measured on the load fixture, a 94.666-row / 22-column CSV
+    export goes from 11,6 s to 50,4 s (x4,4) when three columns carry a style,
+    and about 17 s of the XLSX export's 69,7 s is the same lookup inside
+    ``as_spreadsheet_value``. One resolution is 178-345 us here against 1,8 us
+    for the conversion it guards -- two orders of magnitude of pure overhead
+    (``docs/performance.md`` 3.8). The absolute figure depends on the cache
+    backend (pretix' test settings use ``DummyCache``); the *shape* does not.
+
+    Not a correctness problem, and deliberately not a blocker: every value is
+    right, and a scheduled export that takes fifty seconds instead of twelve
+    still arrives. It is a fix of a handful of lines in somebody else's file, so
+    it is a finding: resolve the zone once per event -- next to
+    ``_cell_formats()``, which is already computed once per event for exactly
+    this reason -- and hand it down. Owner: ``exporter-dev``.
+
+    The assertion is deliberately loose (``<= 2``): the point is that the extra
+    work must not grow with the report, not that it must be exactly zero.
+    """
+    from pretix.base.models import Event
+
+    reads = []
+    original = Event.timezone.fget
+    monkeypatch.setattr(
+        Event,
+        "timezone",
+        property(lambda self: (reads.append(self.pk), original(self))[1]),
+    )
+
+    def count_reads(identifier, fmt):
+        store_report(
+            world.event,
+            definition(
+                base="order",
+                columns=[
+                    {"field": "order.code"},
+                    {"field": "order.datetime", "format": fmt},
+                ],
+            ),
+            identifier=identifier,
+        )
+        reads.clear()
+        _, lines = export_csv(world.event, user_with_perms, identifier)
+        return len(lines) - 1, len(reads)
+
+    plain_rows, plain_reads = count_reads("tz-plain", {})
+    styled_rows, styled_reads = count_reads("tz-styled", {"date_style": "date_only"})
+
+    assert plain_rows == styled_rows == 6
+    assert styled_reads - plain_reads <= 2, (
+        f"formatting {styled_rows} rows cost {styled_reads - plain_reads} extra "
+        f"timezone resolutions ({plain_reads} -> {styled_reads})"
+    )
 
 
 # ===========================================================================

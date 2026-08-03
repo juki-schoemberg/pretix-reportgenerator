@@ -516,6 +516,61 @@ def test_the_apply_page_refuses_to_write_until_a_choice_is_made(
 
 
 @pytest.mark.django_db
+def test_the_apply_page_ignores_a_hand_posted_keep_strategy(
+    client_with_perms, event, organizer
+):
+    """S-006, the template half: the page offers ``abort`` and ``skip`` only.
+
+    ``keep`` belongs to the event copy and switches off the compiler check in
+    ``resolve_definition``. ``position.price`` on base ``order`` resolves but
+    needs an aggregate, so this template must not become a report.
+    """
+    template = make_template(
+        organizer,
+        name="Needs an aggregate",
+        base="order",
+        definition=definition(base="order", columns=("position.price",)),
+    )
+    url = report_path("event.reports.templates.apply", event, template=template.pk)
+
+    response = client_with_perms.post(url, {"action": "confirm", "strategy": "keep"})
+    assert response.status_code == 200
+    with scopes_disabled():
+        assert ReportDefinition.objects.filter(event=event).count() == 0
+
+    # Control group: the two strategies the page really offers behave as before.
+    for strategy in ("abort", "skip"):
+        response = client_with_perms.post(
+            url, {"action": "confirm", "strategy": strategy}
+        )
+        assert response.status_code == 200, strategy
+    with scopes_disabled():
+        assert ReportDefinition.objects.filter(event=event).count() == 0
+
+
+@pytest.mark.django_db
+def test_exporting_a_template_survives_a_stored_lone_surrogate(
+    client_with_perms, organizer, event
+):
+    """S-003: ``ensure_ascii=True`` keeps the download a download.
+
+    A template row written before the payload gate rejected unpaired
+    surrogates can still hold one; serialising it with ``ensure_ascii=False``
+    raises ``UnicodeEncodeError`` on the way into the response body.
+    """
+    poisoned = definition(columns=("order.code",))
+    poisoned["columns"][0]["label"] = "x\ud800"
+    template = make_template(organizer, name="Poisoned", definition=poisoned)
+
+    response = client_with_perms.get(
+        organizer_path("organizer.templates.export", organizer, template=template.pk)
+    )
+    assert response.status_code == 200
+    document = json.loads(response.content.decode("utf-8"))
+    assert document["definition"]["columns"][0]["label"] == "x\ud800"
+
+
+@pytest.mark.django_db
 def test_the_apply_view_is_permission_checked(client, organizer, event, template):
     user = limited_user(organizer, "read-only@example.org", ["event.orders:read"])
     client.login(email=user.email, password=PASSWORD)

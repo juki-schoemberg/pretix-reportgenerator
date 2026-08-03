@@ -1,6 +1,7 @@
 # Performance: 100.000 Positionen, gemessen
 
-Erstellt vom `test-engineer` in Welle 3. Quelle aller Zahlen:
+Erstellt vom `test-engineer` in Welle 3, fortgeschrieben am **2026-08-03** nach
+der Verifikation von T-001 bis T-003. Quelle aller Zahlen:
 `tests/test_performance.py`, ausgeführt mit
 
 ```bash
@@ -10,6 +11,12 @@ pytest tests/test_performance.py -m performance -q -s
 Die Tests sind mit `performance` markiert und laufen im Normalfall **nicht** mit
 (`pytest -m "not performance"`, siehe `CLAUDE.md`). Die Tabelle unten wird vom
 Testmodul selbst am Ende des Laufs gedruckt; sie ist hier unverändert übernommen.
+
+**Was sich am 2026-08-03 geändert hat:** zwei neue Messungen (XLSX in voller
+Größe, Abschnitt 3.6b; Kosten der Spaltenformatierung, Abschnitt 3.8), die
+korrigierte Query-Formel aus T-003 (Abschnitt 3.3) und ein neuer Befund, der aus
+der Messung selbst kommt (**T-005**, Abschnitt 3.8). Die alten Zahlen stehen
+unverändert daneben; wo zwei Läufe verglichen werden, ist das ausgewiesen.
 
 ---
 
@@ -62,19 +69,43 @@ Aufbau der 100.000 Positionen: **22,7 s** über `bulk_create`.
 
 ## 3. Messwerte
 
+Lauf vom **2026-08-03**, nach den Fixes zu T-001 und T-002:
+
 ```
 measurement                                        rows  queries   seconds  note
-build fixture                                    100000        -    22.710  50000 orders, 50000 answers
-narrow (3 columns, base orderposition)            94666        1     4.323  21899 rows/s; small event: 945 rows in 0.045s (x100)
-wide (22 columns, base orderposition)             94666        1    11.099  8529 rows/s; small event: 945 rows in 0.109s (x100)
-wide (16 columns, base order, 2 join columns)     49484      151    14.226  1 + 3 x ceil(rows/1000)
-same report without the two join columns          49484        1     1.928  constant at any size
+build fixture                                    100000        -    21.862  50000 orders, 50000 answers
+narrow (3 columns, base orderposition)            94666        1     4.382  21604 rows/s; small event: 945 rows in 0.045s (x100)
+wide (22 columns, base orderposition)             94666        1    11.277  8395 rows/s; small event: 945 rows in 0.112s (x100)
+wide (16 columns, base order, 2 join columns)     49484      151    14.054  1 + 3 x ceil(rows/1000)
+same report without the two join columns          49484        1     2.116  constant at any size
 count() on the wide order report                  49484        1     0.003
-preview (20 of 100.000 rows)                         20        -     0.057
-full drain under tracemalloc                      94666        1    44.105  peak 6.4 MiB; time inflated ~4x by the tracer
-CSV through the exporter                          94666        -     4.542  1.5 MiB of CSV
-filtered + sorted position report                 59255        1     2.825  gte 25.00, desc
+preview (20 of 100.000 rows)                         20        -     0.056
+full drain under tracemalloc                      94666        1    45.197  peak 6.5 MiB; time inflated ~4x by the tracer
+CSV through the exporter                          94666        -     4.449  1.5 MiB of CSV
+XLSX through the exporter (22 columns)            94666        -    69.718  8.4 MiB of XLSX; 1358 rows/s
+CSV, 22 columns, no column format                 94666        -    11.567  _cell_formats() -> None, rows pass through
+CSV, 22 columns, three column formats             94666        -    50.443  x4.36 of the unformatted run
+filtered + sorted position report                 59255        1     2.778  gte 25.00, desc
 ```
+
+Der Lauf aus Welle 3, zum Vergleich (dieselbe Maschine, dieselben Daten):
+
+```
+narrow (3 columns, base orderposition)            94666        1     4.323
+wide (22 columns, base orderposition)             94666        1    11.099
+wide (16 columns, base order, 2 join columns)     49484      151    14.226
+same report without the two join columns          49484        1     1.928
+full drain under tracemalloc                      94666        1    44.105  peak 6.4 MiB
+CSV through the exporter                          94666        -     4.542  1.5 MiB of CSV
+```
+
+**Die Fixes zu T-001 und T-002 kosten nichts, solange kein Format gesetzt ist.**
+Jede Zeile, die es in beiden Läufen gibt, liegt innerhalb der Messstreuung
+(±2 %), und die Query-Anzahlen sind identisch. `MoneyField.from_db_value`
+quantisiert je Wert und ist in den 11,3 s der 22 Spalten nicht sichtbar; der
+Renderer aus T-001 läuft gar nicht erst an, weil `_cell_formats()` bei einem
+Report ohne Stile `None` liefert (Abschnitt 3.8). Was ein *gesetztes* Format
+kostet, ist die vorletzte Zeile — und ein eigener Befund.
 
 ### 3.1 Schmaler Report
 
@@ -118,18 +149,29 @@ Report bei 7× so vielen Spalten. Der Aufpreis steckt in einer einzigen Query;
 |---|---|---|
 | Queries **mit** den zwei `join`-Spalten | **151** | **4** |
 | Queries **ohne** sie | **1** | **1** |
-| Laufzeit mit | 14,23 s | — |
-| Laufzeit ohne | 1,93 s | — |
+| Laufzeit mit | 14,05 s | — |
+| Laufzeit ohne | 2,12 s | — |
 
 Die Formel ist exakt
 
 ```
-Queries = 1 + (Prefetch-Ebenen) × ceil(Zeilen / DEFAULT_CHUNK_SIZE)
+Queries = 1 + Ebenen × ceil(Zeilen / DEFAULT_CHUNK_SIZE)
         = 1 + 3 × ceil(49484 / 1000)
         = 151
 ```
 
 und wird im Test als Gleichung geprüft, nicht als Größenordnung.
+
+**Ebenen ≠ `join`-Spalten** (Nachtrag 2026-08-03). Seit dem S-005-Fix in
+`query/relations.py::join_leaf_to_attr` leitet sich der `to_attr` des Blattes
+aus dem ab, was das Queryset *tut* — Relation, Bedingung, Storno-Regel, inneres
+`select_related` — statt daraus, welche Spalte zuerst gefragt hat. Damit teilen
+sich `join`-Spalten, die dieselben Zeilen holen, **eine** Ebene: zwanzig
+identische kosten so viel wie eine (gemessen von `query-dev`: 2 statt 20). Die
+beiden hier sind wirklich verschieden (`item.name` braucht ein
+`select_related("item")` auf den geholten Positionen, `answer.bulk-question`
+trägt eine Fragenbedingung), deshalb steht in der Formel weiterhin 3 und die
+151 sind unverändert.
 
 **Das ist kein N+1** — die Kosten je Zeile *sinken*, wenn der Report wächst:
 4/494 = 0,0081 Queries je Zeile beim kleinen Event, 151/49.484 = 0,0031 beim
@@ -140,10 +182,13 @@ backend-unabhängige String-Aggregation hat (`StringAgg` ist PostgreSQL-only), u
 `QuerySet.iterator(chunk_size=1000)` führt Prefetches **je Chunk** aus. Genau das
 kauft die konstante Speichergrenze aus Abschnitt 3.5.
 
-Es ist aber auch **nicht das, was `query/columns.py` zusagt** („Kostet genau eine
-Query pro Prefetch-Ebene, unabhängig von der Zeilenzahl"). Die Zusage stimmt für
-einen Chunk. Als Finding 3 in `handoff/blockers.md` festgehalten; Kosten und
-Gegenmittel dort.
+Es war aber auch **nicht das, was `query/columns.py` zusagte** („Kostet genau eine
+Query pro Prefetch-Ebene, unabhängig von der Zeilenzahl"). Die Zusage stimmte für
+einen Chunk. Als T-003 in `handoff/blockers.md` festgehalten und dort am
+2026-08-03 geschlossen: `query-dev` hat den Docstring auf die Formel oben
+korrigiert. Der Test hatte nie ein `xfail` — er prüft das *tatsächliche*
+Verhalten als Gleichung und wird rot, wenn sich das Verhalten ändert, nicht wenn
+sich die Dokumentation ändert.
 
 **Praktische Folge:** wer einen sechsstelligen Report mit `join`-Spalten
 terminiert, sollte wissen, dass daraus dreistellig viele Roundtrips werden. Ohne
@@ -211,6 +256,33 @@ Die 20-MB-Grenze der pretix-Exportmail wird von einem schmalen Report mit
 liegt hochgerechnet bei etwa 15–20 MiB und damit an der Grenze — dafür gibt es
 das `row_limit`-Feld des Exporters.
 
+### 3.6b Export als XLSX (neu, 2026-08-03)
+
+In Welle 3 stand hier „nicht messbar". Das war zu kurz gegriffen: nicht die
+Plattform kann kein XLSX, sondern `ListExporter._render_xlsx` **ohne**
+`output_file` — es speichert in eine `NamedTemporaryFile` und öffnet sie danach
+ein zweites Mal über ihren Namen, was unter Windows `PermissionError` gibt. Mit
+`output_file`, also so wie pretix' Exportdienst jede Datei schreibt, läuft der
+Pfad hier genauso.
+
+| | |
+|---|---|
+| Zeilen | 94.666, 22 Spalten |
+| Laufzeit | **69,7 s** |
+| Dateigröße | 8,4 MiB |
+| Durchsatz | ≈ 1.360 Zeilen/s |
+
+**Rund 15-mal langsamer als dieselbe Ausgabe als CSV** (4,4 s). Zwei Ursachen,
+beide außerhalb dieses Plugins und beide unvermeidbar an dieser Stelle:
+`openpyxl` baut je Zelle ein XML-Element (`SafeWorkbook(write_only=True)` hält
+dabei immerhin den Speicher flach), und je Datumszelle läuft
+`as_spreadsheet_value()` — das sind rund 17 der 70 Sekunden, siehe 3.8 und T-005.
+
+Praktische Folge für die Terminierung: ein sechsstelliger Report als XLSX liegt
+über der Minute und damit im Bereich, in dem ein Celery-`soft_time_limit`
+interessant wird. 8,4 MiB bleiben unter der 20-MB-Mailgrenze, ein breiterer
+Report nicht mehr sicher.
+
 ### 3.7 Filtern und Sortieren
 
 | | |
@@ -225,6 +297,69 @@ Sortiert wird in der Datenbank. Der Test prüft zusätzlich, dass das Ergebnis
 tatsächlich sortiert ist — bei 59.255 Zeilen mit sehr vielen Gleichständen, also
 genau dort, wo ein fehlender `pk`-Tiebreaker über `LIMIT`/`OFFSET`-Seiten Zeilen
 doppelt und Zeilen gar nicht liefern würde.
+
+### 3.8 Was die Spaltenformatierung kostet (neu, 2026-08-03) — Befund T-005
+
+Der T-001-Fix hat einen Renderer je Zelle zwischen Compiler und Datei gesetzt.
+Derselbe Report, dieselben 94.666 Zeilen, dieselben 22 Spalten, einmal ohne und
+einmal mit drei gesetzten Stilen (`date_only` auf `order.datetime`, `currency`
+auf `order.total`, `localized` auf `position.price`):
+
+| | Laufzeit | Faktor |
+|---|---|---|
+| kein Format gesetzt | **11,6 s** | — |
+| drei Spalten mit Format | **50,4 s** | **×4,36** |
+
+Ohne gesetztes Format ist es exakt der alte Weg: `_cell_formats()` liefert `None`
+und die Zeilen gehen unverändert durch. Das ist im Test als Eigenschaft geprüft,
+nicht als Laufzeit — eine Uhr kann „gar keine Arbeit" nicht von „ein bisschen
+Arbeit" unterscheiden.
+
+**Der Faktor 4,36 steckt fast vollständig in einer Zeile.** `_format_temporal()`
+löst `event.timezone` je Zelle auf, und `Event.timezone` ist kein Attribut,
+sondern `pytz_deprecation_shim.timezone(self.settings.timezone)`
+(`pretix/base/models/event.py:233-235`) — ein hierarkey-Settings-Lookup über
+Event → Organizer → globale Defaults. Einzeln gemessen:
+
+| Aufruf | Zeit |
+|---|---|
+| `event.timezone` (Settings unangetastet) | **178 µs** |
+| `event.timezone` (Settings in derselben Transaktion geschrieben) | **345 µs** |
+| `pytz_deprecation_shim.timezone("Europe/Berlin")` allein | 0,08 µs |
+| `timezone.localtime(wert, tz)` mit hochgezogener Zone | **1,8 µs** |
+| `timezone.localtime(wert, event.timezone)` | 344 µs |
+| `format_cell_value` einer Geldzelle (`currency`) | 0,34 µs |
+| `format_cell_value` einer Datumszelle (`date_only`) | 401 µs |
+
+Die Umrechnung selbst kostet 1,8 µs, das Beschaffen der Zeitzone das
+Zweihundertfache. Eine Geldzelle ist von alledem nicht betroffen, weil
+`event.currency` eine Modellspalte ist (0,02 µs) — es geht ausschließlich um
+Datumsspalten. `as_spreadsheet_value()` macht dasselbe auf dem XLSX-Weg und
+erklärt etwa 17 der 70 Sekunden aus 3.6b.
+
+Gezählt statt gestoppt, weil eine Zählung deterministisch ist
+(`tests/test_integration.py::test_finding_the_export_resolves_the_event_timezone_once_not_once_per_row`):
+
+| Report | 1 Zeile | 6 Zeilen |
+|---|---|---|
+| Datumsspalte ohne Stil | 22 Auflösungen | 22 Auflösungen |
+| dieselbe Spalte mit `date_only` | 23 | 28 |
+
+Die Grundlast von 22 ist konstant und gehört nicht uns (Compiler, Exporter,
+`init_event_exporter`). Der Aufschlag ist **genau eine Auflösung je formatierter
+Datumszelle**.
+
+**Kein Korrektheitsproblem und kein Blocker** — jeder Wert ist richtig, und ein
+terminierter Export, der 50 statt 12 Sekunden braucht, kommt trotzdem an. Aber es
+ist ein paar Zeilen wert: die Zone einmal je Event auflösen, dort wo
+`_cell_formats()` ohnehin schon einmal je Event gebaut wird, und durchreichen.
+Als **T-005** in `handoff/blockers.md`, Zuständigkeit `exporter-dev`.
+
+Einschränkung, die dazugehört: der Absolutwert hängt am Cache-Backend. pretix'
+Testeinstellungen benutzen `DummyCache` (`pretix/testutils/settings.py:74-78`),
+produktiv steht dort Redis. Ein Redis-Roundtrip ist nicht offensichtlich billiger
+als der DB-Treffer hier. Was **nicht** von der Konfiguration abhängt, ist die
+Form: ein Lookup je Zelle statt einem je Export.
 
 ## 4. Beleg: die Query-Anzahl wächst nicht mit der Zeilenzahl
 
@@ -247,12 +382,15 @@ zugeschrieben wird und nicht der Breite des Reports.
 - **PostgreSQL.** Kein Backend verfügbar, siehe Abschnitt 1. Betroffen wären vor
   allem: die 151 Roundtrips aus 3.3 (dort teurer), die `Coalesce`/`Subquery`-
   Ausgabetypen, `nulls_last` und der `Cast(answer AS date)` aus
-  `computed.age.*`. Auch Finding 2 in `handoff/blockers.md` ist backend-abhängig.
-- **XLSX.** `_render_xlsx` ohne `output_file` öffnet unter Windows eine
-  `NamedTemporaryFile` ein zweites Mal über ihren Namen und wirft
-  `PermissionError` — eine Plattformgrenze von pretix, kein Fehler des Plugins
-  (`handoff/status/exporter-dev.md`). Die XLSX-Bytes für 100.000 Zeilen sind
-  daher hier nicht messbar; unter Linux nachzuholen.
+  `computed.age.*`. Für **T-002** ist die Frage inzwischen kleiner geworden, aber
+  nicht weg: der Fix hängt an `MoneyField.from_db_value` und wirkt damit
+  backend-unabhängig auf der Python-Seite — genau deshalb wäre eine Gegenprobe
+  auf PostgreSQL billig und aussagekräftig. **T-004** (Abschnitt „Befunde") ist
+  weiterhin voll backend-abhängig.
+- **XLSX ohne `output_file`.** Der Bytepfad (`render()` ohne Dateihandle) bleibt
+  unter Windows unerreichbar, siehe 3.6b. Der Dateipfad ist seit 2026-08-03
+  gemessen; offen ist nur noch die Variante, die pretix für den Download im
+  Browser benutzt.
 - **Nebenläufigkeit.** Alle Messungen sind Einzelläufe ohne Last daneben.
 - **Der Multi-Event-Export über viele Events.** Fachlich in
   `tests/test_integration.py` abgedeckt, aber nicht in relevanter Größe gemessen;
@@ -264,10 +402,23 @@ zugeschrieben wird und nicht der Breite des Reports.
 pytest tests/test_performance.py -m performance -q -s
 ```
 
-Dauer im Ganzen etwa 110 s, davon 23 s Datenaufbau. Die Testdaten sind über
-`tests.factories.SEED` festgelegt; zwei Läufe messen dieselbe Arbeit. Der
-Datensatz lebt in einer Transaktion, die am Modulende zurückgerollt wird, also
-bleibt nichts in der Testdatenbank zurück.
+Dauer im Ganzen etwa **270 s**, davon 22 s Datenaufbau (Welle 3: 110 s — der
+Zuwachs sind die zwei neuen Messungen aus 3.6b und 3.8, die zusammen gut zwei
+Minuten brauchen). Die Testdaten sind über `tests.factories.SEED` festgelegt;
+zwei Läufe messen dieselbe Arbeit. Der Datensatz lebt in einer Transaktion, die
+am Modulende zurückgerollt wird, also bleibt nichts in der Testdatenbank zurück.
 
 Größe verstellen: `BIG_ORDERS` / `POSITIONS_PER_ORDER` oben in
 `tests/test_performance.py`.
+
+## 7. Befunde aus diesem Dokument
+
+| Nr. | Stand | Kurz |
+|---|---|---|
+| T-001 | **behoben** 2026-08-03 | `ColumnFormat` wirkte nur in der Vorschau |
+| T-002 | **behoben** 2026-08-03 | aggregierte Geldspalten ohne Nachkommastellen |
+| T-003 | **behoben** 2026-08-03 | Query-Zusage für `join` galt nur je Chunk (3.3) |
+| T-004 | offen | dasselbe wie T-002 für `DataType.DECIMAL` (`position.tax_rate`) |
+| T-005 | offen | `event.timezone` je Zelle statt je Export (3.8) |
+
+Volltext, Reproduktion und Zuständigkeit: `handoff/blockers.md`.

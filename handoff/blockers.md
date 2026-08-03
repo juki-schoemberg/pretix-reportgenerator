@@ -321,3 +321,272 @@ oder eigene `dispatch_uid`s benutzen.
 
 Details, alle weiteren offenen Punkte und die getroffenen Entscheidungen:
 `handoff/status/integrator.md`.
+
+
+---
+
+# T-001 bis T-003 verifiziert und geschlossen, zwei neue Befunde (test-engineer, 2026-08-03)
+
+Gegenprüfung der Fixes, die `exporter-dev`, `frontend-dev`, `registry-dev` und
+`query-dev` zu meinen drei Findings aus Welle 3 geliefert haben. **Kein neuer
+Blocker.** Dieser Abschnitt schließt drei Befunde und eröffnet zwei kleinere, die
+beide beim Gegenprüfen entstanden sind — nicht beim Lesen des Fixes, sondern beim
+Messen daneben.
+
+Kein Produktivcode geändert. Geändert: `tests/test_integration.py`,
+`tests/test_performance.py`, `docs/performance.md`, diese Datei.
+
+## Ergebnis
+
+| Befund | Fix von | Datei | Status |
+| --- | --- | --- | --- |
+| T-001 `ColumnFormat` nur in der Vorschau | exporter-dev + frontend-dev | `exporters.py` (`format_cell_value`, `format_export_cell`, `_cell_formats`), `views/api.py` (`get_cell_renderer`) | behoben, verifiziert |
+| T-002 aggregierte Geldspalten ohne Skala | registry-dev + query-dev | `registry/annotations.py` (`MoneyField`), `query/relations.py` (`aggregate_expression`) | behoben, verifiziert |
+| T-003 Query-Zusage für `join` | query-dev | Docstring `query/columns.py` | behoben, verifiziert |
+| T-004 dasselbe wie T-002 für `DataType.DECIMAL` | — | `query/relations.py` | **neu, offen** |
+| T-005 `event.timezone` je Zelle statt je Export | — | `exporters.py` | **neu, offen** |
+
+Die beiden Reproduzierer in `tests/test_integration.py` tragen kein `xfail` mehr.
+Die Assertions sind **unverändert** geblieben: ein Reproduzierer, von dem
+nachgewiesen ist, dass er mit neutralisiertem Fix wieder umfällt, ist der beste
+Regressionswächter, den ein Finding hinterlassen kann, und ihn in dem Moment
+umzuschreiben, in dem er grün wird, wirft genau das weg.
+
+## Wie geprüft wurde
+
+Drei Stufen je Finding, in dieser Reihenfolge:
+
+1. **Grün ohne `--runxfail`.** Beide meldeten vorher `XPASS(strict)`.
+2. **Misst er noch das Ursprungsproblem?** Nicht „ist grün", sondern: derselbe
+   Aufbau, dieselben Zellen, und die erwarteten Zeichenketten stehen jetzt
+   zusätzlich literal im Test (`"2026-04-24"` statt nur „ungleich").
+3. **Neutralisierte Gegenprobe.** Fix zur Laufzeit abgeschaltet (`monkeypatch`,
+   kein Produktivcode angefasst), Test muss an *derselben* Stelle wieder fallen.
+   Ergebnisse unten.
+
+Dazu, weil ein Fix, der einen Reproduzierer grün macht, nicht dasselbe ist wie ein
+Fix, der trägt: sieben neue Tests, die genau dort suchen, wo der jeweilige Fix
+noch falsch sein könnte.
+
+## T-001 — behoben
+
+`ColumnFormat.date_style/number_style/boolean_style` wirken jetzt im Export.
+Geteilter Renderer in `exporters.py`, den die Vorschau über
+`views/api.py::get_cell_renderer()` mitbenutzt.
+
+**Gegenprobe.** Mit `exporters.format_export_cell` zur Laufzeit durch die
+Identität ersetzt, fällt der Reproduzierer wieder an derselben Assertion, und
+zwar auf genau die zwei Zeilen, die im Wellen-3-Eintrag oben stehen:
+
+```
+iso       -> ['PAID1', '2026-04-24 09:00:00+00:00']
+date_only -> ['PAID1', '2026-04-24 09:00:00+00:00']
+```
+
+**Wo ich gesucht habe, ob der Fix trägt** — fünf neue Tests, alle grün:
+
+* **Alle zwölf Stile, nicht die zwei des Reproduzierers.** Fünf `DateStyle`, drei
+  `NumberStyle`, drei `BooleanStyle` in einer Zeile, einmal durch `api/preview/`
+  über HTTP und einmal durch `ListExporter` in eine CSV. Verglichen wird beides:
+  Vorschau **gegen** Datei *und* beide gegen die ausgeschriebenen
+  Erwartungswerte. Nur das erste wäre auch von zwei gleich kaputten Renderern
+  erfüllt — das ist die Form, die T-001 hatte.
+* **Verdeckte Spalten verschieben die Formate nicht.** `CompiledReport.columns`
+  hat verdeckte Spalten schon entfernt, `definition.columns` nicht; eine Paarung
+  über den falschen Index würde jedes Format eine Spalte nach links schieben.
+  Stiller falscher Wert, kein Fehler. Der Test setzt die verdeckte Spalte
+  **zwischen** die beiden sichtbaren und gibt ihr ein eigenes Format, damit ein
+  Off-by-one doppelt auffällt.
+* **Multi-Event: je Event das eigene Format und die eigene Zeitzone.** Zwei
+  Events, derselbe Identifier, zwei Definitionen, Berlin und Auckland, derselbe
+  Zeitpunkt. Ein Renderer, der die Serverzone oder das Format des ersten Events
+  benutzt, liefert eine Tabelle, in der eine der beiden Zeilen falsch ist und
+  nichts in der Datei das sagt.
+* **Terminierter Export.** Das Format wird aus dem **Mailanhang** eines
+  `ScheduledEventExport` gelesen, über den echten `run_scheduled_exports`. Für
+  einen terminierten Report gibt es zum Laufzeitpunkt keine Vorschau, nur die
+  Datei, die ankommt — der einzige Weg, auf dem ein Formatierungsfehler
+  monatelang unbemerkt bleibt.
+* **XLSX, mit und ohne Stil.** Deckt zugleich den Zusatzfund von `exporter-dev`
+  ab (siehe unten).
+
+**Zusatzfund von `exporter-dev`, hier auf Exportebene festgenagelt.** Ein
+XLSX-Export einer Datumsspalte **ohne** Stil starb vorher an openpyxls Ablehnung
+zeitzonenbehafteter `datetime`-Werte — kein `ExportError`, der die Spalte nennt,
+sondern `TypeError` im Celery-Task, fünf Retries und „Internal Error", danach
+fällt der Zeitplan aus der periodischen Abfrage. `as_spreadsheet_value()` behebt
+das. Der Test dazu prüft nicht nur, dass es nicht mehr kracht, sondern **welche
+Uhrzeit** in der Zelle steht: Auckland-Event, 09:00 UTC, in der Tabelle muss
+21:00 stehen. Eine Tabellenzelle kann nicht sagen, in welcher Zone sie ist — UTC
+hineinzuschreiben wäre um zwölf Stunden falsch und völlig unauffällig. Erwähnung
+verdient hat der Fund, ja: er war eine Produktionsgefahr auf einem Pfad, den kein
+Nutzer besonders konfigurieren muss (Datumsspalte + XLSX + Zeitplan), und er
+steht jetzt in `docs/performance.md` 3.6b und hier.
+
+**Bewusste Grenze, kein Restfehler, aber sie gehört aufgeschrieben.** Für Spalten
+**ohne** gesetzten Stil ist die Vorschau weiterhin hübscher als die Datei,
+gemessen an derselben Zeile:
+
+```
+Vorschau: ['CENT1', '€23.50', 'April 24, 2026, 9 a.m.',   'No']
+Datei:    ['CENT1', '23.50',  '2026-04-24 09:00:00+00:00', 'False']
+```
+
+Das ist die dokumentierte Politik von `format_export_cell` („nur formatieren, was
+die Definition ausdrücklich verlangt") und sie hat zwei gute Gründe: eine
+XLSX-Zelle soll eine echte Zahl bleiben, und Dateien bestehender Reports sollen
+sich nicht ändern. Ich halte das für richtig. Der ursprüngliche Satz „die Vorschau
+darf nicht schöner sein als der Export" gilt damit für *gesetzte* Stile und nicht
+für die Vorbelegung — wer das später anders entscheidet, soll wissen, dass es
+eine Entscheidung war und kein Versehen.
+
+Dasselbe in klein zwischen den Ausgabeformaten: eine Datumsspalte ohne Stil
+schreibt in die CSV `2026-04-24 09:00:00+00:00` und in die XLSX
+`2026-04-24 21:00` (Auckland). Beides ist vertretbar — die CSV ist eindeutig, die
+Tabelle lokal —, aber es sind zwei Wanduhren für dieselbe Zelle desselben
+Reports.
+
+## T-002 — behoben
+
+`MoneyField` mit `from_db_value` in `registry/annotations.py`, plus
+`aggregate_expression` in `query/relations.py` für das nutzerwählbare Aggregat.
+
+**Gegenprobe, beide Hälften einzeln.** Das ist der Punkt: die zwei Fixes decken
+einander nicht ab, jeder fällt auf seinen eigenen Spalten aus.
+
+```
+                                       order.  payment.  SUM(position.
+                                       total   sum_conf  price)
+MoneyField.from_db_value entfernt  ->  23.50   20.5      23.50
+aggregate_expression umgangen      ->  23.50   20.50     23.5
+```
+
+`order.total` bleibt in beiden Fällen richtig — es ist eine Modellspalte und war
+nie betroffen. Genau deshalb steht es im Test daneben: es ist der Maßstab, an dem
+sich die anderen *innerhalb derselben Zeile* messen lassen müssen.
+
+**Vollständigkeit statt Stichprobe.** Ein Fix, der gegen seinen eigenen
+Reproduzierer geprüft wird, beweist den Reproduzierer. Deshalb einmal die
+Aufzählung: **jedes** Feld, für das die Registry `DataType.MONEY` deklariert, in
+**jedem** Aggregat, das es zulässt, in einer Zeile — vierzehn Geldzellen plus
+`order.total`. Aus der Registry ermittelt, nicht geraten:
+
+| Weg | Spalten | Ergebnis |
+| --- | --- | --- |
+| Modellspalte | `order.total` | 23.50 |
+| Registry-Ausdrücke | `payment.sum_confirmed`, `refund.sum_done`, `order.pending_sum`, `position.net_price` | alle zweistellig |
+| Nutzeraggregate | `position.price`, `position.tax_value`, `item.default_price` × `sum`/`min`/`max`/`avg` | alle zwölf zweistellig |
+
+`join` steht nicht in der Tabelle, weil **kein** Geldfeld es anbietet (geprüft,
+nicht angenommen: `position.price` mit `join` scheitert schon in der
+Kompilierung), und `count`/`count_distinct` nicht, weil eine Anzahl keine Skala
+verlieren kann. Auf Basis `orderposition` ist kein Geldfeld aggregierbar. Damit
+ist die Aufzählung geschlossen.
+
+**Zwei Ränder, die dabei mitgeprüft sind:**
+
+* `AVG` wird auf zwei Stellen quantisiert — die bewusste Entscheidung von
+  `query-dev`. Mit umgangener Quantisierung liefert dieselbe Zelle
+  `Decimal("14.3333333333333")`, dreizehn Stellen aus SQLites Float-Pfad, die
+  PostgreSQL anders beantworten würde. Das ist das Argument, und jetzt ist es
+  gemessen: die ungerundete Zahl ist nicht genauer, nur weniger vergleichbar.
+  Eigener Test, damit die Entscheidung nicht in einer Tabelle untergeht.
+* `SUM`/`MIN`/`MAX`/`AVG` über **keine** Zeile bleiben `None` und werden nicht zu
+  `0.00`. Ein Konverter, der auf jedem Wert läuft, ist ein `if` davon entfernt,
+  „diese Bestellung hat keine Positionen" in „diese Bestellung ist null Euro wert"
+  zu verwandeln. `count` bleibt bewusst `0`.
+
+## T-003 — behoben
+
+Docstring in `query/columns.py` sagt jetzt `1 + Ebenen × ceil(Zeilen /
+chunk_size)`. Nachgemessen: die Zahlen sind unverändert (151 bei 49.484 Zeilen, 4
+bei 494), und das ist keine Selbstverständlichkeit — der S-005-Fix von `query-dev`
+lässt sich Prefetch-Ebenen jetzt zwischen `join`-Spalten teilen, die dieselben
+Zeilen holen. Die beiden Spalten im Lasttest sind wirklich verschieden, deshalb
+bleibt es bei drei Ebenen. Der Docstring meines Tests zitierte noch die alte
+Zusage; das ist nachgeführt, samt der Begründung, warum `Ebenen` nicht dasselbe
+ist wie `join`-Spalten.
+
+## T-004 (niedrig) — dasselbe wie T-002, eine Datentypgrenze weiter
+
+*Betroffen:* `query/relations.py::aggregate_expression` (query-dev), mit
+`registry-dev`. Gefunden beim Aufzählen der Geldpfade für die T-002-Prüfung.
+
+Der T-002-Fix hängt an `DataType.MONEY`. `DataType.DECIMAL` geht durch dieselben
+`Sum`/`Min`/`Max`/`Avg` mit dem einfachen `DecimalField` des Modells als
+`output_field` — also genau in dem Zustand, in dem Geld vorher war.
+`position.tax_rate` ist ein Kernfeld der Registry, der Editor bietet es mit allen
+sechs Aggregaten an, und pretix deklariert es als
+`DecimalField(max_digits=7, decimal_places=2)`
+(`pretix/base/models/orders.py:2558`). Gemessen, eine Bestellung mit 19,00 % und
+7,00 %:
+
+```
+Basis orderposition, Modellspalte  -> "19.00", "7.00"
+Basis order, min/max/sum/avg       -> "7", "19", "26", "13"
+```
+
+Beide Symptome von T-002: eine Datei, die sich selbst widerspricht
+(`Tax rate` = `19.00`, `Highest tax rate` = `19`), und zwei Installationen, die
+sich widersprechen, weil PostgreSQL die Skala von `numeric(7,2)` durch `SUM`
+behält.
+
+*Test:* `test_finding_an_aggregated_decimal_column_keeps_its_scale`,
+`xfail(strict=True)`.
+
+*Warum nicht derselbe Einzeiler:* `MoneyField` darf zwei Nachkommastellen
+festverdrahten, weil jede Geldspalte in pretix zwei hat. `DataType.DECIMAL`
+umfasst Felder verschiedener Skalen, und die Registry deklariert heute keine. Zu
+entscheiden ist also zwischen „Skala in `ReportField` mitführen" und „auf die
+`decimal_places` des Modellfeldes quantisieren" — eine Entscheidung, kein Fix.
+
+*Schwere niedrig:* ein Steuersatz ist kein Betrag, den jemand aufaddiert.
+
+## T-005 (niedrig) — der Export löst `event.timezone` je Zelle auf
+
+*Betroffen:* `exporters.py` (`_format_temporal`, `as_spreadsheet_value`),
+exporter-dev. Entstanden **mit** dem T-001-Fix; keine Einzelsuite konnte es
+sehen, weil es erst bei fünfstelligen Zeilenzahlen wehtut.
+
+`Event.timezone` ist kein Attribut, sondern
+`pytz_deprecation_shim.timezone(self.settings.timezone)`
+(`pretix/base/models/event.py:233-235`) — ein hierarkey-Lookup über Event →
+Organizer → globale Defaults. Der Renderer ruft ihn für **jede** Zelle auf, die er
+anfasst.
+
+Gezählt statt gestoppt, weil eine Zählung deterministisch ist:
+
+| Report | 1 Zeile | 6 Zeilen |
+| --- | --- | --- |
+| Datumsspalte ohne Stil | 22 Auflösungen | 22 |
+| dieselbe Spalte mit `date_only` | 23 | **28** |
+
+Grundlast konstant, Aufschlag genau eine Auflösung je formatierter Datumszelle.
+In Zahlen, auf 94.666 Zeilen × 22 Spalten: CSV **11,6 s → 50,4 s (×4,4)**, sobald
+drei Spalten einen Stil tragen; rund 17 der 70 XLSX-Sekunden sind derselbe Lookup
+in `as_spreadsheet_value`. Eine Auflösung kostet hier 178–345 µs, die Umrechnung,
+die sie ermöglicht, 1,8 µs.
+
+*Test:* `test_finding_the_export_resolves_the_event_timezone_once_not_once_per_row`,
+`xfail(strict=True)`. Alle Zahlen in `docs/performance.md` 3.8.
+
+*Fix:* die Zone einmal je Event auflösen — dort, wo `_cell_formats()` ohnehin
+schon einmal je Event gebaut wird, und aus demselben Grund — und durchreichen.
+
+*Kein Blocker:* jeder Wert ist richtig. Ein terminierter Export, der 50 statt 12
+Sekunden braucht, kommt an. Es ist eine Handvoll Zeilen in fremdem Gebiet, deshalb
+Finding und kein stiller Fix.
+
+*Einschränkung:* der Absolutwert hängt am Cache-Backend; pretix'
+Testeinstellungen benutzen `DummyCache`, produktiv steht dort Redis, und ein
+Redis-Roundtrip ist nicht offensichtlich billiger. Konfigurationsunabhängig ist
+die Form: ein Lookup je Zelle statt einem je Export.
+
+## Weiter offen
+
+* **PostgreSQL-Gegenprobe.** Unverändert, Umgebungsentscheidung. Für T-002 ist die
+  Frage kleiner geworden (der Fix wirkt auf der Python-Seite und damit
+  backend-unabhängig), für T-004 gilt sie voll.
+* **T-004 und T-005**, beide mit `xfail(strict=True)`-Reproduzierer.
+* `tests/test_smoke.py::test_no_migration_created_yet` — weiterhin der einzige
+  rote Test des Repos, gehört dem `integrator`.

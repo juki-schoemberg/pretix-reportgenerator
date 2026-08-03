@@ -5,8 +5,9 @@ Prüfgegenstand: `pretix_custom_reports/**`, alle Views, der Exporter, das
 Portability-Paket, die Registry-Naht und der Query-Compiler.
 
 Alle Befunde sind mit einem Test in `tests/test_security.py` belegt
-(128 grün, 6 `xfail(strict=True)`). Ein Befund ohne Test steht ausschließlich im
-Abschnitt „Unbestätigt" und ist dort als Vermutung gekennzeichnet.
+(Stand 2026-08-03, Ende: 166 grün, kein `xfail`). Ein Befund ohne Test steht
+ausschließlich im Abschnitt „Unbestätigt" und ist dort als Vermutung
+gekennzeichnet.
 
 > **Nachtrag vom 2026-08-02 — S-001 und S-002 sind behoben und verifiziert.**
 > Der Orchestrator hat `persistence-dev` und `exporter-dev` vor dem Verdrahten
@@ -16,6 +17,25 @@ Abschnitt „Unbestätigt" und ist dort als Vermutung gekennzeichnet.
 > schlagen bei künstlich entferntem Fix weiterhin genau am ursprünglichen Leck
 > fehl. Details je Befund unten unter **Status**. Offen bleiben S-003 bis S-006.
 
+> **Nachtrag vom 2026-08-03 — S-003 bis S-006 sind behoben und verifiziert;
+> ein neuer Befund S-007.**
+> Sechs Agents haben nach Welle 4 die vier offenen Befunde bearbeitet. Alle vier
+> Fixes halten: die sechs Beweistests tragen kein `xfail` mehr, sie messen nach
+> dem Umbau mehr als vorher, und bei künstlich neutralisiertem Fix fällt jeder
+> wieder genau am ursprünglichen Leck (Protokoll unten, Punkt 1–3).
+> Zwei Abweichungen von meinen eigenen Empfehlungen — `_identifier_taken` statt
+> des Managers bei S-004, `condition_signature()` statt `str(Q)` bei S-005 —
+> habe ich im echten Code nachgeprüft; beide sind richtig, die *Begründung* der
+> ersten stimmt nur zur Hälfte (siehe S-004).
+> Der adversariale Nachlauf hat außerdem eine vierte Fundstelle von S-003
+> gefunden, die keiner der beiden zuständigen Agents angefasst hat: das
+> Änderungsformular. Sie steht als eigener Befund **S-007** unten.
+>
+> **Nachtrag am selben Tag:** `persistence-dev` hat S-007 noch am 2026-08-03
+> behoben, ich habe gegengeprüft. Damit sind **alle sieben Befunde geschlossen**
+> und `tests/test_security.py` enthält keinen `xfail` mehr — zum ersten Mal seit
+> Welle 3.
+
 **Kein kritischer Befund.** Es gibt in diesem Stand keinen Pfad, auf dem
 
 * ein ORM-Pfad, ein Lookup oder ein Operator aus einer Definition, einer
@@ -23,11 +43,13 @@ Abschnitt „Unbestätigt" und ist dort als Vermutung gekennzeichnet.
 * ein Report Daten eines fremden Events oder eines fremden Organizers liefert,
 * ein Endpunkt ohne Rechteprüfung antwortet.
 
-Was gefunden wurde, sind sechs Befunde zwischen *mittel* und *niedrig*: zweimal
+Was gefunden wurde, sind sieben Befunde zwischen *mittel* und *niedrig*: zweimal
 ein fehlendes Plugin-Gate, einmal ein nicht encodierbarer Unicode-Wert, der drei
-Endpunkte auf 500 legt und persistierbar ist, einmal ein IntegrityError statt
-eines Formularfehlers, einmal eine Query-Amplifikation und einmal eine
-Validierungsstufe, die sich per POST abschalten lässt.
+Endpunkte auf 500 legt und persistierbar ist (S-003) und der nach dem Fix an
+einer vierten Stelle stehen geblieben ist (S-007), einmal ein IntegrityError
+statt eines Formularfehlers, einmal eine Query-Amplifikation und einmal eine
+Validierungsstufe, die sich per POST abschalten lässt. Sechs davon sind zum
+Stand 2026-08-03 behoben und gegengeprüft.
 
 ---
 
@@ -41,9 +63,12 @@ Nummer des Befunds im `reason`. Damit gilt:
 * sobald jemand ihn behebt, wird der Test `XPASS` und die Suite **rot** — die
   Behebung erzwingt also, den Marker zu entfernen und damit den Befund
   abzuschließen,
-* `pytest --runxfail tests/test_security.py` zeigt die echten Fehlermeldungen
-  (bei Abgabe acht, nach dem Schließen von S-001 und S-002 noch sechs); jede
-  wurde gegengelesen, damit kein Test aus dem falschen Grund fehlschlägt.
+* `pytest --runxfail tests/test_security.py` zeigte die echten Fehlermeldungen
+  (bei Abgabe acht, nach dem Schließen von S-001 und S-002 sechs, nach dem
+  Schließen von S-003 bis S-006 zwei — die Parametrisierungen von S-007 —, seit
+  dem Schließen von S-007 keine mehr); jede wurde gegengelesen, damit kein Test
+  aus dem falschen Grund fehlschlägt. Der Schalter ist damit vorerst wirkungslos;
+  er bleibt in dieser Anleitung, weil der nächste Befund ihn wieder braucht.
 
 Zu jedem Befund, bei dem ein Nachbarpfad *nicht* betroffen ist, gibt es eine
 grüne **Kontrollgruppe**. Ohne die wäre ein `xfail` nicht von einem kaputten
@@ -58,9 +83,18 @@ Der Marker fällt erst, wenn drei Dinge gelten:
    erzeugt, bevor die eigentliche Zusicherung erreicht wird. Ein Test, der aus
    einem neuen Grund grün wird, ist kein Nachweis, sondern ein Deckmantel.
 3. Mit künstlich entferntem Fix fällt er wieder — und zwar an derselben Stelle
-   wie vorher. Geprüft über ein Wegwerf-Pytest-Plugin, das `dispatch` bzw.
-   `_plugin_is_active` zur Laufzeit neutralisiert; **kein Produktivcode wird
-   dafür angefasst**, auch nicht kurzzeitig.
+   wie vorher. Geprüft über ein Wegwerf-Pytest-Plugin, das `dispatch`,
+   `_plugin_is_active`, `payload._walk`, `_ApiView.json`, das `json`-Modul zweier
+   View-Module, `clean_identifier`, `join_leaf_to_attr` bzw. `coerce_user_choice`
+   zur Laufzeit neutralisiert; **kein Produktivcode wird dafür angefasst**, auch
+   nicht kurzzeitig. Das Plugin liegt außerhalb des Repos und wird über
+   `PYTHONPATH` und `-p` geladen.
+
+Bei einem *neuen* Befund gilt die Umkehrung: der `xfail` bekommt seine
+Fundstelle erst dann, wenn der vorgeschlagene Einzeiler — zur Laufzeit
+eingespielt, wieder ohne Produktivcode anzufassen — den Test auf `XPASS` hebt.
+So bewiesen für S-007, und deshalb ließ sich der Fix in derselben Sitzung
+schreiben, in der der Befund entstand.
 
 ---
 
@@ -233,9 +267,10 @@ Weg, den `ScheduledOrganizerExport` nimmt.
 
 ### S-003 Ungepaarte Surrogate legen drei Endpunkte auf 500 und sind persistierbar
 Schweregrad: mittel
+Status: **behoben** (portability-dev + frontend-dev, verifiziert am 2026-08-03) — siehe unten
 Betroffen: `pretix_custom_reports/portability/payload.py:204` (`load_json_object`), Folgestellen `pretix_custom_reports/views/api.py:353`, `pretix_custom_reports/views/portability.py:163`, `pretix_custom_reports/views/templates.py:282`
 Zuständig: portability-dev (Gate), frontend-dev (`views/api.py`)
-Reproduktion: `test_a_lone_surrogate_is_refused_by_the_payload_gate`, `test_the_validate_endpoint_survives_a_lone_surrogate`, `test_the_preview_endpoint_survives_a_lone_surrogate`, `test_the_export_view_survives_a_stored_lone_surrogate` (alle xfail); Grenze: `test_the_csv_path_survives_a_stored_lone_surrogate` (grün)
+Reproduktion: `test_a_lone_surrogate_is_refused_by_the_payload_gate`, `test_the_validate_endpoint_survives_a_lone_surrogate`, `test_the_preview_endpoint_survives_a_lone_surrogate`, `test_the_export_view_survives_a_stored_lone_surrogate` (alle vier jetzt grün, ohne Marker), dazu neu `test_an_imported_file_can_no_longer_carry_a_lone_surrogate`, `test_the_template_export_survives_a_stored_lone_surrogate`, `test_the_payload_gate_still_accepts_text_outside_the_basic_plane`, `test_the_exported_file_of_a_poisoned_report_is_refused_on_the_way_back_in`; Grenzen: `test_the_csv_path_survives_a_stored_lone_surrogate`, `test_the_xlsx_path_survives_a_stored_lone_surrogate`, `test_the_editor_page_survives_a_stored_lone_surrogate`, `test_the_pretix_event_log_survives_a_stored_lone_surrogate` (alle grün)
 
 Auswirkung:
 `"\ud800"` ist **syntaktisch gültiges JSON**. `json.loads` liefert dafür einen
@@ -286,13 +321,71 @@ Empfehlung:
 Nicht empfohlen: eine Prüfung in `contracts.validate_definition`. Die Contracts
 sind eingefroren, und die Behebung ist ohne sie möglich.
 
+**Status — behoben, verifiziert. Mit einem Rest, der als S-007 aufgenommen und
+noch am selben Tag geschlossen wurde.**
+`portability-dev` hat Punkt 1 umgesetzt: `payload._walk` (`payload.py:202-216`)
+versucht auf jedem String ein `encode("utf-8")` und lehnt mit dem bestehenden
+`REASON_NOT_UTF8` ab, dessen Docstring in `errors.py` entsprechend erweitert
+wurde. `frontend-dev` hat Punkt 2 für `views/api.py:402` erledigt,
+`portability-dev` für `views/portability.py:167` und `views/templates.py:285`.
+Punkt 3 (`envelope._clean_text` auf Labels) wurde bewusst nicht gemacht — das
+war auch nur „optional" und hätte an Contract-Nähe gekratzt.
+
+Drei Dinge habe ich beim Gegenprüfen ergänzt oder korrigiert:
+
+1. **Der Gate-Test prüft jetzt den Grund, nicht nur die Ablehnung.** Die alte
+   Fassung war `pytest.raises((PayloadRejected, DefinitionValidationError))`.
+   Das wäre auch von der Tiefen-, Knoten- oder Größenprüfung erfüllt worden — ein
+   Fix an der falschen Stelle der Datei hätte den Test grün gemacht. Er verlangt
+   jetzt `excinfo.value.reason == REASON_NOT_UTF8`, und das an vier Stellen:
+   Label, tief verschachtelter Filterwert, Low-Surrogate `\udc00` und
+   **Objektschlüssel**. Der Schlüsselfall hängt daran, dass `_walk` die Keys mit
+   auf den Stack legt; eine Fassung, die nur Werte abläuft, hätte drei von vier
+   bestanden.
+2. **Die drei Endpunkt-Tests messen mehr als „200".** `assert status_code == 200`
+   allein ist kein Nachweis: ein Fix, der das Zeichen *entfernt* oder ersetzt,
+   erfüllt ihn genauso und schreibt dabei stillschweigend das Label des Nutzers
+   um. Jeder der drei prüft jetzt dreiteilig — der Body ist reines ASCII
+   (`.decode("ascii")`), er enthält die Escape-Sequenz `\ud800`, und
+   `json.loads` gibt exakt den geposteten bzw. gespeicherten String zurück. Beim
+   Vorschau-Endpunkt kommt die Zeilenzusicherung dazu, sonst wäre eine Antwort
+   „200 mit leerem Ergebnis" ununterscheidbar von einem Erfolg.
+3. **Die Gegenrichtung war ungeprüft und ist es wert.** `"\ud83d\ude00"` ist ein
+   *Paar*, das `json.loads` zu einem Zeichen zusammenfaltet. Ein Gate, das die
+   Escape-Sequenz textuell vor dem Parsen abgelehnt hätte, hätte damit jedes
+   Emoji und jedes seltenere CJK-Zeichen in einem Label verboten. Die Prüfung
+   sitzt an der richtigen Stelle (am geparsten String), und
+   `test_the_payload_gate_still_accepts_text_outside_the_basic_plane` hält sie
+   dort fest.
+
+Gegenprobe wie bei S-001/S-002, in drei Läufen: mit neutralisiertem `_walk`
+speichert der Import wieder (`assert 302 == 200`) und der Gate-Test meldet
+„DID NOT RAISE"; mit auf `ensure_ascii=False` zurückgedrehtem `_ApiView.json`
+sterben Validate und Vorschau wieder mit `UnicodeEncodeError`; mit
+zurückgedrehtem `json`-Modul in `views/portability.py` und `views/templates.py`
+ebenso beide Exportansichten. Jeweils exakt am ursprünglichen Leck.
+
+**Vier Nachbarpfade neu abgedeckt** — drei davon halten, einer nicht:
+
+| Pfad | Ergebnis |
+| --- | --- |
+| Vorlagen-Export (`views/templates.py:285`) | hält — der Befund nannte die Zeile, gemessen hatte sie niemand |
+| XLSX-Export (`SafeWorkbook`/openpyxl) | hält — „CSV ist unauffällig" sagt darüber nichts, es ist ein völlig anderer Serialisierer, **und** es ist der unbeaufsichtigte Pfad |
+| pretix' eigene Event-Log-Seite | hält — `ReportDefinition.log_data()` legt die **ganze** Definition in jeden `LogEntry`; pretix rendert bei unbekanntem Action-Type nur den Typ, nicht die Daten. Wäre das anders, hätte ein Label eine Kernseite des Events zerlegt |
+| Änderungsformular (`forms.py:65`) | **hielt nicht** → S-007, inzwischen ebenfalls behoben |
+
+Der XLSX- und der Log-Test sind Stolperdrähte, keine Befunde: sie kosten nichts
+und stehen zwischen `log_data()` bzw. dem Exporter und der nächsten Person, die
+dort etwas umstellt.
+
 ---
 
 ### S-004 Doppelter Identifier wird ein IntegrityError statt eines Formularfehlers
 Schweregrad: niedrig
+Status: **behoben** (persistence-dev, verifiziert am 2026-08-03) — siehe unten
 Betroffen: `pretix_custom_reports/forms.py:103` (`fields` führt `identifier`, aber nicht `event`), `pretix_custom_reports/models.py:280` (`UniqueConstraint(["event", "identifier"])`)
 Zuständig: persistence-dev
-Reproduktion: `test_a_duplicate_identifier_is_a_form_error_not_a_500` (xfail)
+Reproduktion: `test_a_duplicate_identifier_is_a_form_error_not_a_500` (jetzt grün, ohne Marker, über beide Eigentümer parametrisiert), Kontrollgruppen `test_a_report_may_keep_its_own_identifier_when_it_is_changed`, `test_the_same_identifier_may_be_used_again_in_another_event`, `test_the_duplicate_check_survives_without_an_active_scope`
 
 Auswirkung:
 `ReportDefinitionForm` bietet `identifier` als Eingabefeld an. Die
@@ -322,13 +415,74 @@ In `ReportDefinitionForm` ein `clean_identifier` ergänzen, das gegen
 `templates_for_organizer`). Alternativ `_get_validation_exclusions` überschreiben
 und `event`/`organizer` daraus entfernen.
 
+**Status — behoben, verifiziert. Der Fix ist besser als meine Empfehlung, die
+Begründung dafür stimmt zur Hälfte.**
+`persistence-dev` hat `clean_identifier` ergänzt (`forms.py:131-166`), aber
+**nicht** über den Manager, sondern über `self.instance._identifier_taken(value)`
+(`models.py:403-418`) — eine Methode, die es seit Welle 1 gibt und die
+`_generate_identifier` schon benutzt. Sie läuft unter `scopes_disabled()` und
+filtert hart auf `event_id` bzw. `organizer_id` plus `event__isnull=True`,
+spiegelt also beide `UniqueConstraint`s genau, und schließt die eigene Zeile aus.
+Das ist die bessere Variante, aus zwei Gründen: sie deckt den Vorlagenzweig
+ohne zweiten Code-Pfad ab (der `event`/`organizer`-XOR steckt schon in der
+Methode), und sie hängt nicht vom Scope ab.
+
+Die *Begründung* im Statusbericht — die Empfehlung wäre „mit `ScopeError`
+geplatzt" — habe ich im Code nachgeprüft und sie trägt nur teilweise. Richtig
+ist: `ReportDefinition.objects` ist scope-gebunden (`ReportDefinitionManager`
+bildet `ScopedManager` nach und liefert ohne `organizer`-Scope ein
+`DisabledQuerySet`, `models.py:132-136`). Falsch ist der Schluss für den
+Ansichtenpfad: `pretix/control/middleware.py:199` legt **jeden** Control-Request
+in `scope(organizer=request.organizer)`, der Manager hätte dort also
+funktioniert. Der `ScopeError` wäre nur außerhalb eines Requests gekommen — im
+Direkttest des Formulars, in einem Task, in der Event-Kopie. Der Fix ist damit
+richtig gewählt und aus dem falschen Grund verteidigt; das ist dieselbe Sorte
+Begründungsfehler wie die MRO-Aussage bei S-001, und es ist derselbe Grund, ihn
+hier festzuhalten: damit er nicht als Regel weitergereicht wird.
+`test_the_duplicate_check_survives_without_an_active_scope` nagelt die
+tatsächlich gültige, stärkere Eigenschaft fest — das Formular validiert ganz
+ohne Scope und lehnt den Duplikat-Identifier trotzdem ab.
+
+**Der Beweistest musste umgebaut werden.** Die Welle-3-Fassung prüfte `200` und
+`b"identifier" in response.content`. Beides ist für **jedes** neu gerenderte
+Formular wahr, weil „identifier" der Name eines Feldes auf der Seite ist — der
+Test wäre nach dem Fix grün geworden, ohne die Prüfung je gemessen zu haben, und
+wäre auch grün geblieben, wenn das Formular aus einem völlig anderen Grund
+abgelehnt hätte. Er prüft jetzt: Statuscode 200, die Meldung des neuen
+`clean_identifier` im Body, und **die Zeilenzahl vorher gleich nachher**.
+
+**Drei Facetten neu abgedeckt:**
+
+1. **Der Vorlagenzweig.** `ReportDefinitionForm` bedient Event-Report und
+   Organizer-Vorlage aus einer Klasse, die zweite Bedingung ist
+   `(organizer, identifier)`. Im Befund stand nur die Event-Hälfte; getestet war
+   die andere nie. Der Test ist jetzt über beide Eigentümer parametrisiert, und
+   in der Gegenprobe fällt er auch auf beiden — mit den zwei verschiedenen
+   `UNIQUE constraint failed`-Meldungen.
+2. **Die Prüfung darf nicht zu eng sein.** Ohne `.exclude(pk=...)` scheitert
+   jedes Speichern eines bestehenden Reports am eigenen Identifier, und weil der
+   Editor ihn als verstecktes Feld zurückpostet, wäre das der Normalfall, nicht
+   der Randfall.
+3. **Und nicht zu weit.** Die Eindeutigkeit ist `(event, identifier)`, und ein
+   Identifier überlebt eine Event-Kopie absichtlich (ADR 0001 Abschnitt 5) —
+   zwei Events mit demselben sind der *Normalzustand* nach einer Kopie. Ein
+   global fragendes `clean_identifier` hätte Facette 1 bestanden und die
+   Event-Kopie still zerlegt.
+
+Gegenprobe: mit zur Laufzeit auf eine reine Durchreiche gesetztem
+`clean_identifier` (Produktivcode unangetastet) endet der POST wieder in
+`django.db.utils.IntegrityError: UNIQUE constraint failed: ...event_id,
+...identifier` — dem Fehler, der wörtlich im Befund steht — und der Formulartest
+fällt an derselben Zeile.
+
 ---
 
 ### S-005 Eine Vorschau mit vielen `join`-Spalten kostet eine Query pro Spalte
 Schweregrad: niedrig
+Status: **behoben** (query-dev, verifiziert am 2026-08-03) — siehe unten
 Betroffen: `pretix_custom_reports/query/plan.py:400` (`_dedupe_prefetches`), `pretix_custom_reports/query/relations.py:563` (`to_attr=leaf_to_attr`)
 Zuständig: query-dev
-Reproduktion: `test_a_report_full_of_join_columns_costs_one_query_per_column` (grün, misst)
+Reproduktion: `test_a_report_full_of_join_columns_costs_what_one_column_costs` (bis 2026-08-03 `test_a_report_full_of_join_columns_costs_one_query_per_column`, siehe Status), Nachbarpfade `test_join_columns_that_want_different_rows_are_still_kept_apart`, `test_the_residual_cost_of_join_columns_is_bounded_by_distinct_conditions`, `test_the_condition_signature_refuses_to_merge_what_it_cannot_read`
 
 Auswirkung:
 `join`-Spalten werden absichtlich über `Prefetch` mit einem **pro Spalte
@@ -352,13 +506,87 @@ Die zweite Variante ist die richtige, aber sie braucht einen stabilen
 Vergleich zweier `Q`-Objekte — machbar über `str(Q)`, mit dem üblichen
 Vorbehalt.
 
+**Status — behoben, verifiziert. Zwei Abweichungen von meiner Formulierung,
+beide zum Besseren.**
+`query-dev` hat die zweite, richtige Variante gewählt:
+`relations.join_leaf_to_attr()` (`relations.py:687-724`) leitet den `to_attr` aus
+der *Identität des Blatt-Querysets* ab — Leaf-Modell, Lookup, Canceled-Regel,
+innerer `select_related`, Bedingungssignatur — statt aus dem Spaltenindex, und
+`plan._dedupe_prefetches` greift damit endlich. Gemessen: 1, 2, 20 und 200
+(`MAX_COLUMNS`) identische `join`-Spalten kosten **dieselben zwei Queries**.
+
+Die beiden Abweichungen habe ich einzeln nachgeprüft, weil sie meine eigene
+Empfehlung korrigieren:
+
+1. **`condition_signature()` statt `str(Q)`.** Meine Fassung stand da mit „dem
+   üblichen Vorbehalt"; `query-dev` hat den Vorbehalt ernst genommen. `str(Q)`
+   rendert eine Modellinstanz über deren `__str__`, zwei `Question`-Zeilen mit
+   gleichem Label sähen also gleich aus — und ein daraufhin verschmolzener
+   Prefetch legt die Antworten der einen Frage unter die Überschrift der
+   anderen. Falsche Ausgabe, kein Fehler, kein Logeintrag. Signiert werden
+   deshalb nur Skalare und Listen/Mengen davon, alles andere ergibt `None` und
+   fällt auf den alten, spaltenweisen Namen zurück. Das ist die richtige
+   Fehlerrichtung: offen scheitern kostet eine Query, geschlossen scheitern
+   kostet Korrektheit. `test_the_condition_signature_refuses_to_merge_what_it_cannot_read`
+   nagelt genau diese Richtung fest, damit eine spätere „Optimierung" die
+   Signatur nicht still auf Modellinstanzen ausweitet.
+2. **Der innere `select_related` gehört zur Identität.** Ohne ihn wäre die
+   Ersparnis erkauft: `item.name` braucht `select_related("item")` auf den
+   vorgeladenen Positionen, `position.attendee_name` nicht, und ein für den
+   zweiten Fall gebauter gemeinsamer Prefetch macht aus dem ersten ein N+1. Das
+   ist eine Verschärfung gegenüber „gleicher Lookup und gleiche Bedingung" und
+   sachlich richtig.
+
+Eine mögliche Kollision der Signatur habe ich durchgespielt und **nicht**
+gefunden: die Grammatik ist `(CONNECTOR:key=repr,...)`, `repr` eines Strings ist
+ein einzelnes Literal in Anführungszeichen, ein Lookup-Key enthält kein `=`, und
+ein verschachtelter Knoten beginnt mit `(` oder `NOT(`, womit kein Wert-`repr`
+beginnen kann. Zwei verschiedene Bedingungen können also nicht denselben Text
+erzeugen. Die Restunsicherheit steht unter U-09.
+
+**Mein eigener Test war rot und ist umgedreht.** Er hieß
+`test_a_report_full_of_join_columns_costs_one_query_per_column` und verlangte
+`many - few >= 15`, maß nach dem Fix aber `(2, 2)` — er war der Beweis des
+*Defekts*, kein `xfail`, und musste deshalb ohnehin von mir angefasst werden. Er
+heißt jetzt `test_a_report_full_of_join_columns_costs_what_one_column_costs`,
+misst gegen `count_for(1)` und geht bis `MAX_COLUMNS` hinauf — also bis zu der
+Zahl, die der Strukturvalidator wirklich zulässt und die der Befund zitiert hat
+(„~200 Round Trips"). Der alte Name steht im Testdocstring, damit die Historie
+auffindbar bleibt.
+
+Gegenprobe: mit `join_leaf_to_attr` zur Laufzeit auf `None` gezwungen (also mit
+dem alten Rückfall auf den spaltenweisen Namen) misst der Test wieder
+`assert 3 == 2` — eine zusätzliche Query pro zusätzlicher Spalte, exakt die
+Verstärkung des Befunds.
+
+**Zwei Facetten neu abgedeckt.**
+`test_join_columns_that_want_different_rows_are_still_kept_apart` greift die
+andere Seite an: zwei `join`-Spalten über `answer.<identifier>` kreuzen dieselbe
+Relation und unterscheiden sich nur in der Blattbedingung. Verschmölzen sie,
+wäre das ein *Datenleck zwischen zwei Spalten desselben Reports*. Gemessen:
+vier Queries (Zeilen, gemeinsame Zwischenebene, zwei Blätter) und jede Spalte
+liefert ihren eigenen Wert. `query-dev` hat denselben Sachverhalt aus eigener
+Sicht in `tests/test_query_compile.py`; doppelt ist hier richtig, weil die
+Konsequenz eine Sicherheitsaussage ist und keine Performancezahl.
+
+**Restrisiko, benannt statt verschwiegen.** Die Verstärkung ist für *identische*
+Spalten weg, nicht im Prinzip: zehn `join`-Spalten über zehn verschiedene Fragen
+sind zehn verschiedene Prefetches und kosten zehn Queries
+(`test_the_residual_cost_of_join_columns_is_bounded_by_distinct_conditions`,
+grün, misst `distinct + 2`). Was sich geändert hat, ist der Eintrittspreis: es
+braucht jetzt N verschiedene Fragen im Event — angelegt mit
+`event.can_change_items`, nicht mit dem `event.orders:read`, das die Vorschau
+verlangt — wo vorher ein einziges Feld, 200-mal wiederholt, genügte. Damit ist
+U-03 (kein Rate-Limit) entschärft, nicht erledigt.
+
 ---
 
 ### S-006 Die Importansicht lässt sich per POST auf die Event-Kopie-Strategie stellen
 Schweregrad: niedrig
+Status: **behoben** (portability-dev, verifiziert am 2026-08-03) — siehe unten
 Betroffen: `pretix_custom_reports/views/portability.py:237`, `pretix_custom_reports/views/templates.py:367`, `pretix_custom_reports/portability/resolution.py:769`
 Zuständig: portability-dev
-Reproduktion: `test_the_import_view_cannot_be_talked_into_the_event_copy_strategy` (xfail), Kontrollgruppe `test_the_same_definition_is_refused_under_the_offered_strategies`
+Reproduktion: `test_the_import_view_cannot_be_talked_into_the_event_copy_strategy` (jetzt grün, ohne Marker), neu `test_the_template_apply_view_cannot_be_talked_into_the_event_copy_strategy`, `test_no_posted_value_whatsoever_yields_the_event_copy_strategy`, `test_no_view_hands_a_request_value_to_the_wide_coercion`; Kontrollgruppen `test_the_same_definition_is_refused_under_the_offered_strategies`, `test_the_event_copy_can_still_ask_for_keep`
 
 Auswirkung:
 `ResolutionStrategy.coerce()` akzeptiert alle drei Strategien, und beide Views
@@ -383,6 +611,167 @@ Empfehlung:
 Eine zweite, engere Coerce-Funktion für die Views:
 `ResolutionStrategy.coerce_user_choice(value)` mit `ABORT`/`SKIP` und Fallback
 `ABORT`. `KEEP` bleibt programmatisch erreichbar für `eventcopy.py`.
+
+**Status — behoben, verifiziert.**
+`portability-dev` hat die Empfehlung wörtlich umgesetzt:
+`ResolutionStrategy.coerce_user_choice` (`resolution.py:132-142`) prüft gegen
+die neue Konstante `USER_CHOICES = ("abort", "skip")` und fällt auf `ABORT`
+zurück; `coerce()` bleibt unverändert und behält alle drei, mit einem Docstring,
+der sagt, wer welche benutzen darf. Beide Views sind umgestellt
+(`views/portability.py:245`, `views/templates.py:372`), `eventcopy.py:130` ruft
+weiter `KEEP` über `coerce()`.
+
+**Der Beweistest musste geschärft werden.** Die Welle-3-Fassung prüfte
+`status_code in (200, 302)` und „nichts gespeichert". „Nichts gespeichert" trägt
+den Befund, aber allein hielte es auch, wenn der Import aus einem ganz anderen
+Grund gescheitert wäre. Der Test liest die *effektiv verwendete* Strategie jetzt
+über `response.context["plan"].strategy` zurück und verlangt `ABORT` — die
+Ansicht muss zurückgefallen sein, nicht bloß abgelehnt haben. Die Kontrollgruppe
+prüft spiegelbildlich, dass `abort` und `skip` als das ankommen, was gepostet
+wurde; sonst wäre ein `coerce_user_choice`, das *immer* `ABORT` liefert, von
+einem richtigen nicht zu unterscheiden.
+
+**Drei Facetten neu abgedeckt:**
+
+1. **Die zweite Ansicht.** `views/templates.py` liest dasselbe POST-Feld für
+   „Organizer-Vorlage in dieses Event laden" — dieselbe Klasse von Tor (eine
+   Definition, die von außerhalb dieses Events kommt), im Befund nur als
+   Fundstelle genannt, nie gemessen.
+   `test_the_template_apply_view_cannot_be_talked_into_the_event_copy_strategy`
+   holt das nach, und in der Gegenprobe fällt sie genauso wie die Importansicht.
+2. **Die Coerce-Funktion selbst, über die Formen, die ein POST-Feld annehmen
+   kann.** `request.POST.get()` liefert `str` oder `None`, eine `QueryDict` lässt
+   sich zu einer Liste überreden — der Typenzoo ist klein und ist jetzt
+   vollständig aufgezählt. `" keep"`, `"keep "` und `"keep\x00"` stehen bewusst
+   drin: „erst trimmen, dann vergleichen" ist der naheliegende nächste Refactor
+   und würde das Loch wieder öffnen.
+3. **Die Regel statt der zwei Stellen.** Eine dritte Ansicht, die morgen
+   `strategy` aus einem Request liest und `coerce` aufruft, würde den Befund
+   wieder öffnen, ohne einen der Tests oben rot zu machen.
+   `test_no_view_hands_a_request_value_to_the_wide_coercion` verbietet deshalb
+   die *Form*: über den Syntaxbaum jedes Moduls in `views/` darf kein
+   `…coerce(...)`-Aufruf ein Argument haben, in dem `request` vorkommt.
+
+Gegenprobe: mit `coerce_user_choice = coerce` zur Laufzeit antworten beide
+Ansichten wieder mit `302` (der Report ist gespeichert, es wird auf ihn
+weitergeleitet) und die Coerce-Parametrisierung meldet
+`assert 'keep' == 'abort'`.
+
+**Kontrollgruppe für die andere Richtung.** `test_the_event_copy_can_still_ask_for_keep`
+hält fest, dass `coerce("keep")` weiterhin `KEEP` ergibt und `KEEP` nicht in
+`USER_CHOICES` steht. Die Trennung verläuft zwischen den beiden Funktionen, nicht
+zwischen den drei Strategien — eine Event-Kopie, die Spalten verlöre statt sie
+unaufgelöst mitzunehmen, wäre ein anderer und schlimmerer Fehler.
+
+---
+
+### S-007 Das Änderungsformular ist die vierte Fundstelle von S-003 — und die einzige gebliebene
+Schweregrad: niedrig
+Status: gefunden am 2026-08-03 beim Gegenprüfen von S-003, **behoben** (persistence-dev, verifiziert am selben Tag) — siehe unten
+Betroffen: `pretix_custom_reports/forms.py:65` (`PrettyJSONFormField.prepare_value`)
+Zuständig: persistence-dev
+Reproduktion: `test_the_change_form_survives_a_stored_lone_surrogate` (jetzt grün, ohne Marker, über beide Eigentümer parametrisiert); Nachbarpfade `test_the_change_form_is_the_only_way_a_surrogate_still_gets_stored`, `test_a_poisoned_report_is_still_repairable_through_the_editor`, `test_the_editor_page_survives_a_stored_lone_surrogate` (alle grün)
+
+Auswirkung:
+Die Behebung von S-003 hat drei Leser auf `ensure_ascii=True` umgestellt —
+`views/api.py:402`, `views/portability.py:167`, `views/templates.py:285`. Einen
+vierten nicht. Das Änderungsformular rendert die gespeicherte Definition über
+`PrettyJSONFormField.prepare_value` in seine Textarea, und diese Methode ruft
+weiter `json.dumps(value, indent=2, ensure_ascii=False, cls=self.encoder)`. Der
+entstehende `str` stirbt in `django/http/response.py:324` mit demselben
+`UnicodeEncodeError` wie die anderen drei vorher. Gemessen an beiden Stellen,
+weil `ReportDefinitionForm` Event-Report und Organizer-Vorlage aus einer Klasse
+bedient:
+
+| Endpunkt | Ergebnis |
+| --- | --- |
+| `GET .../reports/<pk>/edit/` | `UnicodeEncodeError` → 500 |
+| `GET .../customreports/templates/<pk>/edit/` | dasselbe |
+
+Zwei Dinge halten den Schweregrad auf *niedrig*, und beide sind gemessen:
+
+1. **Der Weg hinein ist nur noch der Selbstschaden.** Das Payload-Gate hat den
+   Import dichtgemacht; wer heute ein Surrogat in die Datenbank bekommen will,
+   muss es selbst durch das JSON-Textfeld desselben Formulars posten
+   (`test_the_change_form_is_the_only_way_a_surrogate_still_gets_stored` — grün,
+   dokumentiert einen akzeptierten Schreibvorgang). Das braucht
+   `event.settings.general:write`. Bestandsdaten aus der Zeit vor dem Gate sind
+   der andere, seltenere Fall.
+2. **Der Report bleibt reparierbar.** Die grafische Oberfläche rendert
+   (`escapejson_dumps` ist `json.dumps` mit dem voreingestellten
+   `ensure_ascii=True`, `pretix/base/templatetags/escapejson.py:44`) und speichert
+   per POST, der `prepare_value` nie erreicht.
+   `test_a_poisoned_report_is_still_repairable_through_the_editor` fährt den
+   ganzen Weg: Editor öffnen, sauber speichern, Änderungsformular wieder
+   aufrufbar. Wird dieser Test je rot, ist S-007 nicht mehr *niedrig* — dann
+   wäre ein Report speicherbar und über keine Oberfläche mehr zu entfernen.
+
+Warum es trotzdem ein eigener Befund ist und keine Fußnote: das
+Änderungsformular ist der Reparaturpfad, den die Einschätzung von S-003
+ausdrücklich als mildernden Umstand geführt hat („der Report bleibt exportierbar
+und reparierbar"). Genau dieser Pfad ist der einzige, der nicht mitgezogen wurde.
+Und es ist ein Beispiel für die Sorte Fix, die man für vollständig hält, weil
+alle *genannten* Zeilen angefasst sind: der Befund hat drei Fundstellen
+aufgezählt, `forms.py` stand nicht darunter, also hat niemand gesucht.
+
+Empfehlung:
+`ensure_ascii=True` in `PrettyJSONFormField.prepare_value`. Ein Zeichen mehr im
+Quelltext; die Textarea zeigt dann `\u00fc` statt `ü`, was für ein Feld, in dem
+ohnehin roher JSON steht, vertretbar ist — und `\ud800` statt eines Absturzes.
+Nachgewiesen: mit genau dieser Änderung zur Laufzeit geht der `xfail`-Test in
+beiden Parametrisierungen auf `XPASS(strict)`.
+
+Wer eleganter will: die Definition weiterhin mit `ensure_ascii=False` rendern und
+nur bei `UnicodeEncodeError` auf `True` zurückfallen. Das erhält die Lesbarkeit
+für die 99,99 % der Reports, die kein Surrogat enthalten. Meine Empfehlung ist
+trotzdem die einfache Variante — zwei Rendering-Pfade für ein Textfeld sind mehr
+Fläche, als die Lesbarkeit wert ist.
+
+Nicht empfohlen: das Surrogat beim Schreiben abzuweisen (also `clean_definition`
+oder `contracts.validate_definition` zu erweitern). Die Contracts sind
+eingefroren, und ein Schreib-Gate hilft den bereits gespeicherten Zeilen nicht.
+Falls jemand es *zusätzlich* tut, wird
+`test_the_change_form_is_the_only_way_a_surrogate_still_gets_stored` rot; dann
+ist zu entscheiden, ob für dieses Formular die Quarantäne von S-003 („nichts
+speichern, was sich nicht encodieren lässt") oder die Toleranz von S-007
+(„rendern, was gespeichert ist") die Regel ist. Beide vertragen sich heute nur
+deshalb, weil die zweite bedingungslos gilt.
+
+**Status — behoben, verifiziert.**
+`persistence-dev` hat die einfache Variante genommen: `ensure_ascii=True` in
+`PrettyJSONFormField.prepare_value` (`forms.py:75`), plus einen Kommentar, der
+sagt, warum das keine Kosmetik ist und nicht „für hübschere Umlaute"
+zurückgedreht werden darf. Die von mir als Alternative genannte Rückfalllösung
+(erst `False`, bei `UnicodeEncodeError` auf `True`) wurde richtigerweise nicht
+gebaut — zwei Rendering-Pfade für ein Textfeld sind mehr Fläche, als die
+Lesbarkeit wert ist.
+
+**Der Beweistest ist ausgebaut worden, nach demselben Maßstab wie die drei
+Endpunkte von S-003.** Die Fassung, mit der ich den Befund gemeldet habe, prüfte
+`status_code == 200`. Das ist beim Schließen zu wenig, und zwar hier noch
+deutlicher als bei den drei Endpunkten: das Änderungsformular **schreibt
+zurück, was es anzeigt**. Ein „Fix", der das Zeichen beim Rendern verwirft,
+hätte den Test erfüllt und beim nächsten Speichern die Definition des Nutzers
+still umgeschrieben — aus einem 500 wäre lautloser Datenverlust geworden. Der
+Test schneidet die Textarea deshalb jetzt aus der Seite, macht das
+HTML-Escaping rückgängig und verlangt, dass der geparste Inhalt zeichengenau
+dem entspricht, was in der Datenbank steht. Dazu, wie bei den anderen dreien,
+die Escape-Sequenz `\ud800` im Body.
+
+Gegenprobe: mit `prepare_value` zur Laufzeit auf `ensure_ascii=False`
+zurückgedreht (Produktivcode unangetastet) fallen beide Parametrisierungen
+wieder mit `UnicodeEncodeError` in `django/http/response.py:324` — an denselben
+Byte-Positionen wie vor dem Fix (33438 für den Event-Report, 27064 für die
+Vorlage). Genau das ursprüngliche Leck, nicht eine Nebenwirkung.
+
+**Zwei Nachbartests wurden nachgezogen**, weil sie den Befund als *offen*
+beschrieben: `test_the_editor_page_survives_a_stored_lone_surrogate` (die
+Editor-Seite war die Referenz, gegen die der Fix gemessen wurde — beide rendern
+jetzt gleich) und `test_a_poisoned_report_is_still_repairable_through_the_editor`
+(trug das Argument für den Schweregrad; das ist verbraucht, der Weg
+Editor → Speichern → erneut öffnen bleibt aber der einzige durchgehende in
+diesem Modul, und seine letzte Zusicherung ist genau die, die S-007 gefunden
+hätte).
 
 ---
 
@@ -497,6 +886,11 @@ XOR-Check-Constraint hält auch gegen `bulk_create`.
   nicht aus dem JSON-Konfigblock des Editors aus (`escapejson_dumps`).
 * Das Editor-JavaScript rendert Servertexte über `textContent`; der
   `html:`-Ausweg des `el()`-Helfers wird nirgends benutzt (festgenagelt).
+* *Ergänzt 2026-08-03:* ein nicht encodierbares Label (S-003) bringt weder den
+  XLSX-Export (`SafeWorkbook`/openpyxl — der **unbeaufsichtigte** Pfad) noch
+  pretix' eigene Event-Log-Seite um, obwohl `ReportDefinition.log_data()` die
+  ganze Definition in jeden `LogEntry` legt. Beide sind als Stolperdraht
+  festgehalten.
 
 ### Hintergrundausführung (Prüfschwerpunkt 6)
 
@@ -525,6 +919,9 @@ XOR-Check-Constraint hält auch gegen `bulk_create`.
   strukturell abgelehnt.
 * `GET api/fields/` bleibt auch mit fünf zusätzlichen Choice-Fragen unter 60
   Queries.
+* *Ergänzt 2026-08-03:* 1, 2, 20 und 200 identische `join`-Spalten kosten
+  dieselbe Zahl Queries (S-005 behoben); verschiedene Bedingungen kosten
+  weiterhin je eine, gemessen und als Restrisiko benannt.
 
 ---
 
@@ -541,6 +938,10 @@ darstellen und wirft beim Schreiben. Das wäre derselbe Persistenzweg wie S-003,
 nur mit einem anderen Zeichen und einem `DataError` statt eines 500 beim Lesen.
 Nicht beweisbar, solange die Testumgebung SQLite ist. Wer S-003 behebt, sollte
 das Nullbyte in derselben Prüfung mit erschlagen.
+*Nachtrag 2026-08-03:* das ist **nicht** passiert. Die neue Prüfung in
+`payload._walk` versucht `value.encode("utf-8")`, und `"\x00".encode("utf-8")`
+gelingt — das Nullbyte kommt also weiterhin durch das Gate. Der Vorbehalt gilt
+unverändert weiter, jetzt nur ohne die Aussicht, nebenbei miterledigt zu werden.
 
 **U-02 — Unicode-Faltung im Resolver.**
 `resolution._normalise()` faltet über `str.lower()` und `str.isalnum()`, also
@@ -555,6 +956,10 @@ je stiller wird.
 Beide führen echte Queries aus, beide sind authentifiziert. In pretix gibt es
 für Control-Panel-Endpunkte auch sonst keins; eine eigene Drossel wäre eine
 Abweichung vom Kern. Nur in Kombination mit S-005 relevant.
+*Nachtrag 2026-08-03:* mit dem S-005-Fix ist der Multiplikator weg, den ein
+Angreifer ohne Vorbereitung erreichen konnte. Was bleibt, ist eine Query pro
+*verschiedener* `join`-Bedingung; die Kombination ist damit entschärft, nicht
+erledigt.
 
 **U-04 — `MAX_ROW_LIMIT = 1 000 000` im interaktiven Export.**
 Die Streamingkette ist durchgehend faul, aber eine Million Zeilen × 200 Spalten
@@ -566,6 +971,27 @@ Kein eigener Test von mir, weil er nur die Laufzeit der Suite kostet.
 Gilt wie bei `registry-dev`, `query-dev` und `exporter-dev`. Für den Review
 konkret betroffen: U-01, `nulls_last`, und die Frage, ob eine der
 Aggregat-Subqueries dort einen anderen Ausgabetyp liefert.
+
+**U-08 — Wettlauf zwischen zwei gleichzeitigen Speichervorgängen (S-004).**
+`clean_identifier` prüft und `save()` schreibt; zwischen beiden liegt ein
+Zeitfenster. Zwei parallele Requests mit demselben Identifier können also
+weiterhin in dem `IntegrityError` enden, den S-004 beschreibt. Das ist ein
+klassisches TOCTOU und mit einer Formularprüfung grundsätzlich nicht zu
+schließen — die Datenbankbedingung ist die einzige Instanz, die es kann. Kein
+Test, weil ein verlässlicher Wettlauf in dieser Suite (SQLite, ein Prozess) nicht
+zu bauen ist. Wer es sauber will, fängt den `IntegrityError` in `form_valid` und
+übersetzt ihn in denselben Formularfehler; die Wahrscheinlichkeit rechtfertigt
+den Aufwand aus meiner Sicht nicht.
+
+**U-09 — `condition_signature()` und Werte, deren `repr` nicht eindeutig ist.**
+Die Signatur benutzt `repr` für `datetime`, `Decimal`, `UUID` und Freunde.
+`repr(datetime)` enthält die `tzinfo` über deren eigenes `repr`, und zwei
+verschiedene `tzinfo`-Objekte können sich denselben Text teilen; ein `float`
+`nan` signiert wie jedes andere `nan`. Beides würde zwei Prefetches verschmelzen,
+die es nicht sollten. Nicht erreichbar aus dem heutigen Code — die Bedingungen
+kommen aus `registry/hints.py` und sind per Contract JSON-sichere Primitive, in
+der Praxis Strings und Integer — und deshalb kein Befund und kein Test. Steht
+hier, falls `hints.py` je Datumsbedingungen erzeugt.
 
 **U-06 — Die Browser-Tests skippen ohne Browser.**
 `tests/test_editor_api.py` überspringt seine sechs Playwright-Tests still, wenn
@@ -581,43 +1007,74 @@ View- und Exporter-Befunde betreffen deshalb Code, der produktiv derzeit nicht
 erreichbar ist. Das ändert die *Dringlichkeit*, nicht den Befund — und es heißt,
 dass S-001 und S-002 vor dem Verdrahten am billigsten zu beheben sind.
 *Erledigt:* genau das ist am 2026-08-02 passiert, beide sind vor der Verdrahtung
-behoben. Für S-003 bis S-006 gilt der Absatz unverändert weiter.
+behoben.
+*Erledigt, zweiter Teil:* `urls.py` und `signals.py` sind seit Welle 4 (`d7c6842`)
+verdrahtet, und S-003 bis S-007 sind am 2026-08-03 im verdrahteten Stand behoben
+worden. Damit ist U-07 abgeschlossen — und der Absatz gilt für keinen Befund mehr:
+alles, was hier steht, betraf am Ende Code, der produktiv erreichbar ist. Die
+Einschränkung „ändert die Dringlichkeit, nicht den Befund" hat sich als die
+richtige Lesart erwiesen; abgearbeitet wurden am Ende alle sieben.
 
 ---
 
 ## Zusammenfassung nach Zuständigkeit
 
-Stand 2026-08-02. „behoben" heißt: Fix gelesen, Beweistest ohne `xfail` grün,
-und bei künstlich entferntem Fix fällt derselbe Test wieder am ursprünglichen
-Leck.
+Stand 2026-08-03, Ende des Tages. „behoben" heißt: Fix gelesen, Beweistest ohne
+`xfail` grün, Test misst nach dem Umbau noch das, was er behauptet, und bei
+künstlich neutralisiertem Fix fällt derselbe Test wieder am ursprünglichen Leck.
 
 | Befund | Schweregrad | Zuständig | Status |
 | --- | --- | --- | --- |
 | S-001 CRUD-Views ohne Plugin-Gate | mittel | persistence-dev | **behoben** (2026-08-02) |
 | S-002 Organizer-Export ohne Plugin-Gate | mittel | exporter-dev | **behoben** (2026-08-02) |
-| S-003 Ungepaarte Surrogate | mittel | portability-dev (Gate), frontend-dev (`views/api.py:353`) | offen |
-| S-004 Doppelter Identifier → IntegrityError | niedrig | persistence-dev | offen |
-| S-005 Query-Amplifikation bei `join`-Spalten | niedrig | query-dev | offen |
-| S-006 `keep`-Strategie per POST erreichbar | niedrig | portability-dev | offen |
+| S-003 Ungepaarte Surrogate | mittel | portability-dev (Gate), frontend-dev (`views/api.py`) | **behoben** (2026-08-03) |
+| S-004 Doppelter Identifier → IntegrityError | niedrig | persistence-dev | **behoben** (2026-08-03) |
+| S-005 Query-Amplifikation bei `join`-Spalten | niedrig | query-dev | **behoben** (2026-08-03) |
+| S-006 `keep`-Strategie per POST erreichbar | niedrig | portability-dev | **behoben** (2026-08-03) |
+| S-007 Änderungsformular rendert mit `ensure_ascii=False` | niedrig | persistence-dev | **behoben** (2026-08-03) |
 
 | Agent | Offene Befunde |
 | --- | --- |
-| portability-dev | S-003 (mittel, gemeinsam mit frontend-dev), S-006 (niedrig) |
-| frontend-dev | S-003, Teil 2 (`views/api.py:353`) |
-| persistence-dev | S-004 (niedrig) — S-001 geschlossen |
-| query-dev | S-005 (niedrig) |
+| persistence-dev | keine — S-001, S-004 und S-007 geschlossen |
+| portability-dev | keine — S-003 (Gate) und S-006 geschlossen |
+| frontend-dev | keine — S-003, Teil 2 geschlossen |
+| query-dev | keine — S-005 geschlossen, mit benanntem Restrisiko |
 | exporter-dev | keine — S-002 geschlossen |
-| contract-architect | keine — die Contracts haben gehalten |
+| contract-architect | keine — die Contracts haben gehalten, durch beide Nachbesserungsrunden |
 | registry-dev | keine — die Event-Bindung der Annotationen ist die stärkste Naht im Plugin |
+
+**Alle sieben Befunde sind geschlossen.** Was von mir bleibt, sind die neun
+Punkte unter „Unbestätigt" — Vermutungen, keine Befunde, jede einzeln
+begründet, warum sie ohne Test dasteht. Vier davon (U-01, U-04, U-05, U-09)
+warten auf eine Umgebung oder einen Code, den es hier nicht gibt; die übrigen
+sind bewusste Entscheidungen.
+
+Ein Satz zur Selbsteinschätzung, weil eine Liste ohne offene Punkte leicht wie
+ein Freibrief aussieht: geprüft ist, was in „Geprüft und in Ordnung" steht, auf
+SQLite, gegen pretix v2026.6.0. Nicht geprüft sind PostgreSQL (U-05), das
+Verhalten unter Last (U-04) und alles, was nach diesem Commit dazukommt.
 
 ## Ausführen
 
 ```
-pytest tests/test_security.py -q          # 128 passed, 6 xfailed
-pytest tests/test_security.py --runxfail  # zeigt die sechs echten Fehler
+pytest tests/test_security.py -q          # 166 passed, 0 xfailed
 ```
 
-Die sechs verbleibenden `xfail(strict=True)` sind vier zu S-003, einer zu S-004
-und einer zu S-006. Wer einen davon behebt, macht die Suite rot (`XPASS`) — das
-ist Absicht und erzwingt, den Marker zu entfernen und den Befund zu schließen,
-so wie es hier für S-001 und S-002 geschehen ist.
+Zum ersten Mal seit Welle 3 trägt kein Test in diesem Modul einen
+`xfail(strict=True)`. Das ist der Zustand, den das Verfahren anstrebt, und
+gleichzeitig der, in dem es am wenigsten aussagt: ein grünes Modul beweist nur,
+dass die *gefundenen* Angriffe abgewehrt werden. Wer den nächsten Befund
+einträgt, findet die Regeln oben unter „Wie die Tests gebaut sind" — inklusive
+der Umkehrung für neue Funde, mit der S-007 belegt und noch am selben Tag
+geschlossen wurde.
+
+Volle Suite zum Stand dieses Nachtrags:
+
+```
+pytest -m "not performance" -q            # 1171 passed, 10 deselected, 2 xfailed
+```
+
+Die verbleibenden zwei `xfail` gehören nicht hierher: es sind T-004 und T-005 in
+`tests/test_integration.py` (`test-engineer`). Die Zahl der grünen Tests wandert,
+solange andere Agents parallel schreiben; entscheidend ist, dass aus
+`tests/test_security.py` kein `xfail` und kein `failed` mehr darunter ist.

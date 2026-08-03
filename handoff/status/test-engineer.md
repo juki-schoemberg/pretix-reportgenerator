@@ -562,3 +562,172 @@ flake8 / isort -c / black --check tests/test_integration.py           -> rc 0
 ```
 
 Nur `tests/test_integration.py` geändert. Kein Produktivcode, kein `git commit`.
+
+---
+
+## Verifikation T-001 bis T-003 (2026-08-03)
+
+Gegenprüfung der Fixes, die vier Agenten zu meinen drei Findings geliefert haben.
+Ergebnis in einer Zeile: **alle drei behoben und verifiziert, beide `xfail`-Marker
+entfernt, sieben neue Tests dazu — und zwei neue Befunde, die erst beim
+Gegenprüfen sichtbar wurden.**
+
+Geändert: `tests/test_integration.py`, `tests/test_performance.py`,
+`docs/performance.md`, `handoff/blockers.md`. **Kein Produktivcode, kein
+`git commit`, keine fremde Testdatei angefasst** — insbesondere nicht
+`tests/test_security.py`, an der `security-reviewer` parallel gearbeitet hat.
+
+### Vorgehen: drei Stufen, nicht eine
+
+Ein Test, der `XPASS` meldet, ist kein Beweis, dass der Fix wirkt — er ist ein
+Beweis, dass der Test grün ist. Deshalb je Finding:
+
+1. **Grün ohne `--runxfail`.** Erledigt, beide.
+2. **Misst er noch das Ursprungsproblem?** Die Assertions sind **unverändert
+   geblieben** (eigene Vorgabe aus dem Wellen-3-Bericht: „Marker entfernen,
+   Assertion stehen lassen"). Dazu kommen jetzt die literalen Erwartungswerte:
+   „ungleich" ist eine schwächere Aussage als `"2026-04-24"`, und ein Renderer,
+   der beide Stile gleich falsch macht, hätte „ungleich" ebenfalls erfüllt.
+3. **Neutralisierte Gegenprobe.** Fix zur Laufzeit abgeschaltet (`monkeypatch`,
+   kein Produktivcode angefasst, nichts davon dauerhaft im Repo), Test muss an
+   *derselben* Stelle wieder fallen. Alle drei Neutralisierungen fielen auf
+   genau die Zeichenketten zurück, die im Wellen-3-Blocker stehen — die Tabelle
+   dazu in `handoff/blockers.md`.
+
+Und weil ein Fix, der einen Reproduzierer grün macht, nicht dasselbe ist wie ein
+Fix, der trägt: sieben neue Tests, die dort suchen, wo der jeweilige Fix noch
+falsch sein könnte, nicht dort, wo er schon geprüft ist.
+
+### T-001 — behoben, fünf neue Tests
+
+Der geteilte Renderer trägt. Was ich zusätzlich geprüft habe und warum:
+
+| Neuer Test | Was er ausschließt |
+| --- | --- |
+| alle zwölf Stile, Vorschau **und** Datei, gegen literale Erwartungen | ein Renderer, der nur die zwei Stile des Reproduzierers bedient; und zwei gleich kaputte Renderer, die sich einig sind |
+| verdeckte Spalte zwischen zwei sichtbaren, mit eigenem Format | Paarung über den Index von `definition.columns` statt über die sichtbaren — jedes Format eine Spalte nach links, stiller falscher Wert |
+| Multi-Event, zwei Formate, zwei Zeitzonen | `cell_formats`/`event.timezone` aus dem Schleifenkopf gezogen: eine Datei, in der eine von zwei Zeilen falsch ist |
+| terminierter Export, geprüft am **Mailanhang** | der einzige Pfad, auf dem ein Formatfehler monatelang unbemerkt bleibt, weil es keine Vorschau gibt |
+| XLSX mit **und** ohne Stil, inkl. Uhrzeit in der Zelle | der Zusatzfund von `exporter-dev`; und dass eine ungeformte Zahl eine Zahl bleibt |
+
+Zum Zusatzfund (`as_spreadsheet_value`): **ja, der verdient die Erwähnung**, und
+er hat sie bekommen — `docs/performance.md` 3.6b und ein eigener Absatz im
+Blocker. Begründung: der auslösende Zustand ist nichts Exotisches (Datumsspalte +
+XLSX + Zeitplan), und das Versagen war ein `TypeError` im Celery-Task, also fünf
+Retries, „Internal Error" und danach ein Zeitplan, der aus der periodischen
+Abfrage fällt. Mein Test prüft deshalb nicht nur, dass es nicht mehr kracht,
+sondern **welche Uhrzeit** in der Zelle steht — Auckland-Event, 09:00 UTC, in der
+Tabelle 21:00. Eine Tabellenzelle kann ihre Zone nicht nennen; UTC hineinzu-
+schreiben wäre um zwölf Stunden falsch und völlig unauffällig.
+
+**Eine bewusste Grenze, die ich nicht als Fehler führe, aber aufschreibe:** für
+Spalten **ohne** gesetzten Stil ist die Vorschau weiterhin hübscher als die Datei
+(`€23.50` gegen `23.50`, `No` gegen `False`, lokalisiert gegen ISO+Offset). Das
+ist die dokumentierte Politik von `format_export_cell` und sie ist richtig
+begründet (XLSX behält echte Zahlen, bestehende Dateien ändern sich nicht). Der
+Satz „die Vorschau darf nicht schöner sein als der Export" gilt damit für
+*gesetzte* Stile. Wer das später anders entscheidet, soll wissen, dass es eine
+Entscheidung war.
+
+### T-002 — behoben, drei neue Tests, Aufzählung statt Stichprobe
+
+Die zwei Hälften des Fixes decken einander **nicht** ab — einzeln neutralisiert
+fällt jede auf ihren eigenen Spalten aus, und genau das war die Frage. Statt den
+einen Reproduzierer zu wiederholen, habe ich den Raum geschlossen: jedes Feld mit
+`DataType.MONEY`, in jedem Aggregat, das es zulässt, in einer Zeile — vierzehn
+Geldzellen neben `order.total` als Maßstab. Aus der Registry ermittelt, nicht
+geraten; `join` bietet **kein** Geldfeld an (geprüft), `count` hat keine Skala,
+auf Basis `orderposition` ist kein Geldfeld aggregierbar. Damit ist die
+Aufzählung vollständig, nicht nur lang.
+
+Zwei Ränder haben eigene Tests bekommen: die `AVG`-Rundung von `query-dev` (mit
+umgangener Quantisierung: `Decimal("14.3333333333333")` — die Begründung ist
+damit gemessen und nicht nur behauptet) und die Gegenrichtung, dass ein Aggregat
+über *keine* Zeile `None` bleibt und nicht zu `0.00` wird.
+
+### T-003 — behoben, Docstring nachgeführt
+
+Reine Textnachführung wie angekündigt, plus die Begründung, warum „Ebenen" nicht
+dasselbe ist wie „`join`-Spalten" (S-005-Fix). Nachgemessen: 151 bei 49.484
+Zeilen, 4 bei 494 — unverändert, und das war nicht selbstverständlich, weil die
+neue Dedup-Regel Ebenen zusammenlegen kann. Die beiden Spalten im Lasttest sind
+wirklich verschieden.
+
+### Zwei neue Befunde
+
+* **T-004** (niedrig) — T-002 eine Datentypgrenze weiter: `aggregate_expression`
+  hängt an `DataType.MONEY`, `DataType.DECIMAL` geht ungeschützt durch. Gemessen
+  an `position.tax_rate`: Modellspalte `19.00`, Aggregat `19`. Beide Symptome von
+  T-002. Kein Einzeiler, weil `DECIMAL` Felder verschiedener Skalen umfasst und
+  die Registry heute keine deklariert — das ist eine Entscheidung für `query-dev`
+  und `registry-dev`.
+* **T-005** (niedrig) — der Export löst `event.timezone` je Zelle auf. Entstanden
+  **mit** dem T-001-Fix. `Event.timezone` ist ein hierarkey-Lookup, kein Attribut.
+  Gezählt: Grundlast 22, Aufschlag genau eine Auflösung je formatierter
+  Datumszelle. Gemessen: CSV 11,6 s → 50,4 s (×4,4) auf 94.666 Zeilen, sobald
+  drei Spalten einen Stil tragen. Fix ist eine Handvoll Zeilen bei `exporter-dev`
+  (Zone einmal je Event auflösen, dort wo `_cell_formats()` ohnehin schon einmal
+  je Event gebaut wird).
+
+Beide mit `xfail(strict=True)`-Reproduzierer, gleiche Form wie T-001/T-002.
+
+### Neu in `tests/test_performance.py`
+
+* **XLSX in voller Größe** — in Welle 3 stand hier „nicht messbar". Das war zu
+  kurz: nicht die Plattform kann kein XLSX, sondern `_render_xlsx` **ohne**
+  `output_file`. Mit Dateihandle, also so wie pretix' Exportdienst schreibt,
+  läuft es auch unter Windows. 94.666 Zeilen, 22 Spalten: **69,7 s, 8,4 MiB**,
+  rund 15× langsamer als dieselbe Ausgabe als CSV. Damit ist eine offene Zeile
+  aus `docs/performance.md` Abschnitt 5 geschlossen.
+* **Was die Spaltenformatierung kostet** — derselbe Report, einmal ohne und
+  einmal mit drei Stilen. Die Messung, aus der T-005 kommt. Zugesichert wird
+  darin nur das Deterministische: ohne Stil liefert `_cell_formats()` `None` und
+  der alte Weg ist buchstäblich der alte Weg. Die Laufzeit geht in die Tabelle
+  und wird **nicht** assertiert — sie soll sich ändern, wenn T-005 behoben wird.
+
+Laufzeit des Lastmoduls damit 110 s → 270 s. Weiterhin `-m performance`, wird von
+`pytest -m "not performance"` sauber abgewählt (10 deselected).
+
+### Läufe
+
+```
+pytest tests/test_integration.py -q                  -> 45 passed, 2 xfailed
+pytest tests/test_integration.py -k finding -q       ->  2 passed, 2 xfailed
+pytest tests/test_performance.py -m performance -q -s-> 10 passed (~270 s)
+pytest -m "not performance" -q                       -> 1171 passed, 10 deselected,
+                                                        2 xfailed
+flake8 / isort -c / black --check (eigene vier)      -> rc 0
+```
+
+Die volle Suite viermal gelaufen, dreimal in zufälliger und einmal in fester
+Reihenfolge, jedes Mal grün. Ein früherer Lauf meldete `1169 passed, 2 failed` —
+das war `tests/test_security.py`, an der `security-reviewer` in genau diesem
+Moment gearbeitet hat; der nächste Lauf über dieselbe Datei war grün. Nicht meine
+Zahl und kein Befund, aber der Vollständigkeit halber notiert.
+
+`tests/test_smoke.py::test_no_migration_created_yet` ist **nicht** mehr rot. Der
+Repo-Stand hat damit zum ersten Mal keinen dauerhaft roten Test.
+
+### Was ich bewusst nicht getan habe
+
+* **Die Gegenproben nicht als dauerhafte Tests eingecheckt.** Sie hängen an
+  `format_export_cell`, `MoneyField.from_db_value` und `aggregate_expression`,
+  also an Interna fremder Module. Ein `monkeypatch` darauf ist als
+  Verifikationsschritt richtig und als Dauertest eine Bremse für den nächsten,
+  der dort umbaut. Die Ergebnisse stehen stattdessen wörtlich in den Docstrings
+  der beiden Reproduzierer, damit ein späterer Fehlschlag als „der Fix wurde
+  rückgängig gemacht" gelesen wird und nicht als „irgendein Formattest ist
+  kaputt".
+* **T-004 und T-005 nicht selbst behoben.** Beides ist Produktivcode in fremdem
+  Gebiet.
+* **PostgreSQL weiterhin nicht geprüft.** Unverändert Umgebungsentscheidung. Für
+  T-002 ist die Frage kleiner geworden (`MoneyField` wirkt auf der Python-Seite
+  und damit backend-unabhängig), für T-004 gilt sie voll.
+
+### Nächster Schritt
+
+1. **exporter-dev:** T-005, ein paar Zeilen, misst sich selbst — der Test dazu
+   schlägt mit `XPASS` um, sobald es stimmt.
+2. **query-dev + registry-dev:** T-004 entscheiden (Skala in `ReportField` oder
+   `decimal_places` des Modellfeldes), nicht nur fixen.
+3. **Orchestrator:** PostgreSQL-Lauf, vier Testmodule, unverändert offen.

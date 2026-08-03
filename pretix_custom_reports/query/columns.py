@@ -16,12 +16,30 @@ Field declares                   Strategy                            Queries
 ``value_getter``                 call it with the row object         0 extra
 ``annotation`` (+ alias)         read the annotation alias           0 extra
 plain single-valued ``orm_path`` ``select_related`` + attribute walk 0 extra
-multi-valued + ``aggregate``     correlated subquery, or a prefetch  0 / 1 extra
+multi-valued + ``aggregate``     correlated subquery, or a prefetch  0 / below
 ===============================  ==================================  ============
 
-"0 extra" means: still one single SELECT for the whole report. The only strategy
-that costs a second query is ``join``, and it costs exactly one query per chunk
-regardless of row count -- see below.
+"0 extra" means: still one single SELECT for the whole report, whatever the row
+count. ``join`` is the one strategy that costs more, and the price is::
+
+    1 + levels x ceil(rows / chunk_size)   queries
+
+because ``QuerySet.iterator(chunk_size=...)`` runs ``prefetch_related`` **once per
+chunk** rather than once for the result set. A wide order report with two ``join``
+columns therefore measures 4 queries at 494 rows and 151 at 49.484
+(docs/performance.md 3.3). That is not an N+1 -- the cost *per row* falls as the
+report grows -- and it is what keeps the memory flat at six-digit row counts
+(docs/performance.md 3.5); the earlier promise of "one query per prefetch level,
+independent of the row count" held for one chunk only and is corrected here
+(T-003 in handoff/blockers.md).
+
+*levels* is the number of **distinct** prefetch levels, not the number of ``join``
+columns: levels that agree on relation, condition, canceled rule and inner
+``select_related`` share one ``Prefetch``, so twenty identical ``join`` columns
+cost what one costs, and only genuinely different ones add a level
+(:func:`~pretix_custom_reports.query.relations.join_leaf_to_attr`, S-005).
+*chunk_size* is the exporter's, defaulting to
+:data:`~pretix_custom_reports.contracts.protocols.DEFAULT_CHUNK_SIZE`.
 
 Why ``join`` is a prefetch and not SQL
 -------------------------------------
@@ -361,6 +379,9 @@ def _aggregated_column(
 
     condition = relation_filter(field, chain, include_canceled)
     if spec.aggregate is Aggregate.JOIN:
+        # ``alias`` is only the fallback name for the prefetch: two ``join``
+        # columns that select the same related rows share one, keyed by what the
+        # queryset does rather than by which column asked first (S-005).
         specs, read_path = relations.join_prefetch_specs(
             base_model, source, include_canceled, condition, alias
         )
@@ -370,7 +391,15 @@ def _aggregated_column(
         )
 
     expression = relations.subquery_aggregate(
-        base_model, source, spec.aggregate, include_canceled, condition
+        base_model,
+        source,
+        spec.aggregate,
+        include_canceled,
+        condition,
+        # The registry's declaration, so that a summed amount keeps its two
+        # decimal places on every backend (T-002). Nothing here inspects the
+        # model field for it.
+        datatype=field.datatype,
     )
     return ColumnBuild(
         column=_column(spec, field, label, _attribute_renderer(alias)),

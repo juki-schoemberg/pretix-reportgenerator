@@ -97,7 +97,11 @@ the explicit ``event=`` filter is applied on top regardless (pitfall 2 in sectio
 
 from typing import Any, Dict, List, Optional, Tuple
 
+import datetime
+import hashlib
+import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 from django.db.models import (
     Avg,
     Count,
@@ -119,16 +123,25 @@ from pretix_custom_reports.contracts.errors import (
     CompilationError,
     FieldContractError,
 )
-from pretix_custom_reports.contracts.fields import Aggregate, Base
+from pretix_custom_reports.contracts.fields import Aggregate, Base, DataType
+from pretix_custom_reports.registry.annotations import (
+    MONEY_DECIMAL_PLACES,
+    MONEY_MAX_DIGITS,
+    MoneyField,
+)
 
 __all__ = [
     "AGGREGATE_FUNCTIONS",
+    "MONEY_AGGREGATES",
     "PrefetchSpec",
     "RelationChain",
     "RelationHop",
+    "aggregate_expression",
     "base_model_for",
     "base_queryset",
+    "condition_signature",
     "exists_subquery",
+    "join_leaf_to_attr",
     "join_prefetch_specs",
     "leaf_queryset",
     "position_queryset",
@@ -147,6 +160,9 @@ _BASE_MODELS = {Base.ORDER: Order, Base.ORDERPOSITION: OrderPosition}
 #: in ``django.contrib.postgres``, and this plugin has to work on SQLite and MySQL
 #: too), so ``join`` goes through a prefetch and a Python join instead -- see
 #: :func:`join_prefetch_specs` and ``query/columns.py``.
+#:
+#: Call :func:`aggregate_expression` rather than this table: the money aggregates
+#: need an explicit output field, and the table alone does not know about it.
 AGGREGATE_FUNCTIONS = {
     Aggregate.COUNT: lambda expr: Count(expr),
     Aggregate.COUNT_DISTINCT: lambda expr: Count(expr, distinct=True),
@@ -159,6 +175,72 @@ AGGREGATE_FUNCTIONS = {
 #: Aggregates whose empty result reads better as 0 than as blank. A missing sum is
 #: genuinely unknown; a missing count is zero.
 _COALESCE_TO_ZERO = frozenset({Aggregate.COUNT, Aggregate.COUNT_DISTINCT})
+
+#: Aggregates that return an amount when they run over an amount, and therefore
+#: have to carry :class:`~pretix_custom_reports.registry.annotations.MoneyField`
+#: as their output field. ``COUNT``/``COUNT_DISTINCT`` return a cardinality and
+#: have no scale to lose; ``JOIN`` never becomes SQL at all.
+MONEY_AGGREGATES = frozenset(
+    {Aggregate.SUM, Aggregate.MIN, Aggregate.MAX, Aggregate.AVG}
+)
+
+
+def money_output_field() -> MoneyField:
+    """Output field that pins an amount to two decimal places on every backend.
+
+    A fresh instance per call: a Django ``Field`` instance carries state once it
+    is attached to an expression, so sharing one between two annotations of one
+    queryset is asking for trouble.
+    """
+    return MoneyField(max_digits=MONEY_MAX_DIGITS, decimal_places=MONEY_DECIMAL_PLACES)
+
+
+def aggregate_expression(
+    aggregate: Aggregate, target: Any, datatype: Optional[DataType] = None
+) -> Any:
+    """Build the aggregate expression for *target*, with the right output field.
+
+    Money is the one datatype where the aggregate has to say what it produces.
+    ``Sum("price")`` infers its output field from the model column -- a plain
+    ``DecimalField`` -- and SQLite's converter only quantises a *column*, not a
+    computed expression, so a summed amount comes back as ``Decimal("23.5")``
+    while ``order.total`` in the next cell of the same row comes back as
+    ``Decimal("23.50")``. One report, two notations, and a different file on
+    PostgreSQL, which keeps the scale of ``numeric(13, 2)`` across ``SUM``. That
+    is T-002 in handoff/blockers.md; ``registry/annotations.py`` fixed it for the
+    registry's own money expressions, and this is the same fix for the aggregate
+    the *user* picks in the editor.
+
+    Neither ``Cast`` nor ``Round`` helps -- measured by registry-dev and written
+    up in the :class:`~pretix_custom_reports.registry.annotations.MoneyField`
+    docstring: the scale is lost in the converter, not in the SQL, so the fix has
+    to hang on the output field.
+
+    **``AVG`` is quantised too, and that is a rounding decision, not a format
+    correction.** An average of three amounts is mathematically not an amount
+    with two decimal places, and 43,00 / 3 is a periodic number that no scale
+    represents. It is rounded here anyway, because the alternative is worse: the
+    unrounded value is whatever the backend's own arithmetic produced --
+    ``14.333333333333334`` from SQLite's float path, a ``numeric`` of
+    backend-defined scale from PostgreSQL -- so leaving it alone does not
+    preserve precision, it exports an artefact of the installation. A cell
+    labelled "average price" reads as money, is compared against money and gets
+    added up by hand in a spreadsheet, so it is presented as money, rounded
+    half-even by ``DecimalField``'s own context. Anyone who needs the exact
+    quotient has the sum and the count as separate columns.
+
+    :param datatype: the **registry's** declaration for the field, not something
+        inferred from the model (CLAUDE.md rule 2). ``None`` means "not money",
+        which is the safe default: it changes nothing.
+    """
+    func = AGGREGATE_FUNCTIONS.get(aggregate)
+    if func is None:
+        raise CompilationError(
+            f"Aggregate {aggregate} is not available as a database expression."
+        )
+    if datatype is DataType.MONEY and aggregate in MONEY_AGGREGATES:
+        return func(target, output_field=money_output_field())
+    return func(target)
 
 
 @dataclass(frozen=True)
@@ -217,10 +299,10 @@ class RelationChain:
 class PrefetchSpec:
     """A prefetch level a ``join`` column needs, before it becomes a ``Prefetch``.
 
-    Data rather than a ready ``Prefetch`` so that the plan can de-duplicate the
-    intermediate levels: Django refuses the same lookup twice with two querysets
-    ("lookup was already seen with a different queryset"), and three ``join``
-    columns over ``all_positions`` would otherwise collide.
+    Data rather than a ready ``Prefetch`` so that the plan can de-duplicate
+    levels: Django refuses the same lookup twice with two querysets ("lookup was
+    already seen with a different queryset"), and three ``join`` columns over
+    ``all_positions`` would otherwise collide.
     """
 
     lookup: str
@@ -229,7 +311,15 @@ class PrefetchSpec:
 
     @property
     def dedup_key(self) -> Tuple[str, Optional[str]]:
-        """Two specs with the same key are interchangeable."""
+        """Two specs with the same key are interchangeable.
+
+        That is a real claim, not a hope, and it rests on where ``to_attr`` comes
+        from: :func:`join_prefetch_specs` derives it from everything that shapes
+        the leaf queryset -- relation, condition, canceled rule, inner
+        ``select_related`` -- so an equal key means an equivalent queryset. An
+        intermediate level has no ``to_attr`` and is built the same way for every
+        column that crosses it. See :func:`join_leaf_to_attr` (S-005).
+        """
         return (self.lookup, self.to_attr)
 
     def build(self) -> Prefetch:
@@ -439,6 +529,7 @@ def subquery_aggregate(
     aggregate: Aggregate,
     include_canceled: bool,
     relation_filter: Optional[Q] = None,
+    datatype: Optional[DataType] = None,
 ) -> Any:
     """A correlated aggregate over a multi-valued relation, as one expression.
 
@@ -446,17 +537,17 @@ def subquery_aggregate(
         take part. This is what makes ``answer.<identifier>`` expressible at all:
         without ``question__identifier=...`` the aggregate would mix every
         question's answers together.
+    :param datatype: what the registry says the field is. Only
+        :attr:`~pretix_custom_reports.contracts.fields.DataType.MONEY` changes
+        anything -- see :func:`aggregate_expression`. The output field travels out
+        of the inner queryset with the selected column, so the ``Subquery`` around
+        it inherits the quantisation without being told again.
     """
     chain = relation_chain(model, orm_path)
     if chain is None:
         raise CompilationError(
             f"{orm_path!r} is not a multi-valued relation on {model.__name__}; "
             f"it cannot be aggregated."
-        )
-    func = AGGREGATE_FUNCTIONS.get(aggregate)
-    if func is None:
-        raise CompilationError(
-            f"Aggregate {aggregate} is not available as a database expression."
         )
 
     correlation = chain.correlation_path
@@ -470,7 +561,7 @@ def subquery_aggregate(
     inner = (
         inner.order_by()
         .values(correlation)
-        .annotate(_pcr_value=func(target))
+        .annotate(_pcr_value=aggregate_expression(aggregate, target, datatype))
         .values("_pcr_value")[:1]
     )
 
@@ -513,24 +604,149 @@ def exists_subquery(
     return Exists(inner.filter(condition).order_by().values("pk"))
 
 
+#: Prefix of a content-derived ``to_attr``. No double underscore, so it can never
+#: be read as a lookup path, and namespaced so it cannot shadow a model attribute.
+_JOIN_ATTR_PREFIX = "pcr_j"
+
+#: Value types a condition may contain and still be compared as text: ``repr`` is
+#: unambiguous for all of them and tells ``1``, ``True``, ``1.0``, ``"1"`` and
+#: ``Decimal("1")`` apart. Anything else -- a model instance above all -- gets no
+#: signature, because two of them can share a ``repr`` and differ in the database.
+_SIGNATURE_SCALARS = (
+    bool,
+    int,
+    float,
+    str,
+    bytes,
+    Decimal,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    uuid.UUID,
+)
+
+
+def condition_signature(condition: Optional[Q]) -> Optional[str]:
+    """Text that two equivalent ``Q`` objects share, or ``None`` if unrepresentable.
+
+    A stricter cousin of ``str(Q)``. The looser form would do for the conditions
+    :mod:`pretix_custom_reports.registry.hints` builds -- they are JSON-safe
+    primitives by contract -- but ``str`` renders a model instance through its
+    ``__str__``, and two ``Question`` rows with the same label would then look
+    equal. Merging those two prefetches would put one question's answers in the
+    other question's column: wrong output, no error. So unrepresentable values
+    yield ``None``, and the caller falls back to keeping the prefetches apart.
+
+    ``None`` as *input* is a condition in its own right ("no condition") and gets
+    its own signature; ``None`` as *output* means "cannot say".
+
+    The result is stable within a process, which is all it is used for: keying the
+    prefetches of one compile run. It is not canonical -- ``Q(a=1) & Q(b=2)`` and
+    ``Q(b=2) & Q(a=1)`` sign differently -- and it does not need to be. Two
+    columns that ask for the same thing build their condition the same way,
+    because both come from the same registry field.
+    """
+    if condition is None:
+        return "none"
+    return _q_signature(condition)
+
+
+def _q_signature(node: Q) -> Optional[str]:
+    parts: List[str] = []
+    for child in node.children:
+        if isinstance(child, Q):
+            token = _q_signature(child)
+        elif isinstance(child, (tuple, list)) and len(child) == 2:
+            value = _value_signature(child[1])
+            token = None if value is None else f"{child[0]}={value}"
+        else:
+            token = None
+        if token is None:
+            return None
+        parts.append(token)
+    prefix = "NOT" if node.negated else ""
+    return f"{prefix}({node.connector}:{','.join(parts)})"
+
+
+def _value_signature(value: Any) -> Optional[str]:
+    if value is None or isinstance(value, _SIGNATURE_SCALARS):
+        return repr(value)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [_value_signature(item) for item in value]
+        if any(item is None for item in items):
+            return None
+        # An ``in`` lookup against a set has no inherent order. Sorting the tokens
+        # makes two equal sets sign equally; for a list the order is part of the
+        # value and is kept.
+        if isinstance(value, (set, frozenset)):
+            items = sorted(items)
+        return "[" + ",".join(items) + "]"
+    return None
+
+
+def join_leaf_to_attr(
+    leaf_model: Any,
+    lookup: str,
+    include_canceled: bool,
+    inner_select: Optional[str],
+    condition: Optional[Q],
+) -> Optional[str]:
+    """Name for the leaf ``to_attr``, shared by every column that wants the same rows.
+
+    Two ``join`` columns may share one ``Prefetch`` exactly when their leaf
+    querysets select the same rows *and* carry the same ``select_related`` -- so
+    the name is derived from all four things that shape it, and from nothing else.
+    Notably not from the column index: that is what made the de-duplication in
+    :func:`~pretix_custom_reports.query.plan._dedupe_prefetches` a no-op and let
+    twenty identical ``join`` columns cost twenty prefetch queries (S-005 in
+    docs/security-review.md).
+
+    ``inner_select`` is part of the identity because dropping it would be an N+1
+    dressed up as a saving: ``item.name`` needs ``select_related("item")`` on the
+    prefetched positions, ``position.attendee_name`` does not, and a shared
+    prefetch built for the second would make the first fetch an item per row.
+
+    Returns ``None`` when the condition has no faithful text form
+    (:func:`condition_signature`); the caller then falls back to a per-column name
+    and the old, always-separate behaviour.
+    """
+    signature = condition_signature(condition)
+    if signature is None:
+        return None
+    parts = (
+        leaf_model._meta.label_lower,
+        lookup,
+        "with-canceled" if include_canceled else "without-canceled",
+        inner_select or "",
+        signature,
+    )
+    digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+    return f"{_JOIN_ATTR_PREFIX}{digest[:16]}"
+
+
 def join_prefetch_specs(
     model: Any,
     orm_path: str,
     include_canceled: bool,
     relation_filter: Optional[Q],
-    leaf_to_attr: str,
+    fallback_to_attr: str,
 ) -> Tuple[Tuple[PrefetchSpec, ...], Tuple[str, ...]]:
     """Prefetch levels and the attribute path a ``join`` renderer walks.
 
     Returns ``(specs, read_path)``. *specs* has one entry per multi-valued hop,
     outermost first -- Django needs the parent of a nested prefetch prefetched too.
     Only the innermost carries the ``relation_filter``, the ``select_related`` for
-    the single-valued tail, and a *unique* ``to_attr``.
+    the single-valued tail, and a ``to_attr``.
 
-    The unique ``to_attr`` on the leaf is what lets three ``join`` columns coexist
-    over the same relation with three different filters. The intermediate levels
-    deliberately get no ``to_attr``, so they de-duplicate to one query no matter how
-    many columns need them.
+    The leaf ``to_attr`` is what lets three ``join`` columns coexist over the same
+    relation with three different filters -- and, since it is derived from the
+    queryset's identity rather than from the column (:func:`join_leaf_to_attr`),
+    what lets three columns that want the *same* rows share one query. The
+    intermediate levels deliberately get no ``to_attr``, so they collapse to one
+    query no matter how many columns need them.
+
+    :param fallback_to_attr: per-column name, used only when the leaf queryset has
+        no derivable identity. Must be unique across the report.
     """
     chain = relation_chain(model, orm_path)
     if chain is None:
@@ -539,8 +755,21 @@ def join_prefetch_specs(
             f"aggregate 'join' needs one."
         )
 
-    specs: List[PrefetchSpec] = []
     last = len(chain.hops) - 1
+    leaf_hop = chain.hops[last]
+    inner_select = select_related_prefix(leaf_hop.model, chain.remainder)
+    leaf_to_attr = (
+        join_leaf_to_attr(
+            leaf_hop.model,
+            chain.accessor_path(last),
+            include_canceled,
+            inner_select,
+            relation_filter,
+        )
+        or fallback_to_attr
+    )
+
+    specs: List[PrefetchSpec] = []
     for index, hop in enumerate(chain.hops):
         is_leaf = index == last
         if hop.model is OrderPosition:
@@ -550,7 +779,6 @@ def join_prefetch_specs(
         if is_leaf:
             if relation_filter is not None:
                 queryset = queryset.filter(relation_filter)
-            inner_select = select_related_prefix(hop.model, chain.remainder)
             if inner_select:
                 queryset = queryset.select_related(inner_select)
         # Deterministic order inside the cell: without it the content depends on

@@ -62,7 +62,17 @@ class PrettyJSONFormField(forms.JSONField):
             return value
         if value is None:
             return ""
-        return json.dumps(value, indent=2, ensure_ascii=False, cls=self.encoder)
+        # ``ensure_ascii=True`` is not cosmetic and must not be "improved" back
+        # to False for prettier umlauts (security review S-007): a stored lone
+        # surrogate -- ``"\ud800"`` in a column label, storable through this very
+        # textarea because structural validation says nothing about
+        # encodability -- produces a str that ``HttpResponse`` cannot encode
+        # (django/http/response.py, ``make_bytes``). The change form is the
+        # repair path for such a report, so this is the one page that must not
+        # die on it. Escaped output stays valid JSON and round-trips through
+        # ``json.loads`` unchanged; the graphical editor has always done the same
+        # via pretix' ``escapejson_dumps``.
+        return json.dumps(value, indent=2, ensure_ascii=True, cls=self.encoder)
 
 
 class ModelErrorRemapMixin:
@@ -127,6 +137,43 @@ class ReportDefinitionForm(ModelErrorRemapMixin, forms.ModelForm):
         # worthless. Compare against the value loaded from the database
         # instead.
         self.fields["definition"].show_hidden_initial = False
+
+    def clean_identifier(self) -> str:
+        """Reject an identifier that is already taken in this event/organizer.
+
+        Django cannot do this for us. The constraints are
+        ``UniqueConstraint(["event", "identifier"])`` and, for templates,
+        ``UniqueConstraint(["organizer", "identifier"])`` (models.py
+        ``Meta.constraints``), but neither ``event`` nor ``organizer`` is a form
+        field: ``BaseModelForm._get_validation_exclusions`` therefore excludes
+        them, and ``Model.validate_unique`` skips every constraint that mentions
+        an excluded field (django/db/models/base.py, ``_get_unique_checks``).
+        Without this method the duplicate reaches the database and raises an
+        ``IntegrityError`` inside the view's ``transaction.atomic`` -- a 500
+        instead of a form error (security review S-004). The editor makes that
+        easy to hit by accident, because it posts the identifier back in a
+        hidden input, so duplicating a browser tab is enough.
+
+        An empty identifier stays legal: ``ReportDefinition.save()`` mints a
+        free one.
+        """
+        value = self.cleaned_data.get("identifier") or ""
+        if not value:
+            return value
+        # Reuse the model helper instead of rebuilding the query here: it picks
+        # the event or the organizer side of the XOR (this form serves both),
+        # excludes this very row so that an edit may keep its own identifier,
+        # and runs under ``scopes_disabled`` -- which is safe because ``__init__``
+        # has already pinned the owner, so the query is never unbounded.
+        if self.instance._identifier_taken(value):
+            raise ValidationError(
+                _(
+                    "This identifier is already in use here. Please choose a "
+                    "different one."
+                ),
+                code="duplicate_identifier",
+            )
+        return value
 
     def clean_definition(self) -> Optional[dict]:
         """Structural validation, reported on the field the user is looking at.

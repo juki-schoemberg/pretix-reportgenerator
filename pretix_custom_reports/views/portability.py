@@ -160,7 +160,11 @@ class ReportExportView(EventReportMixin, EventPermissionRequiredMixin, View):
             )
             return redirect(report_url(URL_NAME_LIST, request.event))
 
-        payload = json.dumps(document, indent=2, ensure_ascii=False)
+        # ``ensure_ascii=True``: a definition written before the payload gate
+        # learned about unpaired surrogates (S-003) can still hold one, and
+        # ``"\ud800".encode("utf-8")`` is a 500, not a file. ``\uXXXX`` escapes
+        # are the same document to every JSON reader, importer included.
+        payload = json.dumps(document, indent=2, ensure_ascii=True)
         response = HttpResponse(
             payload.encode("utf-8"), content_type="application/json"
         )
@@ -234,7 +238,13 @@ class ReportImportView(EventReportMixin, EventPermissionRequiredMixin, TemplateV
     # -- the two steps ----------------------------------------------------
 
     def post(self, request, *args, **kwargs):
-        strategy = ResolutionStrategy.coerce(request.POST.get(FORM_STRATEGY))
+        # ``coerce_user_choice``, not ``coerce``: the form offers "abort" and
+        # "skip". "keep" is the event copy's strategy and skips the compiler
+        # check inside ``resolve_definition``; a POST field must not be able to
+        # turn that off (S-006).
+        strategy = ResolutionStrategy.coerce_user_choice(
+            request.POST.get(FORM_STRATEGY)
+        )
         confirm = request.POST.get(FORM_ACTION) == ACTION_CONFIRM
 
         try:

@@ -279,7 +279,10 @@ class TemplateExportView(
             )
             return redirect(self.get_success_url())
         response = HttpResponse(
-            json.dumps(document, indent=2, ensure_ascii=False).encode("utf-8"),
+            # ``ensure_ascii=True`` for the same reason as in
+            # ``views/portability.py``: an already stored unpaired surrogate
+            # (S-003) must not turn a download into a 500.
+            json.dumps(document, indent=2, ensure_ascii=True).encode("utf-8"),
             content_type="application/json",
         )
         response["Content-Disposition"] = (
@@ -364,7 +367,11 @@ class TemplateApplyView(EventTemplateMixin, EventPermissionRequiredMixin, Templa
         return self.render_to_response(self._context(plan))
 
     def post(self, request, *args, **kwargs):
-        strategy = ResolutionStrategy.coerce(request.POST.get(FORM_STRATEGY))
+        # Only the two strategies the page offers; see ``views/portability.py``
+        # and S-006.
+        strategy = ResolutionStrategy.coerce_user_choice(
+            request.POST.get(FORM_STRATEGY)
+        )
         try:
             plan = self._plan(strategy)
         except TemplateAccessDenied as e:

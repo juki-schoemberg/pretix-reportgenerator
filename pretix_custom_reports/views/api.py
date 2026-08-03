@@ -40,15 +40,12 @@ Security rules that are *not* negotiable in here
 
 from typing import Any, Dict, List, Optional, Tuple
 
-import datetime
-import decimal
 import json
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import Http404, JsonResponse
 from django.template.loader import render_to_string
 from django.urls import re_path
-from django.utils import formats, timezone
 from django.utils.translation import gettext_lazy as _
 from django.views.generic import View
 from pretix.control.permissions import EventPermissionRequiredMixin
@@ -107,13 +104,14 @@ __all__ = [
     "PreviewView",
     "ValidateView",
     "api_urlpatterns",
+    "get_cell_renderer",
     "get_compiler",
     "get_registry",
 ]
 
 
 # ---------------------------------------------------------------------------
-# The two seams: registry and compiler
+# The three seams: registry, compiler, cell renderer
 # ---------------------------------------------------------------------------
 
 
@@ -146,6 +144,44 @@ def get_compiler():
     from ..query.compiler import ReportQueryCompiler
 
     return ReportQueryCompiler(get_registry())
+
+
+def get_cell_renderer():
+    """The function the preview renders one cell value with.
+
+    The third seam of this module, next to :func:`get_registry` and
+    :func:`get_compiler`, and it exists for the same two reasons: the import
+    stays lazy, so importing this module at URLconf time does not drag the
+    exporter (and with it the models, the compiler and the registry) in, and a
+    test can substitute it in one place.
+
+    What it returns is
+    :func:`pretix_custom_reports.exporters.format_cell_value` -- the *one*
+    implementation of "how does a value look once it is a string" in this
+    plugin (finding T-001). Preview and export used to have one each, which is
+    how "date only" came to show a date on screen and a full timestamp in the
+    file. Identical arguments, identical return value, identical exceptions:
+    the function was moved there verbatim, and
+    ``tests/test_exporters.py::test_the_preview_and_the_export_share_one_renderer``
+    compares the two over 800 combinations for as long as two exist.
+
+    Note that the preview calls ``format_cell_value`` and **not**
+    ``format_export_cell``. The latter hands unstyled values back natively
+    typed, which is right for a spreadsheet and wrong here: a preview cell must
+    always be a string, because it goes into a JSON response.
+
+    The renderer is strict on purpose and swallows nothing, so a style that does
+    not fit its column's datatype -- ``date_only`` on a time-of-day column,
+    reachable through an imported or hand-edited definition -- raises. That is
+    the behaviour the preview had before this seam existed and it stays
+    deliberately: on the export path a stored definition is run unattended and
+    an exception costs five Celery retries, so ``format_export_cell`` catches
+    there; here a human is watching, and a 500 that names the broken column
+    beats a preview that quietly disagrees with the file.
+    """
+    from ..exporters import format_cell_value
+
+    return format_cell_value
 
 
 # ---------------------------------------------------------------------------
@@ -346,11 +382,24 @@ class _ApiView(PluginActiveMixin, EventPermissionRequiredMixin, View):
     api_version = 1
 
     def json(self, payload: Dict[str, Any], status: int = 200) -> JsonResponse:
+        # ``ensure_ascii=True`` on purpose (finding S-003). A lone surrogate --
+        # ``"\ud800"`` -- is syntactically valid JSON, so it can reach us through
+        # an import file or the editor's JSON panel and sit in a ``Column.label``
+        # or a filter value. With ``ensure_ascii=False`` the response body is
+        # built as a ``str`` and then encoded to UTF-8 by
+        # ``django/http/response.py``, which raises ``UnicodeEncodeError`` on
+        # such a value: a 500 on every ``api/validate/`` and ``api/preview/``
+        # call for that report, i.e. a report that can no longer be opened or
+        # repaired in the editor. Escaping it to ``\ud800`` keeps the response
+        # ASCII-clean and encodable. The browser side is unaffected: the editor
+        # reads every response with ``JSON.parse``, for which a ``\uXXXX``
+        # escape and the raw character are the same string. Non-ASCII labels
+        # therefore travel escaped and arrive intact.
         return JsonResponse(
             payload,
             status=status,
             encoder=DjangoJSONEncoder,
-            json_dumps_params={"ensure_ascii": False},
+            json_dumps_params={"ensure_ascii": True},
         )
 
     def fail(
@@ -952,12 +1001,13 @@ class PreviewView(_ApiView):
         limit: int,
         event: Any,
     ) -> List[List[str]]:
+        format_cell_value = get_cell_renderer()
         formats_by_index = self._formats_by_index(definition, compiled)
         out: List[List[str]] = []
         for row in compiled.iter_rows(limit=limit):
             out.append(
                 [
-                    format_cell(
+                    format_cell_value(
                         value,
                         formats_by_index[index][0],
                         formats_by_index[index][1],
@@ -984,77 +1034,6 @@ class PreviewView(_ApiView):
             fmt = visible[index].format if index < len(visible) else None
             out.append((fmt, column.datatype))
         return out
-
-
-def format_cell(value: Any, fmt: Any, datatype: Any, event: Any) -> str:
-    """Render one preview cell as a display string.
-
-    Preview-only. This is *not* the exporter's renderer: CSV and XLSX go through
-    ``ListExporter`` (CLAUDE.md rule 6) and keep ``Decimal``/``datetime`` as
-    native types. Values that already arrive as ``str`` are passed through
-    unchanged, so this stays a no-op if the compiler formats a value itself.
-    """
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-
-    if isinstance(value, bool):
-        style = getattr(fmt, "boolean_style", None)
-        if style is BooleanStyle.TRUE_FALSE:
-            return "true" if value else "false"
-        if style is BooleanStyle.ONE_ZERO:
-            return "1" if value else "0"
-        return str(_("Yes")) if value else str(_("No"))
-
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
-        return _format_temporal(value, getattr(fmt, "date_style", None), event)
-
-    if isinstance(value, (decimal.Decimal, int, float)):
-        return _format_number(
-            value, getattr(fmt, "number_style", None), datatype, event
-        )
-
-    return str(value)
-
-
-def _format_temporal(value: Any, style: Any, event: Any) -> str:
-    if isinstance(value, datetime.datetime) and timezone.is_aware(value):
-        try:
-            value = timezone.localtime(value, event.timezone)
-        except Exception:  # pragma: no cover - defensive
-            pass
-    is_datetime = isinstance(value, datetime.datetime)
-    is_time = isinstance(value, datetime.time) and not is_datetime
-
-    if style is DateStyle.ISO:
-        return value.isoformat()
-    if style is DateStyle.TIME_ONLY or (is_time and style is None):
-        return formats.date_format(value, "TIME_FORMAT")
-    if style is DateStyle.DATE_ONLY:
-        return formats.date_format(value, "SHORT_DATE_FORMAT")
-    if style is DateStyle.SHORT:
-        return formats.date_format(
-            value, "SHORT_DATETIME_FORMAT" if is_datetime else "SHORT_DATE_FORMAT"
-        )
-    if style is DateStyle.LONG:
-        return formats.date_format(value, "l, j F Y H:i" if is_datetime else "l, j F Y")
-    return formats.date_format(
-        value, "DATETIME_FORMAT" if is_datetime else "DATE_FORMAT"
-    )
-
-
-def _format_number(value: Any, style: Any, datatype: Any, event: Any) -> str:
-    if style is NumberStyle.CURRENCY or (style is None and datatype is DataType.MONEY):
-        try:
-            from pretix.base.templatetags.money import money_filter
-
-            return money_filter(decimal.Decimal(str(value)), event.currency)
-        except Exception:  # pragma: no cover - defensive
-            return str(value)
-    if style is NumberStyle.LOCALIZED:
-        return formats.number_format(value, use_l10n=True)
-    return str(value)
 
 
 # ---------------------------------------------------------------------------

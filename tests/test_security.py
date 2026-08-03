@@ -31,6 +31,7 @@ from typing import Any, Dict, List
 import ast
 import datetime
 import importlib
+import io
 import json
 import pathlib
 import pytest
@@ -77,6 +78,7 @@ from pretix_custom_reports.portability.payload import (
     MAX_STRING_CHARS,
     load_json_object,
 )
+from pretix_custom_reports.portability.resolution import ResolutionStrategy
 from pretix_custom_reports.signals import URL_NAMESPACE
 from pretix_custom_reports.views.api import api_urlpatterns
 from pretix_custom_reports.views.crud import event_urlpatterns
@@ -1419,8 +1421,6 @@ def test_the_confirmation_step_ignores_a_resolved_definition_from_the_browser(
 
 
 def test_an_unknown_strategy_falls_back_to_abort(event):
-    from pretix_custom_reports.portability.resolution import ResolutionStrategy
-
     for hostile in ("keep\x00", "KEEP", "', 'skip", None, 42, ["skip"]):
         assert ResolutionStrategy.coerce(hostile) == ResolutionStrategy.ABORT
 
@@ -1432,8 +1432,6 @@ def test_the_import_view_never_accepts_keep_from_the_browser(admin_client, event
     so offering it through the form would let a file store a report the target
     event cannot run.
     """
-    from pretix_custom_reports.portability.resolution import ResolutionStrategy
-
     body = json.dumps(definition(columns=("answer.does-not-exist",)))
     response = admin_client.post(
         event_url("event.reports.import", event),
@@ -1462,56 +1460,227 @@ def test_the_portability_package_never_deserialises_anything_but_json():
 
 
 # ---------------------------------------------------------------------------
-# The lone surrogate (S-003)
+# The lone surrogate (S-003 and S-007, both closed 2026-08-03)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-003: neither the payload gate nor the structural validator "
-    "rejects an unpaired surrogate, so it travels straight into the database.",
-)
 def test_a_lone_surrogate_is_refused_by_the_payload_gate():
-    """``"\\ud800"`` is legal JSON syntax but not encodable as UTF-8."""
-    raw = b'{"schema_version": 1, "base": "order", "columns": [{"field": "order.code", "label": "\\ud800"}]}'
-    with pytest.raises((PayloadRejected, contracts.DefinitionValidationError)):
-        load_json_object(raw)
+    """``"\\ud800"`` is legal JSON syntax but not encodable as UTF-8.
+
+    Was S-003, closed 2026-08-03. ``payload._walk`` now re-encodes every string
+    it walks. The marker is gone; what replaced it is the reason code, because
+    ``pytest.raises(PayloadRejected)`` on its own would also be satisfied by the
+    depth, node-count or size gate -- a fix at the wrong end of the file would
+    have kept this test green.
+
+    Positions matter as much as the reason. ``_walk`` pushes dictionary *keys*
+    onto its stack next to the values, and only because of that is the last case
+    here rejected; a version that walked values alone would pass the first two.
+    """
+    from pretix_custom_reports.portability.errors import REASON_NOT_UTF8
+
+    cases = {
+        "label": b'{"schema_version": 1, "base": "order", "columns": '
+        b'[{"field": "order.code", "label": "\\ud800"}]}',
+        "low surrogate": b'{"schema_version": 1, "base": "order", "columns": '
+        b'[{"field": "order.code", "label": "\\udc00"}]}',
+        "nested filter value": b'{"schema_version": 1, "base": "order", "columns": '
+        b'[{"field": "order.code"}], "filters": {"op": "and", "children": '
+        b'[{"field": "order.code", "operator": "contains", "value": "\\ud800"}]}}',
+        "object key": b'{"schema_version": 1, "\\ud800": 1, "base": "order", '
+        b'"columns": [{"field": "order.code"}]}',
+    }
+    for what, raw in cases.items():
+        with pytest.raises(PayloadRejected) as excinfo:
+            load_json_object(raw)
+        assert excinfo.value.reason == REASON_NOT_UTF8, what
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-003: nothing rejects unpaired surrogates. api/validate/ echoes "
-    "the definition with ensure_ascii=False and dies with UnicodeEncodeError.",
-)
+def test_the_payload_gate_still_accepts_text_outside_the_basic_plane():
+    """Control group for the gate above -- and the way it could have overshot.
+
+    ``"\\ud83d\\ude00"`` is a *pair*, which ``json.loads`` folds into one
+    astral-plane character. A gate that had rejected the escape ``\\ud800``
+    textually, before parsing, would refuse every emoji and every rarely used
+    CJK character in a label. The gate has to look at the parsed string, and
+    this is what says so.
+    """
+    raw = (
+        b'{"schema_version": 1, "base": "order", "columns": '
+        b'[{"field": "order.code", "label": "\\ud83d\\ude00 \\u00fc"}]}'
+    )
+    document = load_json_object(raw)
+    assert document["columns"][0]["label"] == "\U0001f600 \u00fc"
+
+
+def test_an_imported_file_can_no_longer_carry_a_lone_surrogate(admin_client, event):
+    """The gate, reached the way an administrator reaches it.
+
+    :func:`load_json_object` is the unit; this is the route. The import view is
+    the one place where a document from outside is handed to the plugin, and the
+    finding was that it stored the surrogate and left behind a report whose
+    preview answered 500.
+    """
+    body = (
+        '{"schema_version": 1, "base": "order", "columns": '
+        '[{"field": "order.code", "label": "\\ud800"}]}'
+    )
+    response = admin_client.post(
+        event_url("event.reports.import", event), {"text": body, "action": "confirm"}
+    )
+    assert response.status_code == 200
+    with scopes_disabled():
+        assert ReportDefinition.objects.count() == 0
+
+
 def test_the_validate_endpoint_survives_a_lone_surrogate(admin_client, event):
-    body = definition(columns=[{"field": "order.code", "label": "x" + LONE_SURROGATE}])
+    """Was S-003, closed 2026-08-03 (``_ApiView.json`` -> ``ensure_ascii=True``).
+
+    ``status_code == 200`` alone would not be a measurement. The endpoint echoes
+    the definition back, so the assertion that matters is that the surrogate
+    *travelled through the serialiser* and came out escaped: the body is pure
+    ASCII, it contains the escape, and parsing it returns the very string that
+    was posted. A fix that dropped or replaced the character would satisfy
+    "200" and fail here -- and would silently rewrite the user's label.
+    """
+    label = "x" + LONE_SURROGATE
+    body = definition(columns=[{"field": "order.code", "label": label}])
     response = post_json(admin_client, event_url("api.validate", event), body_of(body))
-    assert response.status_code in (200, 400)
+    assert response.status_code == 200
+    response.content.decode("ascii")  # raises if anything got through unescaped
+    assert rb"\ud800" in response.content
+    payload = json.loads(response.content)
+    assert payload["ok"] is True
+    assert payload["definition"]["columns"][0]["label"] == label
 
 
 def body_of(document):
     return {"definition": document}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-003: a stored lone surrogate makes the JSON export view raise "
-    "UnicodeEncodeError (500) instead of producing a file.",
-)
+def test_the_preview_endpoint_survives_a_lone_surrogate(admin_client, event, orders):
+    """Was S-003, closed 2026-08-03.
+
+    Same three-part measurement as the validate endpoint, plus one more: the
+    preview must actually have *run*. Without the row assertion this test would
+    also pass on a preview that answered 200 with an empty result, which is what
+    a rejection dressed up as a success would look like.
+    """
+    label = "x" + LONE_SURROGATE
+    response = post_json(
+        admin_client,
+        event_url("api.preview", event),
+        {"definition": definition(columns=[{"field": "order.code", "label": label}])},
+    )
+    assert response.status_code == 200
+    response.content.decode("ascii")
+    assert rb"\ud800" in response.content
+    payload = json.loads(response.content)
+    assert payload["columns"][0]["label"] == label
+    assert payload["rows"] == [["AAAAA"], ["AAAAA"]]
+
+
 def test_the_export_view_survives_a_stored_lone_surrogate(admin_client, event):
+    """Was S-003, closed 2026-08-03 (``views/portability.py``).
+
+    A definition stored *before* the payload gate learned about surrogates is
+    still out there, so the reading end has to hold on its own. The file has to
+    stay a faithful copy of what is in the database, hence the round-trip.
+    """
+    label = "x" + LONE_SURROGATE
     with scopes_disabled():
         poisoned = ReportDefinition.objects.create(
             event=event,
             name="Poisoned",
             base="orderposition",
-            definition=definition(
-                columns=[{"field": "order.code", "label": "x" + LONE_SURROGATE}]
-            ),
+            definition=definition(columns=[{"field": "order.code", "label": label}]),
         )
     response = admin_client.get(
         event_url("event.reports.export", event, report=poisoned.pk)
     )
     assert response.status_code == 200
+    response.content.decode("ascii")
+    assert rb"\ud800" in response.content
+    document = json.loads(response.content)
+    assert document["definition"]["columns"][0]["label"] == label
+
+
+def test_the_template_export_survives_a_stored_lone_surrogate(
+    admin_client, organizer, event
+):
+    """The organizer half of the same fix (``views/templates.py:285``).
+
+    The finding named this line; nothing measured it. One class serves the
+    report export and the template export, but they are two functions in two
+    modules, and only one of them was under test.
+    """
+    label = "x" + LONE_SURROGATE
+    with scopes_disabled():
+        poisoned = ReportDefinition.objects.create(
+            organizer=organizer,
+            name="Poisoned template",
+            base="orderposition",
+            definition=definition(columns=[{"field": "order.code", "label": label}]),
+        )
+    response = admin_client.get(
+        organizer_url("organizer.templates.export", organizer, template=poisoned.pk)
+    )
+    assert response.status_code == 200
+    response.content.decode("ascii")
+    document = json.loads(response.content)
+    assert document["definition"]["columns"][0]["label"] == label
+
+
+def test_the_exported_file_of_a_poisoned_report_is_refused_on_the_way_back_in(
+    admin_client, event
+):
+    """The asymmetry the two halves of the S-003 fix create, pinned on purpose.
+
+    The export of a poisoned report succeeds -- that is the point of the
+    ``ensure_ascii`` half -- and the resulting file is then rejected by the
+    payload gate, which is the other half. That is coherent (the document is
+    quarantined rather than propagated), it is not obvious, and if it ever
+    changes the change should be a decision rather than a side effect.
+    """
+    label = "x" + LONE_SURROGATE
+    with scopes_disabled():
+        poisoned = ReportDefinition.objects.create(
+            event=event,
+            name="Poisoned",
+            base="orderposition",
+            definition=definition(columns=[{"field": "order.code", "label": label}]),
+        )
+    exported = admin_client.get(
+        event_url("event.reports.export", event, report=poisoned.pk)
+    ).content
+    with pytest.raises(PayloadRejected):
+        load_json_object(exported)
+
+
+def test_the_editor_page_survives_a_stored_lone_surrogate(admin_client, event):
+    """Boundary of S-003, and the reference the S-007 fix was measured against.
+
+    The editor embeds the whole definition in a ``<script type="application/json">``
+    block through pretix' ``escapejson_dumps``, which is ``json.dumps`` with its
+    default ``ensure_ascii=True`` (pretix/base/templatetags/escapejson.py:44).
+    That is why the graphical editor was never part of the finding -- and it is
+    what made the change form's ``ensure_ascii=False`` (S-007) a local mistake
+    rather than a missing rule. Both now render the same way; this test is what
+    says the rule was there to copy.
+    """
+    with scopes_disabled():
+        ReportDefinition.objects.create(
+            event=event,
+            name="Poisoned",
+            identifier="POISONED",
+            base="orderposition",
+            definition=definition(
+                columns=[{"field": "order.code", "label": "x" + LONE_SURROGATE}]
+            ),
+        )
+    response = admin_client.get(event_url("editor.edit", event, identifier="POISONED"))
+    assert response.status_code == 200
+    assert rb"\ud800" in response.content
 
 
 def test_the_csv_path_survives_a_stored_lone_surrogate(
@@ -1542,48 +1711,386 @@ def test_the_csv_path_survives_a_stored_lone_surrogate(
     assert b"AAAAA" in data
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-003: a lone surrogate in a column label makes POST api/preview/ "
-    "raise UnicodeEncodeError while building the JSON response (500).",
-)
-def test_the_preview_endpoint_survives_a_lone_surrogate(admin_client, event, orders):
-    response = post_json(
-        admin_client,
-        event_url("api.preview", event),
-        {
-            "definition": definition(
+def test_the_xlsx_path_survives_a_stored_lone_surrogate(
+    event, orders, registered_exporter, user_with_perms
+):
+    """Second bound of S-003, and the one that matters most if it ever moves.
+
+    CSV survives because ``ListExporter`` encodes with ``errors="replace"``.
+    XLSX takes a different road entirely -- ``SafeWorkbook`` hands the label to
+    openpyxl, which writes XML -- so "CSV is fine" says nothing about it, and
+    the finding did not check. It is fine, measured: a real zip container comes
+    back.
+
+    The reason to spend a test on it: this is the *unattended* path. An
+    exception here does not produce a 500 somebody sees, it produces five Celery
+    retries and a scheduled export that silently stops arriving.
+    """
+    with scopes_disabled():
+        ReportDefinition.objects.create(
+            event=event,
+            name="Poisoned",
+            identifier="POISONED",
+            base="orderposition",
+            definition=definition(
                 columns=[{"field": "order.code", "label": "x" + LONE_SURROGATE}]
-            )
-        },
-    )
-    assert response.status_code in (200, 400)
+            ),
+        )
+    buffer = io.BytesIO()
+    with scope(organizer=event.organizer):
+        exporter = init_event_exporter(
+            identifier="customreports", event=event, user=user_with_perms
+        )
+        filename, _mime, content = exporter.render(
+            {"report": "POISONED", "_format": "xlsx"}, output_file=buffer
+        )
+    # ``output_file`` is used because ``_render_xlsx`` otherwise re-opens a
+    # ``NamedTemporaryFile`` by name, which Windows refuses; same code path.
+    assert content is None
+    assert filename.endswith(".xlsx")
+    assert buffer.getvalue()[:2] == b"PK"
 
 
-# ---------------------------------------------------------------------------
-# The identifier collision (S-004)
-# ---------------------------------------------------------------------------
+def test_the_pretix_event_log_survives_a_stored_lone_surrogate(admin_client, event):
+    """Third bound of S-003, on a page that is not ours.
 
+    ``ReportDefinition.log_data()`` puts the **whole definition** into every log
+    entry, so a poisoned report leaves a poisoned ``LogEntry.data`` behind, and
+    that data is rendered by pretix' own event log view. Had that view formatted
+    the payload rather than the action type, one bad label would have taken out
+    a core page for the whole event -- a much larger blast radius than anything
+    in the finding.
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-004: ReportDefinitionForm exposes 'identifier' but the uniqueness "
-    "constraint is (event, identifier); 'event' is not a form field, so Django "
-    "skips the check and the duplicate reaches the database as an IntegrityError.",
-)
-def test_a_duplicate_identifier_is_a_form_error_not_a_500(admin_client, event, report):
+    It does not, measured. The test stays as a tripwire: it costs nothing and it
+    is the only thing standing between ``log_data()`` and the next person who
+    decides our log entries should display their contents.
+    """
+    from pretix.base.models import LogEntry
+
     response = admin_client.post(
         event_url("event.reports.add", event),
         {
+            "name": "Logged",
+            "description": "",
+            "identifier": "",
+            "base": "orderposition",
+            "definition": json.dumps(
+                definition(
+                    columns=[{"field": "order.code", "label": "x" + LONE_SURROGATE}]
+                )
+            ),
+        },
+    )
+    assert response.status_code == 302
+    with scopes_disabled():
+        entry = LogEntry.objects.get(action_type="pretix_custom_reports.report.added")
+    assert entry.parsed_data["definition"]["columns"][0]["label"] == (
+        "x" + LONE_SURROGATE
+    )
+    log_page = admin_client.get(
+        reverse(
+            "control:event.log",
+            kwargs={"organizer": event.organizer.slug, "event": event.slug},
+        )
+    )
+    assert log_page.status_code == 200
+
+
+@pytest.mark.parametrize("owner", ["event", "organizer"])
+def test_the_change_form_survives_a_stored_lone_surrogate(
+    admin_client, event, organizer, owner
+):
+    """Was S-007, closed 2026-08-03 -- the site the S-003 fix had missed.
+
+    Three readers were switched to ``ensure_ascii=True`` in the S-003 round
+    (``views/api.py``, ``views/portability.py``, ``views/templates.py``); a
+    fourth was not. The change form renders the definition into its textarea
+    through :meth:`~pretix_custom_reports.forms.PrettyJSONFormField.prepare_value`,
+    which asked for ``ensure_ascii=False``, and the resulting ``str`` died in
+    ``django/http/response.py:324`` exactly as the other three used to.
+
+    ``status_code == 200`` alone is not a measurement, for the same reason it
+    was not one at the three endpoints: a "fix" that dropped or replaced the
+    character would satisfy it while silently rewriting the definition a user is
+    about to edit -- and this form *writes back what it shows*, so a lossy
+    render here would not merely look wrong, it would save wrong. The textarea
+    is therefore parsed out of the page and round-tripped: what the form offers
+    for editing has to be, character for character, what is in the database.
+
+    Both owners are parametrised because ``ReportDefinitionForm`` serves the
+    event report and the organizer template from one class, so one line broke
+    two pages -- and the fix has to hold on both.
+    """
+    import html as html_module
+
+    label = "x" + LONE_SURROGATE
+    poisoned = definition(columns=[{"field": "order.code", "label": label}])
+    with scopes_disabled():
+        if owner == "event":
+            row = ReportDefinition.objects.create(
+                event=event,
+                name="Poisoned",
+                base="orderposition",
+                definition=poisoned,
+            )
+            url = event_url("event.reports.edit", event, report=row.pk)
+        else:
+            row = ReportDefinition.objects.create(
+                organizer=organizer,
+                name="Poisoned template",
+                base="orderposition",
+                definition=poisoned,
+            )
+            url = organizer_url("organizer.templates.edit", organizer, template=row.pk)
+
+    response = admin_client.get(url)
+    assert response.status_code == 200
+    assert rb"\ud800" in response.content
+
+    body = response.content.decode("utf-8")
+    match = re.search(
+        r'<textarea[^>]*name="definition"[^>]*>(.*?)</textarea>', body, re.S
+    )
+    assert match, "the definition textarea is not on the page"
+    shown = json.loads(html_module.unescape(match.group(1)))
+    assert shown["columns"][0]["label"] == label
+
+
+def test_a_poisoned_report_is_still_repairable_through_the_editor(admin_client, event):
+    """Both repair paths, end to end. Was the severity argument for S-007.
+
+    While S-007 was open this test carried the reason it was *niedrig* rather
+    than a repeat of S-003 at full severity: the change form was one of two ways
+    to fix a poisoned report and the only one that broke, because the graphical
+    editor renders through ``escapejson_dumps`` and saves through a POST, which
+    never reaches ``prepare_value``.
+
+    S-007 is closed and the argument is spent, but the walk is not. Nothing else
+    in this module goes editor -> save -> reopen in one sequence, and the last
+    assertion is the one that would have caught S-007 in the first place: after
+    the repair the change form must open again.
+    """
+    with scopes_disabled():
+        poisoned = ReportDefinition.objects.create(
+            event=event,
+            name="Poisoned",
+            identifier="POISONED",
+            base="orderposition",
+            definition=definition(
+                columns=[{"field": "order.code", "label": "x" + LONE_SURROGATE}]
+            ),
+        )
+    assert (
+        admin_client.get(
+            event_url("editor.edit", event, identifier="POISONED")
+        ).status_code
+        == 200
+    )
+    response = admin_client.post(
+        event_url("event.reports.edit", event, report=poisoned.pk),
+        {
+            "name": "Repaired",
+            "description": "",
+            "identifier": "POISONED",
+            "base": "orderposition",
+            "definition": json.dumps(definition()),
+        },
+    )
+    assert response.status_code == 302
+    with scopes_disabled():
+        poisoned.refresh_from_db()
+    assert poisoned.definition["columns"][0].get("label") is None
+    assert (
+        admin_client.get(
+            event_url("event.reports.edit", event, report=poisoned.pk)
+        ).status_code
+        == 200
+    )
+
+
+def test_the_change_form_is_the_only_way_a_surrogate_still_gets_stored(
+    admin_client, event
+):
+    """The write half, and the reason the read half (S-007) was not cosmetic.
+
+    The payload gate closed the *import*. The change form does not use it: its
+    ``clean_definition`` runs ``contracts.validate_definition``, which checks
+    lengths and shapes and says nothing about encodability. So a definition with
+    a lone surrogate is still storable by anyone with
+    ``event.settings.general:write`` -- which is precisely why the reading end
+    had to be fixed rather than the writing end guarded: this is the one way in
+    that is left, and it stays open.
+
+    Green on purpose: it documents an accepted write, not a defect. Should the
+    gate ever be extended to this path, this test turns red -- and the decision
+    then is whether S-003's quarantine (store nothing that cannot be encoded) or
+    S-007's tolerance (render whatever is stored) is the rule for this form. The
+    two are not in conflict today only because the second holds unconditionally.
+    """
+    body = json.dumps(
+        definition(columns=[{"field": "order.code", "label": "x" + LONE_SURROGATE}])
+    )
+    response = admin_client.post(
+        event_url("event.reports.add", event),
+        {
+            "name": "Self inflicted",
+            "description": "",
+            "identifier": "",
+            "base": "orderposition",
+            "definition": body,
+        },
+    )
+    assert response.status_code == 302
+    with scopes_disabled():
+        stored = ReportDefinition.objects.get(name="Self inflicted")
+    assert stored.definition["columns"][0]["label"] == "x" + LONE_SURROGATE
+
+
+# ---------------------------------------------------------------------------
+# The identifier collision (S-004, closed 2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("owner", ["event", "organizer"])
+def test_a_duplicate_identifier_is_a_form_error_not_a_500(
+    admin_client, event, organizer, report, template, owner
+):
+    """Was S-004, closed 2026-08-03 by ``ReportDefinitionForm.clean_identifier``.
+
+    Three assertions, and the first one alone would not do. The original version
+    of this test checked ``200`` and ``b"identifier" in content``; both are true
+    of every re-rendered form, because "identifier" is the name of a field on
+    the page. What proves the check ran is that *nothing was written* and that
+    the page carries the message the new ``clean_identifier`` raises.
+
+    Parametrised over both owners: ``ReportDefinitionForm`` serves the event
+    report and the organizer template, the constraints are
+    ``(event, identifier)`` and ``(organizer, identifier)``, and the fix routes
+    both through ``ReportDefinition._identifier_taken``. Only the event half was
+    in the finding; the template half was never tested and is the same line.
+    """
+    if owner == "event":
+        url = event_url("event.reports.add", event)
+        taken = report.identifier
+    else:
+        url = organizer_url("organizer.templates.add", organizer)
+        taken = template.identifier
+
+    with scopes_disabled():
+        before = ReportDefinition.objects.count()
+    response = admin_client.post(
+        url,
+        {
             "name": "Second report",
+            "description": "",
+            "identifier": taken,
+            "base": "orderposition",
+            "definition": json.dumps(definition()),
+        },
+    )
+    assert response.status_code == 200
+    assert b"already in use" in response.content
+    with scopes_disabled():
+        assert ReportDefinition.objects.count() == before
+
+
+def test_a_report_may_keep_its_own_identifier_when_it_is_changed(
+    admin_client, event, report
+):
+    """Control group one: the check must exclude the row being edited.
+
+    Without ``.exclude(pk=...)`` every save of an existing report would fail on
+    its own identifier -- a "fix" that turns the change form into a dead end.
+    The editor posts the identifier back in a hidden input, so this is the
+    ordinary path, not an edge case.
+    """
+    response = admin_client.post(
+        event_url("event.reports.edit", event, report=report.pk),
+        {
+            "name": "Renamed",
             "description": "",
             "identifier": report.identifier,
             "base": "orderposition",
             "definition": json.dumps(definition()),
         },
     )
-    assert response.status_code == 200
-    assert b"identifier" in response.content
+    assert response.status_code == 302
+    with scopes_disabled():
+        report.refresh_from_db()
+    assert report.name == "Renamed"
+
+
+def test_the_same_identifier_may_be_used_again_in_another_event(
+    admin_client, event, rival_event
+):
+    """Control group two: the check must not be wider than the constraint.
+
+    The uniqueness is ``(event, identifier)``, and an identifier is deliberately
+    stable across an event copy (ADR 0001 section 5) -- two events holding the
+    same one is the *normal* state after copying an event, not a collision. A
+    ``clean_identifier`` that queried globally would pass the test above and
+    quietly break event copies, so it is measured here.
+    """
+    with scopes_disabled():
+        ReportDefinition.objects.create(
+            event=rival_event,
+            name="Elsewhere",
+            identifier="SHARED42",
+            base="orderposition",
+            definition=definition(),
+        )
+    response = admin_client.post(
+        event_url("event.reports.add", event),
+        {
+            "name": "Here too",
+            "description": "",
+            "identifier": "SHARED42",
+            "base": "orderposition",
+            "definition": json.dumps(definition()),
+        },
+    )
+    assert response.status_code == 302
+    with scopes_disabled():
+        assert (
+            ReportDefinition.objects.filter(identifier="SHARED42", event=event).count()
+            == 1
+        )
+
+
+def test_the_duplicate_check_survives_without_an_active_scope(event, report):
+    """Why the fix does *not* use the manager the review recommended.
+
+    ``docs/security-review.md`` suggested
+    ``ReportDefinition.objects.for_event(...).by_identifier(...)``.
+    ``ReportDefinition.objects`` is scope-bound (``ReportDefinitionManager``
+    mirrors ``ScopedManager`` and hands out a ``DisabledQuerySet`` when the
+    ``organizer`` scope is missing), and ``ReportDefinition._identifier_taken``
+    runs under ``scopes_disabled()`` with a hard ``event_id``/``organizer_id``
+    filter instead. This test holds ``persistence-dev`` to the stronger of the
+    two properties: the form validates with no scope active at all, and it still
+    refuses the duplicate.
+
+    Note the scope of the claim. Through the control panel both variants would
+    have worked -- ``pretix/control/middleware.py:199`` wraps every request in
+    ``scope(organizer=request.organizer)`` -- so "the recommendation would have
+    raised ``ScopeError``" is not true of the view path. It is true of every
+    other caller of the form, and unbound is the safer of the two.
+    """
+    from pretix_custom_reports.forms import ReportDefinitionForm
+
+    form = ReportDefinitionForm(
+        data={
+            "name": "Second",
+            "description": "",
+            "identifier": report.identifier,
+            "base": "orderposition",
+            "definition": json.dumps(definition()),
+        },
+        event=event,
+    )
+    assert form.is_valid() is False
+    assert "identifier" in form.errors
+    assert form.errors.as_data()["identifier"][0].code == "duplicate_identifier"
 
 
 # ===========================================================================
@@ -2080,12 +2587,23 @@ def test_the_preview_limit_can_never_be_widened(admin_client, event, orders, lim
     assert len(payload["rows"]) <= contracts.PREVIEW_ROW_LIMIT
 
 
-def test_a_report_full_of_join_columns_costs_one_query_per_column(event, orders):
-    """Documented amplification, measured (S-005).
+def test_a_report_full_of_join_columns_costs_what_one_column_costs(event, orders):
+    """Was S-005 (query amplification), closed 2026-08-03 -- now the fix proof.
 
-    Each ``join`` column gets its own ``Prefetch`` with a unique ``to_attr``, so
-    the query count grows linearly with the number of columns. With
-    ``MAX_COLUMNS`` at 200 a single preview request is ~200 round trips.
+    Until 2026-08-03 this test was called
+    ``test_a_report_full_of_join_columns_costs_one_query_per_column`` and
+    asserted the opposite: it *measured the defect*, because every ``join``
+    column got a ``Prefetch`` whose ``to_attr`` was derived from the column
+    index, so the de-duplication rule ``(lookup, to_attr)`` could never match and
+    twenty identical columns cost twenty prefetch queries.
+    ``query/relations.py::join_leaf_to_attr`` now derives that name from the
+    identity of the leaf queryset -- relation, condition, canceled rule, inner
+    ``select_related`` -- and identical columns collapse into one prefetch.
+
+    The measurement is deliberately made at ``MAX_COLUMNS`` as well as at 20.
+    ``MAX_COLUMNS`` is the number the *structural* validator allows, so it is the
+    real bound on what a single ``POST api/preview/`` can ask for, and it is the
+    number the finding quoted ("~200 round trips").
     """
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -2110,8 +2628,148 @@ def test_a_report_full_of_join_columns_costs_one_query_per_column(event, orders)
                 list(compiled.iter_rows())
         return len(captured.captured_queries)
 
-    few, many = count_for(2), count_for(20)
-    assert many - few >= 15, (few, many)
+    one = count_for(1)
+    assert count_for(2) == one
+    assert count_for(20) == one
+    assert count_for(contracts.MAX_COLUMNS) == one
+
+
+def test_join_columns_that_want_different_rows_are_still_kept_apart(event, orders):
+    """The other side of the S-005 fix, and the way it could have gone wrong.
+
+    Collapsing prefetches is only safe while "same key" means "same rows". Two
+    ``join`` columns over ``answer.<identifier>`` cross the same relation and
+    differ solely in their leaf condition (``question__identifier=...``); if the
+    de-duplication keyed on the relation alone, one question's answers would
+    appear under the other question's heading. That is a cross-column data leak
+    inside one event -- no error, no log line, a wrong file -- which is why it is
+    measured here and not only in ``tests/test_query_plan.py``.
+
+    Two assertions, because either alone can be satisfied by a broken build: the
+    query count says the two prefetches exist separately, the values say they
+    carry what their own column asked for.
+    """
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from pretix_custom_reports.query.compiler import ReportQueryCompiler
+    from pretix_custom_reports.registry.library import field_registry
+
+    from .factories import add_answer
+
+    with scopes_disabled():
+        position = OrderPosition.objects.filter(order=orders["order"]).first()
+        answers = {}
+        for key, value in (("size", "L"), ("meal", "vegan")):
+            question = Question.objects.create(
+                event=event,
+                question="Q-{}".format(key),
+                identifier=key,
+                type=Question.TYPE_STRING,
+            )
+            add_answer(position, question, value)
+            answers[key] = value
+
+    body = definition(
+        base="order",
+        columns=[
+            {"field": "answer.size", "aggregate": "join"},
+            {"field": "answer.meal", "aggregate": "join"},
+        ],
+    )
+    document = contracts.validate_definition(body)
+    with scope(organizer=event.organizer):
+        compiled = ReportQueryCompiler(field_registry()).compile(
+            document, event, preview=True
+        )
+        with CaptureQueriesContext(connection) as captured:
+            rows = list(compiled.iter_rows())
+
+    assert rows == [["L", "vegan"]]
+    # One row query, one shared intermediate level, one leaf per question.
+    assert len(captured.captured_queries) == 4
+
+
+def test_the_residual_cost_of_join_columns_is_bounded_by_distinct_conditions(
+    event, orders
+):
+    """What is left of S-005 after the fix, stated as a number.
+
+    The amplification is gone for *identical* columns; it is not gone in
+    principle. Ten ``join`` columns over ten different questions are ten
+    genuinely different prefetches and cost ten queries, and ``MAX_COLUMNS`` is
+    200. The difference to the finding is the price of admission: it now takes
+    N distinct questions in the event -- created with
+    ``event.can_change_items``, not with the ``event.orders:read`` that the
+    preview needs -- where before a single field repeated 200 times was enough
+    for anyone who could open the editor.
+
+    Green, and it documents a residual rather than a defect. If somebody caps
+    ``join`` columns later (the other option the finding offered) this turns red
+    and should be re-cut around the cap, not deleted.
+    """
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from pretix_custom_reports.query.compiler import ReportQueryCompiler
+    from pretix_custom_reports.registry.library import field_registry
+
+    distinct = 10
+    with scopes_disabled():
+        for index in range(distinct):
+            Question.objects.create(
+                event=event,
+                question="Q{}".format(index),
+                identifier="k{}".format(index),
+                type=Question.TYPE_STRING,
+            )
+
+    body = definition(
+        base="order",
+        columns=[
+            {"field": "answer.k{}".format(index), "aggregate": "join"}
+            for index in range(distinct)
+        ],
+    )
+    document = contracts.validate_definition(body)
+    with scope(organizer=event.organizer):
+        compiled = ReportQueryCompiler(field_registry()).compile(
+            document, event, preview=True
+        )
+        with CaptureQueriesContext(connection) as captured:
+            list(compiled.iter_rows())
+    # 1 row query + 1 shared intermediate + one leaf per question.
+    assert len(captured.captured_queries) == distinct + 2
+
+
+def test_the_condition_signature_refuses_to_merge_what_it_cannot_read(event):
+    """The deliberate gap in ``condition_signature``, held in place.
+
+    ``query-dev`` chose a stricter comparison than the ``str(Q)`` the finding
+    suggested: only scalars and lists of scalars are signed, everything else
+    yields ``None`` and the caller falls back to the old per-column name. That
+    is the right way round -- ``str(Q)`` renders a model instance through its
+    ``__str__``, so two ``Question`` rows with the same label would look equal
+    and their prefetches would be merged, which is the leak the test above
+    guards against.
+
+    Failing open (no signature, no merge) costs a query; failing closed would
+    cost correctness. This test pins the direction so a later "optimisation"
+    cannot quietly widen the signature to model instances.
+    """
+    from django.db.models import Q
+
+    from pretix_custom_reports.query.relations import condition_signature
+
+    assert condition_signature(None) == "none"
+    assert condition_signature(Q(a=1)) is not None
+    assert condition_signature(Q(a=1)) != condition_signature(Q(a="1"))
+    assert condition_signature(Q(a=1)) != condition_signature(Q(a=True))
+    assert condition_signature(Q(a__in=[1, 2])) != condition_signature(Q(a__in=[2, 1]))
+    # Anything the signature cannot state faithfully must yield ``None``.
+    assert condition_signature(Q(event=event)) is None
+    assert condition_signature(Q(a=object())) is None
+    assert condition_signature(Q(a=1) & Q(event=event)) is None
 
 
 def test_a_hundred_filter_conditions_still_compile_to_one_query(event, orders):
@@ -2483,38 +3141,131 @@ def test_the_editor_javascript_never_renders_server_text_as_markup():
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="S-006: the import view passes the POSTed strategy straight into "
-    "ResolutionStrategy.coerce, and 'keep' is one of the three it accepts. "
-    "resolve_definition() skips query.plan.check_definition() under 'keep', so "
-    "a POST that the UI never offers stores a report the compiler refuses.",
-)
 def test_the_import_view_cannot_be_talked_into_the_event_copy_strategy(
     admin_client, event
 ):
-    """``keep`` exists for the event copy, where nobody is at a screen.
+    """Was S-006, closed 2026-08-03 by ``ResolutionStrategy.coerce_user_choice``.
 
-    Reached from a browser it removes the second of the two gates
-    ``resolution.py`` documents: the compiler's own ``check_definition``. The
-    definition below resolves -- ``position.price`` exists on base ``order`` --
-    but needs an aggregate there, which is exactly what ``check_definition``
-    would have said.
+    ``keep`` exists for the event copy, where nobody is at a screen. Reached
+    from a browser it removed the second of the two gates ``resolution.py``
+    documents: the compiler's own ``check_definition``. The definition below
+    resolves -- ``position.price`` exists on base ``order`` -- but needs an
+    aggregate there, which is exactly what ``check_definition`` says.
+
+    "Nothing was stored" is the assertion that carries the finding, but on its
+    own it would also hold if the import had failed for an unrelated reason, so
+    the effective strategy is read back off the confirmation page: the view must
+    have fallen back to ``abort``, not merely refused.
     """
     body = json.dumps(definition(base="order", columns=("position.price",)))
     response = admin_client.post(
         event_url("event.reports.import", event),
         {"text": body, "strategy": "keep", "action": "confirm"},
     )
-    assert response.status_code in (200, 302)
+    assert response.status_code == 200
+    assert response.context["plan"].strategy == ResolutionStrategy.ABORT
     with scopes_disabled():
         assert ReportDefinition.objects.count() == 0
+
+
+def test_the_template_apply_view_cannot_be_talked_into_the_event_copy_strategy(
+    admin_client, event, organizer
+):
+    """The second view the fix had to touch, which the finding did not test.
+
+    ``views/templates.py:370`` reads the same POST field for "load this
+    organizer template into this event". It is the same class of gate as the
+    import -- a definition arriving from outside this event -- and it was
+    passing the raw value into ``coerce`` too.
+    """
+    with scopes_disabled():
+        bad = ReportDefinition.objects.create(
+            organizer=organizer,
+            name="Not compilable",
+            identifier="BADTPL",
+            base="order",
+            definition=definition(base="order", columns=("position.price",)),
+        )
+    response = admin_client.post(
+        event_url("event.reports.templates.apply", event, template=bad.pk),
+        {"strategy": "keep", "action": "confirm"},
+    )
+    assert response.status_code == 200
+    assert response.context["plan"].strategy == ResolutionStrategy.ABORT
+    with scopes_disabled():
+        assert ReportDefinition.objects.filter(event=event).count() == 0
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "keep",
+        "KEEP",
+        " keep",
+        "keep\x00",
+        "keep ",
+        "abort,keep",
+        ["keep"],
+        None,
+        42,
+        True,
+    ],
+)
+def test_no_posted_value_whatsoever_yields_the_event_copy_strategy(hostile):
+    """The coercion itself, over the shapes a POST field can actually take.
+
+    ``request.POST.get()`` yields a ``str`` or ``None``; a ``QueryDict`` can be
+    talked into a list, and JSON is not involved here, so the type zoo is small
+    and fully enumerated. Whitespace and the null byte are in the list because
+    "trim then compare" is the obvious next refactor and it would open the hole
+    again.
+    """
+    assert ResolutionStrategy.coerce_user_choice(hostile) == ResolutionStrategy.ABORT
+
+
+def test_the_event_copy_can_still_ask_for_keep():
+    """Control group: the narrow coercion must not have removed the strategy.
+
+    ``portability/eventcopy.py:130`` passes ``ResolutionStrategy.KEEP``
+    programmatically, and it needs to keep working -- an event copy that lost
+    columns instead of carrying them along unresolved would be a different, and
+    worse, bug. The split is between the two functions, not between the three
+    strategies.
+    """
+    assert ResolutionStrategy.coerce("keep") == ResolutionStrategy.KEEP
+    assert ResolutionStrategy.KEEP not in ResolutionStrategy.USER_CHOICES
+    assert set(ResolutionStrategy.USER_CHOICES) == {
+        ResolutionStrategy.ABORT,
+        ResolutionStrategy.SKIP,
+    }
+
+
+def test_no_view_hands_a_request_value_to_the_wide_coercion():
+    """The rule behind S-006, checked over the syntax tree rather than per view.
+
+    Two views were fixed. A third that reads ``strategy`` from a request and
+    calls the wide ``coerce`` would reopen the finding without failing any of
+    the tests above, so the shape itself is forbidden: inside ``views/``, no
+    call to ``ResolutionStrategy.coerce`` may take an argument that mentions
+    ``request``.
+    """
+    root = PLUGIN_ROOT / "views"
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "coerce":
+                continue
+            source = " ".join(ast.dump(arg) for arg in node.args)
+            assert "request" not in source, f"{path.name}:{node.lineno}"
 
 
 def test_the_same_definition_is_refused_under_the_offered_strategies(
     admin_client, event
 ):
-    """Control group for the xfail above: ``abort`` and ``skip`` both refuse."""
+    """Control group for the two views above: ``abort`` and ``skip`` both refuse."""
     body = json.dumps(definition(base="order", columns=("position.price",)))
     for strategy in ("abort", "skip"):
         response = admin_client.post(
@@ -2522,6 +3273,7 @@ def test_the_same_definition_is_refused_under_the_offered_strategies(
             {"text": body, "strategy": strategy, "action": "confirm"},
         )
         assert response.status_code == 200, strategy
+        assert response.context["plan"].strategy == strategy
     with scopes_disabled():
         assert ReportDefinition.objects.count() == 0
 

@@ -334,6 +334,51 @@ def test_a_duplicate_member_is_refused():
     assert excinfo.value.reason == "duplicate_key"
 
 
+#: A high surrogate with no low surrogate behind it. Legal JSON syntax, legal
+#: Python ``str``, and not encodable as UTF-8 (S-003).
+LONE_SURROGATE = "\ud800"
+
+
+def test_a_lone_surrogate_is_refused_by_the_gate():
+    """``"\\ud800"`` parses, and then poisons everything downstream.
+
+    ``json.loads`` returns it without complaint, the structural validator only
+    measures lengths, and the model stores it (Django's ``JSONField`` writes
+    with ``ensure_ascii=True``). The damage shows up much later, in every
+    response that serialises without that flag. The gate is the only place
+    where "this document is text" is still a statement about the whole file.
+    """
+    raw = b'{"schema_version": 1, "base": "order", "columns": [{"field": "order.code", "label": "\\ud800"}]}'  # noqa: E501
+    with pytest.raises(PayloadRejected) as excinfo:
+        load_json_object(raw)
+    assert excinfo.value.reason == "not_utf8"
+
+
+def test_a_lone_surrogate_in_a_member_name_is_refused_too():
+    """``_walk`` pushes keys as well as values, and the keys are text too."""
+    with pytest.raises(PayloadRejected) as excinfo:
+        load_json_object(b'{"\\udfff": 1}')
+    assert excinfo.value.reason == "not_utf8"
+
+
+def test_a_lone_surrogate_pasted_as_text_is_refused():
+    """The paste path never goes through ``bytes.decode``, so it needs its own
+    check -- and gets the same one."""
+    with pytest.raises(PayloadRejected) as excinfo:
+        load_json_object('{"name": "%s"}' % LONE_SURROGATE)
+    assert excinfo.value.reason == "not_utf8"
+
+
+def test_an_escaped_surrogate_pair_is_still_accepted():
+    """Control group: a *pair* is an ordinary character and must pass.
+
+    Exporters escape non-ASCII, so a report named after an emoji arrives here
+    as two ``\\uXXXX`` escapes. Refusing those would break the round trip.
+    """
+    parsed = load_json_object(b'{"name": "party \\ud83c\\udf89"}')
+    assert parsed["name"] == "party \U0001f389"
+
+
 def test_the_package_never_deserialises_anything_but_json():
     """No pickle, no yaml, no eval -- the property the whole gate rests on.
 
@@ -876,6 +921,29 @@ def test_an_unknown_strategy_falls_back_to_the_safe_one(event, registry):
     assert not outcome.ok
 
 
+@pytest.mark.parametrize("value", ["abort", "skip"])
+def test_the_two_offered_strategies_survive_the_narrow_coercion(value):
+    assert ResolutionStrategy.coerce_user_choice(value) == value
+
+
+@pytest.mark.parametrize(
+    "value", ["keep", "KEEP", " keep", None, "", 1, ["skip"], "delete-everything"]
+)
+def test_anything_the_form_does_not_offer_becomes_abort(value):
+    """``keep`` is the event copy's strategy, not a radio button (S-006).
+
+    It switches off the compiler's own check inside ``resolve_definition``, so
+    a request must not be able to ask for it. Everything the interface does not
+    offer collapses to the strategy that blocks rather than writes.
+    """
+    assert ResolutionStrategy.coerce_user_choice(value) == ResolutionStrategy.ABORT
+
+
+def test_keep_stays_reachable_for_the_programmatic_caller():
+    """``eventcopy.py`` asks for it by name; the wide coercion keeps working."""
+    assert ResolutionStrategy.coerce("keep") == ResolutionStrategy.KEEP
+
+
 @pytest.mark.django_db
 def test_the_registry_stage_rejects_a_usage_the_target_forbids(event, registry):
     """A position field without an aggregate on base ``order`` (SPEC.md F3)."""
@@ -1181,6 +1249,104 @@ def test_import_view_needs_something_to_import(client_with_perms, event):
     assert response.status_code == 200
 
 
+@pytest.mark.django_db
+def test_import_view_refuses_a_file_carrying_a_lone_surrogate(client_with_perms, event):
+    """The realistic way in for S-003: an uploaded file, not self-inflicted.
+
+    It has to fail *here*, at the gate, and not later with a 500 on the first
+    preview of the imported report.
+    """
+    import io
+
+    payload = (
+        b'{"schema_version": 1, "name": "Poisoned", "definition": '
+        b'{"schema_version": 1, "base": "orderposition", "columns": '
+        b'[{"field": "order.code", "label": "x\\ud800"}], "sorting": [], '
+        b'"options": {"include_canceled_positions": false, '
+        b'"include_testmode_orders": false, "row_limit": null}}}'
+    )
+    upload = io.BytesIO(payload)
+    upload.name = "report.json"
+
+    response = client_with_perms.post(
+        report_path("event.reports.import", event), {"file": upload}
+    )
+    assert response.status_code == 200
+    assert b"Poisoned" not in response.content
+    with scopes_disabled():
+        assert ReportDefinition.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_import_view_refuses_a_pasted_lone_surrogate(client_with_perms, event):
+    document = definition(columns=("order.code",))
+    document["columns"][0]["label"] = "x" + LONE_SURROGATE
+    text = json.dumps(document)  # ensure_ascii=True, so this is "\ud800"
+    response = client_with_perms.post(
+        report_path("event.reports.import", event), {"text": text}
+    )
+    assert response.status_code == 200
+    with scopes_disabled():
+        assert ReportDefinition.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_export_view_serves_a_file_even_for_a_stored_lone_surrogate(
+    client_with_perms, event
+):
+    """Rows written before the gate learned about surrogates still exist.
+
+    The definition below cannot arrive through the importer any more, but it
+    can already be in the database -- and a download must then be a file, not
+    a ``UnicodeEncodeError``.
+    """
+    document = definition(columns=("order.code",))
+    document["columns"][0]["label"] = "x" + LONE_SURROGATE
+    report = make_report(event=event, name="Poisoned", definition=document)
+
+    response = client_with_perms.get(
+        report_path("event.reports.export", event, report=report.pk)
+    )
+    assert response.status_code == 200
+    parsed = json.loads(response.content.decode("utf-8"))
+    assert parsed["definition"]["columns"][0]["label"] == "x" + LONE_SURROGATE
+
+
+@pytest.mark.django_db
+def test_import_view_ignores_a_hand_posted_keep_strategy(client_with_perms, event):
+    """``strategy=keep`` is not one of the two radio buttons (S-006).
+
+    ``position.price`` on base ``order`` resolves -- the field exists there --
+    but needs an aggregate, which is what the compiler check inside
+    ``resolve_definition`` says. Under ``keep`` that check is skipped, so the
+    row would be stored. Downgraded to ``abort``, it is not.
+    """
+    text = json.dumps(definition(base="order", columns=("position.price",)))
+    response = client_with_perms.post(
+        report_path("event.reports.import", event),
+        {"document": text, "action": "confirm", "strategy": "keep"},
+    )
+    assert response.status_code == 200
+    with scopes_disabled():
+        assert ReportDefinition.objects.count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("strategy", ["abort", "skip"])
+def test_import_view_refuses_the_same_definition_under_both_offered_strategies(
+    client_with_perms, event, strategy
+):
+    """Control group for the test above: nothing changed for the real choices."""
+    text = json.dumps(definition(base="order", columns=("position.price",)))
+    response = client_with_perms.post(
+        report_path("event.reports.import", event),
+        {"document": text, "action": "confirm", "strategy": strategy},
+    )
+    assert response.status_code == 200
+    with scopes_disabled():
+        assert ReportDefinition.objects.count() == 0
+
+
 # ===========================================================================
 # 8. The event copy
 # ===========================================================================
@@ -1241,6 +1407,31 @@ def test_an_event_copy_never_loses_a_report_it_cannot_resolve(
         "answer.only-here",
     ]
     assert result.copied[0].resolution.missing[0].source == "answer.only-here"
+
+
+@pytest.mark.django_db
+def test_an_event_copy_still_uses_the_keep_strategy(
+    event, event_without_plugin, registry
+):
+    """Narrowing the *views* must not narrow the event copy (S-006).
+
+    Same definition the import view refuses under ``keep``: resolvable, but
+    rejected by the compiler check. A copy carries it anyway, because dropping
+    a report during ``Event.copy_data_from`` -- where nobody is at a screen --
+    would be a silent loss. The check belongs to the import path, not here.
+    """
+    make_report(
+        event=event,
+        name="Needs an aggregate",
+        base="order",
+        definition=definition(base="order", columns=("position.price",)),
+    )
+    with scopes_disabled():
+        result = copy_reports_to_event(event_without_plugin, event, registry=registry)
+        copy = ReportDefinition.objects.get(event=event_without_plugin)
+    assert result.count == 1
+    assert result.copied[0].resolution.strategy == ResolutionStrategy.KEEP
+    assert [c["field"] for c in copy.definition["columns"]] == ["position.price"]
 
 
 @pytest.mark.django_db

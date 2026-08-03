@@ -29,6 +29,7 @@ its repository's conftest and does not apply to out-of-tree plugins
 import datetime
 import pytest
 from decimal import Decimal
+from django.db.models import Q
 from django.utils.timezone import now
 from django_scopes import scopes_disabled
 from pretix.base.models import (
@@ -1055,6 +1056,246 @@ def test_the_count_query_skips_the_column_annotations(compiler, event, data):
         count_sql = str(report.count_queryset.query)
     assert display_sql.upper().count("SELECT") > count_sql.upper().count("SELECT")
     assert "ORDER BY" not in count_sql.upper()
+
+
+# ---------------------------------------------------------------------------
+# The scale of an aggregated amount (T-002)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "aggregate,expected",
+    [
+        (Aggregate.SUM, "43.00"),
+        (Aggregate.MIN, "10.00"),
+        (Aggregate.MAX, "23.00"),
+        # 43,00 / 3 = 14,3333...; quantised half-even, deliberately -- see
+        # ``relations.aggregate_expression``.
+        (Aggregate.AVG, "14.33"),
+    ],
+)
+@pytest.mark.django_db
+def test_an_aggregated_amount_keeps_two_decimal_places(
+    compiler, event, data, aggregate, expected
+):
+    """T-002: compared as text, because that is what lands in the file.
+
+    ``Decimal("43") == Decimal("43.00")`` is true, which is exactly why nobody
+    found this by comparing numbers. The exporter writes ``str(value)``, so the
+    trailing zero is the difference between an accounting column that adds up in
+    a spreadsheet and one that does not -- and between the file this plugin
+    writes on SQLite and the one it writes on PostgreSQL.
+    """
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="position.price", aggregate=aggregate),
+    )
+    _, rows = _rows(compiler, definition, event)
+    value = next(row for row in rows if row[0] == "AAAAA")[1]
+    assert isinstance(value, Decimal)
+    assert str(value) == expected
+    assert value.as_tuple().exponent == -2
+
+
+@pytest.mark.django_db
+def test_the_scale_holds_next_to_a_plain_amount_in_the_same_row(compiler, event, data):
+    """The visible symptom was one row notating the same money two ways.
+
+    ``order.total`` is a plain column and was always quantised by the backend;
+    the summed position price was not. Both are asserted here so the two paths
+    cannot drift apart again.
+    """
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="order.total"),
+        Column(field="position.price", aggregate=Aggregate.SUM),
+        Column(field="position.tax_value", aggregate=Aggregate.SUM),
+    )
+    _, rows = _rows(compiler, definition, event)
+    row_a = next(row for row in rows if row[0] == "AAAAA")
+    assert [str(value) for value in row_a[1:]] == ["43.00", "43.00", "0.00"]
+
+
+@pytest.mark.django_db
+def test_a_counted_aggregate_stays_an_integer(compiler, event, data):
+    """The money output field must not leak onto the aggregates that count.
+
+    ``COUNT`` has no scale to lose, and turning its result into a ``Decimal``
+    would put "3.00" into a column headed "Positions".
+    """
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="position.positionid", aggregate=Aggregate.COUNT),
+        Column(field="item.internal_name", aggregate=Aggregate.COUNT_DISTINCT),
+    )
+    _, rows = _rows(compiler, definition, event)
+    row_a = next(row for row in rows if row[0] == "AAAAA")
+    assert row_a[1:] == [3, 2]
+    assert all(isinstance(value, int) for value in row_a[1:])
+
+
+@pytest.mark.django_db
+def test_an_aggregate_over_a_non_money_field_is_left_alone(compiler, event, data):
+    """Only ``DataType.MONEY`` triggers the output field, not "it is a number"."""
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="position.positionid", aggregate=Aggregate.MAX),
+    )
+    _, rows = _rows(compiler, definition, event)
+    row_a = next(row for row in rows if row[0] == "AAAAA")
+    assert row_a[1] == 3
+    assert not isinstance(row_a[1], Decimal)
+
+
+# ---------------------------------------------------------------------------
+# Prefetch de-duplication for ``join`` columns (S-005)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_twenty_identical_join_columns_cost_one_prefetch(
+    compiler, event, data, django_assert_num_queries
+):
+    """The S-005 counter-check: the price is per *prefetch*, not per column.
+
+    Twenty ``join`` columns over the same relation with the same condition select
+    exactly the same related rows. Until S-005 each of them got a ``Prefetch``
+    with a ``to_attr`` minted from the column index, which made the plan's
+    de-duplication unreachable: 20 columns cost 20 extra queries, and
+    ``MAX_COLUMNS`` at 200 made a single preview request ~200 round trips.
+
+    Two queries: one for the orders, one for the shared prefetch. And every column
+    still has to render, so the saving is not bought by dropping a column.
+    """
+    definition = _order_report(
+        Column(field="order.code"),
+        *[
+            Column(field="position.attendee_name", aggregate=Aggregate.JOIN)
+            for _ in range(20)
+        ],
+    )
+    with scopes_disabled():
+        report = compiler.compile(definition, event)
+        with django_assert_num_queries(2):
+            rows = list(report.iter_rows())
+    row_a = next(row for row in rows if row[0] == "AAAAA")
+    assert row_a[1:] == ["Ada Lovelace, Grace Hopper, Alan Turing"] * 20
+
+
+@pytest.mark.django_db
+def test_join_columns_with_different_conditions_keep_their_own_prefetch(
+    compiler, event, data, django_assert_num_queries
+):
+    """De-duplication must not merge two columns that ask different questions.
+
+    Both go through ``all_positions__answers``, so the intermediate level is
+    shared, but the leaf conditions differ by question. Merging them would put the
+    T-shirt sizes in the arrival-date column -- wrong output, no error -- which is
+    why the shared name is derived from the condition and not merely from the
+    relation.
+    """
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="answer.tshirt-size", aggregate=Aggregate.JOIN),
+        Column(field="answer.arrival-date", aggregate=Aggregate.JOIN),
+    )
+    with scopes_disabled():
+        report = compiler.compile(definition, event)
+        # 1 row query + 1 shared intermediate (all_positions) + 2 leaves.
+        with django_assert_num_queries(4):
+            rows = list(report.iter_rows())
+    row_a = next(row for row in rows if row[0] == "AAAAA")
+    assert row_a[1] == "L, XL"
+    assert row_a[2] == "2026-09-01"
+
+
+@pytest.mark.django_db
+def test_join_columns_that_need_different_select_related_stay_apart(
+    compiler, event, data, django_assert_num_queries
+):
+    """Same relation, same condition, different tail -- and that is a difference.
+
+    ``item.name`` needs ``select_related("item")`` on the prefetched positions,
+    ``position.attendee_name`` needs nothing. Sharing one prefetch would save a
+    query and buy an item lookup per position instead, so the inner
+    ``select_related`` is part of what makes two prefetches interchangeable.
+    Three queries here, and none of them per row -- adding rows does not add
+    queries (asserted next to it in the wide-report tests).
+    """
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="item.internal_name", aggregate=Aggregate.JOIN),
+        Column(field="position.attendee_name", aggregate=Aggregate.JOIN),
+    )
+    with scopes_disabled():
+        report = compiler.compile(definition, event)
+        with django_assert_num_queries(3):
+            rows = list(report.iter_rows())
+    row_a = next(row for row in rows if row[0] == "AAAAA")
+    assert row_a[1] == "ticket, workshop, workshop"
+    assert row_a[2] == "Ada Lovelace, Grace Hopper, Alan Turing"
+
+
+@pytest.mark.django_db
+def test_join_columns_of_the_same_relation_share_across_different_tails(
+    compiler, event, data, django_assert_num_queries
+):
+    """Two plain position fields read out of one prefetched list.
+
+    Neither tail needs a ``select_related``, so both columns can walk the same
+    prefetched positions: one row query, one prefetch, two different cells.
+    """
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="position.attendee_name", aggregate=Aggregate.JOIN),
+        Column(field="position.attendee_email", aggregate=Aggregate.JOIN),
+    )
+    with scopes_disabled():
+        report = compiler.compile(definition, event)
+        with django_assert_num_queries(2):
+            rows = list(report.iter_rows())
+    row_a = next(row for row in rows if row[0] == "AAAAA")
+    assert row_a[1] == "Ada Lovelace, Grace Hopper, Alan Turing"
+    assert row_a[2] == "ada@example.org"
+
+
+@pytest.mark.django_db
+def test_a_condition_without_a_faithful_text_form_is_never_merged(
+    compiler, event, data, django_assert_num_queries
+):
+    """When in doubt, keep them apart.
+
+    A third-party field may put any ``Q`` into ``extra['relation_filter']``,
+    including one holding a model instance. Two such instances can share a
+    ``str()`` and address different rows, so
+    :func:`~pretix_custom_reports.query.relations.condition_signature` refuses to
+    sign them and the compiler falls back to a prefetch per column -- the old,
+    expensive, always-correct behaviour. Correctness is not traded for the
+    saving.
+    """
+    from dataclasses import replace
+
+    from pretix_custom_reports.query.columns import EXTRA_RELATION_FILTER
+
+    base_field = ReferenceRegistry().get_fields(event, Base.ORDER)[
+        "position.attendee_name"
+    ]
+    opaque = replace(
+        base_field,
+        extra=dict(
+            base_field.extra or {}, **{EXTRA_RELATION_FILTER: Q(item=data["ticket"])}
+        ),
+    )
+    registry = ReferenceRegistry(overrides={"position.attendee_name": opaque})
+    definition = _order_report(
+        Column(field="order.code"),
+        Column(field="position.attendee_name", aggregate=Aggregate.JOIN),
+        Column(field="position.attendee_name", aggregate=Aggregate.JOIN),
+    )
+    with scopes_disabled():
+        report = ReportQueryCompiler(registry).compile(definition, event)
+        with django_assert_num_queries(3):
+            list(report.iter_rows())
 
 
 @pytest.mark.django_db

@@ -391,3 +391,120 @@ von `pretix_custom_reports/portability/**`, `views/portability.py`,
 4. **`test-engineer` (Welle 3):** ein Integrationstest, der `copy_data_from`
    wirklich aufruft, sobald das Signal verdrahtet ist (Vorlage steht in
    Abschnitt 5 des Signal-Handoffs).
+
+---
+
+## Nachtrag 2026-08-03 — Security-Nacharbeit S-003 (Teil) und S-006
+
+Beauftragt vom Orchestrator nach `docs/security-review.md`. Nur eigener
+Dateibereich, kein Commit, kein repoweites Formatieren.
+
+### S-003 — ungepaarte Surrogate (mein Teil: das Gate + zwei Serialisierungen)
+
+`"\ud800"` ist syntaktisch gültiges JSON. `json.loads` liefert dafür einen
+Python-`str`, der sich nicht nach UTF-8 encodieren lässt. Das Gate prüfte
+Größe, Tiefe, Knotenzahl, Stringlänge, Zahlenlänge, `NaN` und doppelte Member
+— aber nicht, ob das Ergebnis überhaupt noch Text ist.
+
+* `portability/payload.py`, `_walk`: direkt neben der Längenprüfung jetzt
+  `node.encode("utf-8")`; bei `UnicodeEncodeError` Ablehnung mit
+  `REASON_NOT_UTF8`. `_walk` legt Schlüssel **und** Werte auf den Stack, also
+  sind Membernamen mit abgedeckt. Kein neuer Code nötig: `REASON_NOT_UTF8` gab
+  es schon für den Byte-Dekodier-Pfad, und es ist derselbe Sachverhalt — „das
+  ist kein UTF-8-Text". Docstring-Tabelle des Moduls und der `#:`-Kommentar in
+  `portability/errors.py` erklären den Zusatzfall.
+* `views/portability.py` (Export-View) und `views/templates.py`
+  (Vorlagen-Export) serialisieren jetzt mit `ensure_ascii=True`. Das ist die
+  Absicherung für Zeilen, die **vor** der Gate-Änderung entstanden sind: die
+  liegen weiter in der Datenbank und dürfen keinen Download in einen 500
+  verwandeln. `\uXXXX` ist für jeden JSON-Leser dasselbe Dokument, der eigene
+  Importeur eingeschlossen.
+* Nicht angefasst: `views/api.py:353` (dritte Stelle, `frontend-dev`),
+  `forms.py:65` und `contracts/definition.py:465` (fremdes Gebiet bzw.
+  eingefroren; laut Review auch nicht betroffen). Punkt 3 der Empfehlung
+  (`envelope._clean_text` auf Labels ausweiten) bewusst ausgelassen — der
+  Review nennt ihn optional, und er läge an einer Contract-nahen Stelle.
+
+### S-006 — `strategy=keep` per POST
+
+`ResolutionStrategy` hat jetzt zwei Coerce-Funktionen statt einer:
+
+* `coerce()` unverändert, für programmatische Aufrufer — `eventcopy.py`
+  verlangt dort weiterhin `KEEP`.
+* `coerce_user_choice()` neu, akzeptiert nur `USER_CHOICES == ("abort",
+  "skip")`, alles andere wird `ABORT`. Genau die zwei Radio-Buttons, die
+  `import_confirm.html` und `template_apply.html` anbieten.
+
+Beide Import-Views (`views/portability.py`, `views/templates.py`) lesen
+`request.POST.get("strategy")` jetzt über die enge Funktion. `plan_import()`
+und `plan_template()` behalten `coerce()` — sie sind auch programmatische
+APIs, und die Einengung gehört an die Grenze zum Request, nicht in die
+Bibliothek.
+
+### Tests
+
+`tests/test_portability.py`:
+
+* `test_a_lone_surrogate_is_refused_by_the_gate` — Datei mit `"label":
+  "\ud800"`, Ablehnung mit `reason == "not_utf8"`.
+* `test_a_lone_surrogate_in_a_member_name_is_refused_too` — Schlüssel, nicht
+  nur Werte.
+* `test_a_lone_surrogate_pasted_as_text_is_refused` — der Paste-Pfad geht nie
+  durch `bytes.decode` und braucht deshalb seinen eigenen Nachweis.
+* `test_an_escaped_surrogate_pair_is_still_accepted` — Kontrollgruppe: ein
+  *Paar* ist ein normales Zeichen, ein Report mit Emoji im Namen muss weiter
+  durchgehen.
+* `test_import_view_refuses_a_file_carrying_a_lone_surrogate` und
+  `..._a_pasted_lone_surrogate` — der realistische Weg hinein, über die View,
+  Abbruch am Gate statt 500 bei der ersten Vorschau.
+* `test_export_view_serves_a_file_even_for_a_stored_lone_surrogate` — die
+  `ensure_ascii`-Hälfte, für Zeilen, die schon da sind.
+* `test_the_two_offered_strategies_survive_the_narrow_coercion`,
+  `test_anything_the_form_does_not_offer_becomes_abort` (parametrisiert über
+  `keep`, `KEEP`, `" keep"`, `None`, `""`, `1`, `["skip"]`, Unsinn),
+  `test_keep_stays_reachable_for_the_programmatic_caller`.
+* `test_import_view_ignores_a_hand_posted_keep_strategy` plus Kontrollgruppe
+  `test_import_view_refuses_the_same_definition_under_both_offered_strategies`
+  — Definition „Spalte `position.price` auf Basis `order`", die nur unter
+  `keep` gespeichert würde.
+* `test_an_event_copy_still_uses_the_keep_strategy` — Regressionstest über den
+  echten Programmpfad `copy_reports_to_event`, mit **derselben** Definition:
+  die Event-Kopie trägt sie weiterhin mit und meldet `strategy == KEEP`. Die
+  Einengung der Views darf die Event-Kopie nicht mit einengen; die bestehenden
+  Kopie-Tests decken nur „nichts verloren", nicht „`check_definition`
+  übersprungen".
+
+`tests/test_org_templates.py`:
+
+* `test_the_apply_page_ignores_a_hand_posted_keep_strategy` inkl.
+  Kontrollgruppe `abort`/`skip` im selben Test.
+* `test_exporting_a_template_survives_a_stored_lone_surrogate`.
+
+### Lint und Suite
+
+```
+flake8        (5 Modul- + 2 Testdateien) -> rc 0
+isort -c      (dieselben)                -> rc 0
+black --check (dieselben)                -> 7 files unchanged
+pytest tests/test_portability.py tests/test_org_templates.py -q -> 141 passed
+pytest -m "not performance" -q -> 1081 passed, 6 failed, 3 xfailed
+```
+
+Die sechs roten sind **keine Regressionen**, sondern durchweg `XPASS(strict)`
+bzw. Messwerte aus der parallel laufenden Nacharbeit anderer Agenten:
+
+| Test | Ursache |
+| --- | --- |
+| `test_a_lone_surrogate_is_refused_by_the_payload_gate` | XPASS — meine Behebung, `xfail`-Marker entfernt der `security-reviewer` |
+| `test_the_export_view_survives_a_stored_lone_surrogate` | XPASS — dito |
+| `test_the_import_view_cannot_be_talked_into_the_event_copy_strategy` | XPASS — dito (S-006) |
+| `test_a_duplicate_identifier_is_a_form_error_not_a_500` | XPASS — S-004, `persistence-dev` (`forms.py` ist im Arbeitsbaum geändert) |
+| `test_a_report_full_of_join_columns_costs_one_query_per_column` | S-005, `query-dev` |
+| `test_finding_a_column_format_chosen_in_the_editor_reaches_the_export` | XPASS — fremder Befund |
+
+Weiter `xfail` bleiben `test_the_validate_endpoint_survives_a_lone_surrogate`
+und `test_the_preview_endpoint_survives_a_lone_surrogate`: die gehen nicht
+durch das Payload-Gate, sondern über `views/api.py`. Das ist der dritte Teil
+von S-003 und liegt bei `frontend-dev`.
+
+`tests/test_security.py` und `views/api.py` habe ich nicht angefasst.

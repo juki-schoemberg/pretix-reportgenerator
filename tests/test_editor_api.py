@@ -1595,6 +1595,129 @@ def test_preview_shows_only_this_events_orders(client_with_perms, event, event_d
 
 
 # ---------------------------------------------------------------------------
+# Encodability of the JSON responses (finding S-003)
+# ---------------------------------------------------------------------------
+#
+# "\ud800" is a lone high surrogate. It is *syntactically valid JSON*, so
+# json.loads accepts it and hands back a Python str that cannot be encoded to
+# UTF-8 -- and it therefore reaches us through an import file, through the CRUD
+# form's JSON textarea or through the editor's JSON panel, and sits in a
+# Column.label or a filter value from then on.
+#
+# With ensure_ascii=False, Django builds the response as a str and encodes it in
+# django/http/response.py, which raises UnicodeEncodeError: a 500 on every
+# api/validate/ and api/preview/ call for that report, i.e. a report that can no
+# longer be opened *or repaired* in the editor. _ApiView.json therefore
+# serialises with ensure_ascii=True. That is invisible in the browser -- the
+# editor reads every response with JSON.parse, for which "\ud800" and the raw
+# character are the same string -- and it is asserted here from both sides: the
+# response body is pure ASCII, and the value survives the round trip.
+#
+# The payload gate (portability/payload.py) rejects such a document on the way
+# in since S-003 was fixed. These tests are the second half of that fix and stay
+# meaningful regardless: they cover the values that entered before the gate
+# existed, and any path that does not run through it.
+
+LONE_SURROGATE = "\ud800"
+
+
+def _surrogate_definition():
+    return {
+        "schema_version": 1,
+        "base": "order",
+        "columns": [{"field": "order.code", "label": "x" + LONE_SURROGATE}],
+    }
+
+
+@pytest.mark.django_db
+def test_validate_survives_a_lone_surrogate_in_a_label(
+    client_with_perms, event, event_data
+):
+    response = post_json(
+        client_with_perms,
+        url_for("api.validate", event),
+        {"definition": _surrogate_definition()},
+    )
+    assert response.status_code == 200, response.content[:400]
+    response.content.decode("ascii")  # no raw surrogate in the body
+    payload = json.loads(response.content.decode("utf-8"))
+    assert payload["definition"]["columns"][0]["label"] == "x" + LONE_SURROGATE
+
+
+@pytest.mark.django_db
+def test_preview_survives_a_lone_surrogate_in_a_label(
+    client_with_perms, event, event_data
+):
+    """The preview echoes the column heading, and used to die doing it."""
+    response = post_json(
+        client_with_perms,
+        url_for("api.preview", event),
+        {"definition": _surrogate_definition()},
+    )
+    assert response.status_code == 200, response.content[:400]
+    response.content.decode("ascii")
+    payload = json.loads(response.content.decode("utf-8"))
+    assert payload["columns"][0]["label"] == "x" + LONE_SURROGATE
+    assert payload["rows"], "the preview should still have produced rows"
+
+
+@pytest.mark.django_db
+def test_every_editor_endpoint_answers_in_pure_ascii(
+    client_with_perms, event, event_data
+):
+    """The rule, not the single symptom: no endpoint of ours emits raw non-ASCII.
+
+    A label is only the shortest way in. Whichever endpoint grows a new echo of
+    user-supplied text next, this test is what keeps it encodable.
+    """
+    responses = [
+        client_with_perms.get(url_for("api.fields", event)),
+        post_json(
+            client_with_perms,
+            url_for("api.validate", event),
+            {"definition": _surrogate_definition()},
+        ),
+        post_json(
+            client_with_perms,
+            url_for("api.preview", event),
+            {"definition": _surrogate_definition(), "limit": 3},
+        ),
+        # ... and the error envelopes, which quote the offending input back.
+        post_json(
+            client_with_perms,
+            url_for("api.validate", event),
+            {"definition": {"schema_version": 1, "base": "order" + LONE_SURROGATE}},
+        ),
+    ]
+    for response in responses:
+        assert response.status_code in (200, 400), response.status_code
+        response.content.decode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# One renderer for the preview and the export (finding T-001)
+# ---------------------------------------------------------------------------
+
+
+def test_the_preview_renders_cells_with_the_exporter_s_function():
+    """No second implementation of the column formats. That is the whole fix.
+
+    ColumnFormat.date_style/number_style/boolean_style used to be applied by a
+    private format_cell() in views/api.py and by nothing else, so "date only"
+    showed a date on screen and a full timestamp in the file (T-001). The
+    function now lives in exporters.py and both callers import it; this test
+    fails the moment views/api.py grows its own again.
+    """
+    from pretix_custom_reports import exporters
+    from pretix_custom_reports.views import api
+
+    assert api.get_cell_renderer() is exporters.format_cell_value
+    assert not hasattr(api, "format_cell")
+    assert not hasattr(api, "_format_temporal")
+    assert not hasattr(api, "_format_number")
+
+
+# ---------------------------------------------------------------------------
 # The JavaScript model, executed under node
 # ---------------------------------------------------------------------------
 

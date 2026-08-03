@@ -263,3 +263,163 @@ von `pretix_custom_reports/registry/**`, `tests/test_registry*.py`,
 4. **frontend-dev:** `groups.GROUP_ORDERING`/`GROUP_LABELS` und
    `registry.diagnostics()` sind da; eine Debug-Ansicht der Feldbibliothek
    (`SPEC.md` P2) braucht nur noch die View.
+
+---
+
+# Nachtrag: T-002 — aggregierte Geldspalten verlieren ihre Nachkommastellen
+
+Auftrag des Orchestrators nach dem Review, Nacharbeitsrunde nach Welle 4.
+Geändert wurden genau zwei Dateien: `pretix_custom_reports/registry/annotations.py`
+und die neue `tests/test_registry_money.py`. Dazu ein Request an query-dev.
+
+## Befund und Abweichung von der vorgeschlagenen Lösung
+
+Die Entscheidung des Orchestrators — Korrektur in `registry/annotations.py` statt
+in `query/columns.py` — habe ich übernommen. Den vorgeschlagenen *Mechanismus*
+nicht, weil er nachweislich nicht wirkt.
+
+`Cast(ausdruck, output_field=DecimalField(max_digits=13, decimal_places=2))`
+behebt das Problem nicht. Gemessen mit einer Wegwerf-Sonde gegen SQLite,
+Django 5.2.16:
+
+```
+PROBE a_plain    = Decimal('20.5')   str='20.5'
+PROBE a_cast     = Decimal('20.5')   str='20.5'    <- Cast um das Coalesce
+PROBE a_cast_sub = Decimal('20.5')   str='20.5'    <- Cast um das Subquery
+```
+
+Zwei unabhängige Gründe:
+
+1. `DecimalField.cast_db_type()` liefert auf SQLite `decimal`. Das ergibt
+   NUMERIC-Affinität, und die wirft die nachlaufende Null genauso weg.
+2. Wichtiger: die Skala geht gar nicht im SQL verloren, sondern im
+   *Converter*. `get_decimalfield_converter` quantisiert nur, wenn
+   `isinstance(expression, Col)`. Ein `Cast` ist ein `Func`, kein `Col`, landet
+   also im selben `else`-Zweig wie das `Subquery` vorher. Ein `Round(x, 2)` hätte
+   dasselbe Schicksal.
+
+## Was stattdessen gebaut wurde
+
+`annotations.MoneyField`, eine `DecimalField`-Unterklasse mit `from_db_value`,
+die auf `decimal_places` quantisiert. Die Kette dahinter, im Django-Source
+verifiziert statt erinnert:
+
+* `Field.get_db_converters` (`django/db/models/fields/__init__.py:919`) gibt
+  `[self.from_db_value]` zurück, sobald ein Feld die Methode definiert.
+* `BaseExpression.get_db_converters` (`django/db/models/expressions.py:202`)
+  hängt die Converter seines `output_field` an die des Backends an.
+
+Damit quantisiert *jeder* Ausdruck, der dieses `output_field` trägt, auf jedem
+Backend — ohne eine einzige Vendor-Abfrage im Plugin-Code. Das ist der Punkt: die
+Zusage gilt durch Konstruktion, nicht dadurch, dass jemand an SQLite gedacht hat.
+Auf PostgreSQL, wo der Wert schon stimmt, ist die Quantisierung ein No-op.
+
+Der Ausreißer `InvalidOperation` (Summe breiter als `max_digits`) wird in einem
+passend dimensionierten Context erneut quantisiert, statt die Query zu sprengen —
+sonst wäre das Ergebnis wieder backend-abhängig, nur auf andere Art.
+
+## Geänderte Annotationen
+
+| Annotation | Feld-Key | Was ergänzt wurde |
+| --- | --- | --- |
+| `payment_sum_annotation` | `payment.sum_confirmed` | `output_field=_money()` am `Coalesce`, jetzt über `_payment_sum_coalesced()` |
+| `refund_sum_annotation` | `refund.sum_done` | `output_field=_money()` am `Coalesce` |
+| `_pending_sum_expression` | `order.pending_sum` | `_as_money(...)` um die Kombination, `output_field` an beiden inneren `Coalesce` |
+| `payment_state_annotation` | `computed.payment_state` | benutzt jetzt dasselbe `_payment_sum_coalesced()` und dasselbe `_pending_sum_expression()` |
+| `net_price_annotation` | `position.net_price` | `_as_money(F("price") - F("tax_value"))` |
+
+`_payment_sum_coalesced()` ist neu und existiert nur, damit die beiden Aufrufer
+denselben Ausdruck bauen — die Merge-Zusage aus dem Modul-Docstring wäre sonst
+davon abhängig gewesen, dass jemand zwei Codestellen gleich pflegt.
+
+`net_price_annotation` war im Review nicht genannt und hat dasselbe Problem:
+`F() - F()` ist eine `CombinedExpression` und damit ebenfalls kein `Col`.
+`23.50 - 3.50` kam als `20` heraus.
+
+**Nicht angefasst**, weil ohne Skalenproblem: `position_count_annotation` und
+`checkin_count_annotation` (`Count`), `payment_last_annotation`,
+`checkin_first_annotation`, `checkin_last_annotation` (Datum/Zeit),
+`answer_annotation`, `age_at_event_annotation`, `meta_annotation`,
+`status_label_annotation`.
+
+## `max_digits` / `decimal_places` gegen pretix verifiziert
+
+Nicht aus dem Gedächtnis, sondern Feld für Feld im installierten Source
+(`../pretix/src/pretix/base/models/orders.py`, pretix 2026.6.0):
+
+| Feld | Zeile | Deklaration |
+| --- | --- | --- |
+| `Order.total` | 266 | `decimal_places=2, max_digits=13` |
+| `OrderPayment.amount` | 1764 | `decimal_places=2, max_digits=13` |
+| `OrderRefund.amount` | 2182 | `decimal_places=2, max_digits=13` |
+| `AbstractPosition.price` | 1525 | `decimal_places=2, max_digits=13` |
+| `OrderPosition.tax_value` | 2571 | `max_digits=13, decimal_places=2` |
+
+Alle fünf identisch. Die Werte liegen jetzt als `MONEY_MAX_DIGITS` /
+`MONEY_DECIMAL_PLACES` an einer Stelle, und
+`test_the_money_scale_matches_the_pretix_model_fields` liest sie zur Laufzeit aus
+`Model._meta` zurück. Sollte pretix je auf vier Nachkommastellen gehen, fällt das
+auf, bevor ein Report anfängt, fremdes Geld zu runden.
+
+## Tests
+
+Neu: `tests/test_registry_money.py`, 12 Tests, alle grün. Jede Zusicherung geht
+über die *Zeichen* des Werts (`str(value)` bzw. `-as_tuple().exponent`), nie über
+den Zahlenwert — `Decimal("23.5") == Decimal("23.50")` ist in Python `True` und
+ist genau der Grund, warum die bestehende Suite das Problem ein ganzes Projekt
+lang übersehen hat.
+
+* jede aggregierte Geldspalte einzeln, parametrisiert über beide Basen
+* eine Zeile im Vergleich: `order.total` (Spalte) und die vier annotierten
+  Beträge müssen dasselbe Format drucken, inklusive `20.00` als
+  Doppelnull-Ernstfall bei `position.net_price`
+* der Nullfall (`Coalesce(..., 0.00)` muss `0.00` sein, nicht `0`)
+* `computed.payment_state` emittiert seine beiden Geld-Aliase mit Skala — der
+  Test, der anschlägt, wenn nur eine der zwei Aufrufstellen gefixt wäre
+* der gemergte Mapping-Fall, damit die Alias-Kollaps-Zusage weiter hält
+* `MoneyField` als Unit-Test ohne Datenbank, inklusive `float`-Eingabe,
+  Negativwert und dem zu breiten Wert
+
+Gegenprobe, dass die Tests nicht leer laufen: mit `git stash` auf der alten
+`annotations.py` fallen alle 12 um.
+
+```
+pytest tests/test_registry_money.py -q          -> 12 passed
+pytest -m "not performance" -q                  -> 1092 passed, 4 xfailed, 6 failed
+```
+
+Die sechs Fehlschläge sind fremd und gleichzeitig entstanden: fünf
+`XPASS(strict)` auf S-003, S-004, S-006 und T-001 (andere Agenten haben ihre
+Findings behoben, die Marker sind noch drin) plus
+`test_a_report_full_of_join_columns_costs_one_query_per_column` (T-003,
+query-dev). Keiner davon liegt in meinem Gebiet, keiner hängt an dieser Änderung.
+
+## Rest von T-002 liegt bei query-dev
+
+`tests/test_integration.py::test_finding_an_aggregated_money_column_keeps_its_two_decimal_places`
+bleibt xfail — jetzt aber nur noch wegen einer Spalte:
+
+```
+AssertionError: ['23.50', '20.50', '23.5'] == ['23.50', '20.50', '23.50']
+```
+
+Spalte 1 (`order.total`) war immer richtig, Spalte 2 (`payment.sum_confirmed`) ist
+durch diese Änderung richtig geworden. Spalte 3 ist `("position.price", "sum")`,
+also das vom Nutzer gewählte Aggregat aus `AGGREGATE_FUNCTIONS` in
+`query/relations.py`. Das ist query-devs Datei; Details, Nachweis und ein
+konkreter Vorschlag liegen in
+`handoff/requests/registry-dev-an-query-dev-t002-restspalte.md`. `MoneyField` und
+die beiden Konstanten sind dafür aus `annotations.__all__` exportiert.
+
+## Lint
+
+Nur über die eigenen zwei Dateien, kein `black .` / `isort .` über das Repo:
+
+```
+black    pretix_custom_reports/registry/annotations.py tests/test_registry_money.py -> reformatiert, danach clean
+isort    (dieselben Pfade)                                                          -> rc 0
+flake8   (dieselben Pfade)                                                          -> rc 0
+```
+
+Kein `git commit`. Außerhalb von `pretix_custom_reports/registry/**`,
+`tests/test_registry*.py` und `handoff/**` wurde nichts angefasst.

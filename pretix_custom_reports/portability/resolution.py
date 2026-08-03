@@ -94,7 +94,18 @@ __all__ = [
 
 
 class ResolutionStrategy:
-    """What to do with a reference the target event does not know."""
+    """What to do with a reference the target event does not know.
+
+    Three strategies, but only two of them are a *choice a user makes*.
+    ``KEEP`` belongs to the event copy (``portability/eventcopy.py``), where
+    nobody is standing in front of a confirmation page and losing a column
+    silently would be worse than carrying an unresolved one along. It also
+    switches off the second of the two checks that :func:`resolve_definition`
+    runs -- see :func:`_registry_issues` -- which is fine for a copy of a
+    definition that already existed, and not fine for a document that just
+    arrived from outside. Hence two coercion functions, and
+    :meth:`coerce_user_choice` for everything that reads a request (S-006).
+    """
 
     ABORT = "abort"
     SKIP = "skip"
@@ -102,15 +113,31 @@ class ResolutionStrategy:
 
     ALL = ("abort", "skip", "keep")
 
+    #: The subset a view may accept. ``KEEP`` is deliberately absent.
+    USER_CHOICES = ("abort", "skip")
+
     @classmethod
     def coerce(cls, value: Any) -> str:
         """Accept only one of the three. Anything else becomes ``ABORT``.
 
-        The strategy arrives from a form field, i.e. from the user's browser.
-        Falling back to the safest of the three is the only sane reading of an
-        unknown value.
+        For programmatic callers -- the event copy asks for ``KEEP`` here.
+        Never call this with a value that came out of a request; use
+        :meth:`coerce_user_choice` for that.
         """
         if isinstance(value, str) and value in cls.ALL:
+            return value
+        return cls.ABORT
+
+    @classmethod
+    def coerce_user_choice(cls, value: Any) -> str:
+        """Accept only what the user interface offers: ``ABORT`` or ``SKIP``.
+
+        Anything else -- missing, misspelled, or ``keep`` posted by hand --
+        becomes ``ABORT``, which blocks rather than writes. The import and
+        template views offer exactly these two radio buttons, so a request
+        carrying anything else is not a user making a choice.
+        """
+        if isinstance(value, str) and value in cls.USER_CHOICES:
             return value
         return cls.ABORT
 

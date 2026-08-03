@@ -469,3 +469,165 @@ grün. Kein repo-weiter Formatierlauf, kein `git commit`.
    Verlassen-Nachfrage also **still** weg. Wer sie dort haben will, braucht
    `playwright install chromium` im CI-Image; das ist eine
    Umgebungsentscheidung und deshalb nicht von mir getroffen.
+
+---
+
+# Nachtrag: Nacharbeitsrunde S-003 und T-001
+
+Zwei kleine, unabhängige Änderungen, beide ausschließlich in
+`pretix_custom_reports/views/api.py` und `tests/test_editor_api.py`. Keine
+Template-, JS- oder CSS-Zeile angefasst — die UI ist von beidem nicht betroffen.
+
+## S-003: die JSON-Antworten sind jetzt reines ASCII
+
+`_ApiView.json` serialisierte mit `ensure_ascii=False`. Ein ungepaartes
+Surrogat (`"\ud800"`) ist syntaktisch gültiges JSON, also nimmt `json.loads` es
+an und liefert einen Python-String, der sich nicht nach UTF-8 encodieren lässt.
+Django baut den Response-Body als `str` und encodiert ihn erst in
+`django/http/response.py` — dort schlug es mit `UnicodeEncodeError` fehl.
+Ergebnis war eine 500 auf `api/validate/` **und** `api/preview/` für genau die
+Reports, die man am dringendsten öffnen müsste: die kaputten. Ein solcher Report
+war im Editor nicht mehr reparierbar, weil der Editor sich beim Laden über
+`api/validate/` vergewissert.
+
+Umgestellt auf `ensure_ascii=True`. Im Browser ändert sich nichts: der Editor
+liest jede Antwort mit `JSON.parse`, und dort sind `\uXXXX` und das Rohzeichen
+derselbe String. Nicht-ASCII-Labels (Umlaute, Emoji in einem Anzeigenamen)
+reisen ab jetzt escaped und kommen unverändert an — das ist im neuen Test
+`test_validate_survives_a_lone_surrogate_in_a_label` von beiden Seiten
+festgehalten: Body ist `.decode("ascii")`-fähig, und der Wert überlebt den
+Roundtrip.
+
+Der Kommentar an der Stelle nennt den Grund, damit niemand `ensure_ascii=False`
+als "schönere Antwort" zurückdreht.
+
+Drei neue Tests in `tests/test_editor_api.py`:
+
+| Test | Was er festhält |
+| --- | --- |
+| `test_validate_survives_a_lone_surrogate_in_a_label` | 200 statt 500, Body ASCII, Label unverändert zurück |
+| `test_preview_survives_a_lone_surrogate_in_a_label` | dasselbe für die Vorschau, plus: es kommen weiterhin Zeilen |
+| `test_every_editor_endpoint_answers_in_pure_ascii` | die Regel statt des Symptoms — `api/fields/`, `api/validate/`, `api/preview/` und eine Fehler-Envelope, die die Eingabe zitiert |
+
+Der dritte ist der eigentlich wertvolle: ein Label ist nur der kürzeste Weg
+hinein, und der Test hält jeden künftigen Endpunkt, der Nutzertext
+zurückspiegelt, mit fest.
+
+Nicht mein Teil und von `portability-dev` erledigt: das Gate in
+`payload.load_json_object`, das solche Dokumente beim Import gar nicht mehr
+hereinlässt. Meine Hälfte bleibt auch danach nötig — für Werte, die vor dem Gate
+entstanden sind, und für jeden Pfad, der nicht durch das Gate läuft (das
+JSON-Panel des Editors, das CRUD-Textfeld).
+
+## T-001: die Vorschau rendert mit dem Renderer des Exporters
+
+Die Formatierung von `ColumnFormat` gab es zweimal: `format_cell()`,
+`_format_temporal()` und `_format_number()` in `views/api.py` (Vorschau) und
+seit `exporter-dev`s Runde wortgleich als `format_cell_value()` in
+`exporters.py` (Export). Zwei Implementierungen, die genau so lange gleich
+bleiben, bis jemand eine davon anfasst. Meine drei Funktionen sind ersatzlos
+raus; die Vorschau ruft jetzt `exporters.format_cell_value` auf.
+
+**Wie ich die Verhaltensgleichheit geprüft habe**, bevor ich gelöscht habe —
+nicht auf Zusage, weil `views/api.py` mein Gebiet bleibt:
+
+1. **Zeilenweiser Vergleich der Quelltexte.** Rumpf von
+   `views/api.py::format_cell` gegen `exporters.py::format_cell_value` und beide
+   Hilfsfunktionen gegen ihre Gegenstücke, Zeile für Zeile über `==` auf den
+   Zeilenlisten — beides `True`. Es war wirklich derselbe Code, nicht nur
+   derselbe Zweck. Der einzige Unterschied sind die Vorgabewerte
+   `datatype=None, event=None` in der Signatur; positionell ändert sich dadurch
+   nichts, und die Vorschau übergibt ohnehin beide.
+2. **Der Aufruf blieb Zeichen für Zeichen stehen.** In `PreviewView._rows` ist
+   nur der Name ausgetauscht, die vier Argumente in derselben Reihenfolge.
+   `_formats_by_index` bleibt meins — der Exporter hat seine eigene Paarung,
+   weil er zusätzlich entscheidet, *ob* überhaupt formatiert wird.
+3. **Der Verhaltenstest lief unverändert weiter.**
+   `test_preview_applies_the_column_format` prüft sieben Spalten quer über alle
+   drei Stilarten (raw/currency, yes_no/one_zero, iso/date_only) am fertigen
+   Response und hat nach dem Umbau ohne eine Änderung bestanden. Das ist die
+   Abnahme; kein Test in meiner Datei hing an der internen Implementierung.
+
+Die Vorschau ruft `format_cell_value` und **nicht** `format_export_cell`:
+letzteres gibt unformatierte Werte nativ typisiert zurück, was für XLSX richtig
+und für eine JSON-Antwort falsch ist — eine Vorschauzelle muss immer ein String
+sein.
+
+Zur Strenge des Renderers: `format_cell_value` fängt nichts ab, ein Stil, der
+nicht zum Datentyp der Spalte passt (`date_only` auf einer Uhrzeitspalte, über
+eine importierte oder handeditierte Definition erreichbar), wirft. Das war bei
+meinem `format_cell` genauso, ich habe daran nichts geändert. In der Vorschau
+landet das nicht als 500: `PreviewView.post` fängt um `_rows()` herum jede
+Exception und antwortet mit `stage: "execute"` und 400. Auf dem Exportweg fängt
+`format_export_cell` selbst, weil eine Exception dort fünf Celery-Retries
+bedeutet. Beide Seiten sind abgesichert, ohne dass der Renderer selbst weich
+wird.
+
+### Der Import ist bewusst lazy
+
+`exporters.py` importiert auf Modulebene `models`, `query.compiler` und
+`registry.library`. Ein `from ..exporters import format_cell_value` ganz oben in
+`views/api.py` hätte all das zur URLconf-Importzeit hereingezogen — genau die
+Eigenschaft, für die `get_registry()` und `get_compiler()` seit Welle 1
+Funktionen und keine Modulimporte sind (Modul-Docstring, ADR 0005 Abschnitt 2).
+Deshalb dritte Naht statt Import:
+
+```python
+def get_cell_renderer():
+    from ..exporters import format_cell_value
+    return format_cell_value
+```
+
+Steht direkt bei den beiden anderen, gleiche Begründung, gleicher Nutzen für
+Tests (an einer Stelle austauschbar). Die Abschnittsüberschrift heißt jetzt
+"The three seams", `__all__` ist ergänzt.
+
+Ein Anti-Drift-Test in meiner Datei,
+`test_the_preview_renders_cells_with_the_exporter_s_function`, prüft
+`api.get_cell_renderer() is exporters.format_cell_value` und dass
+`format_cell`, `_format_temporal` und `_format_number` in `views/api.py` nicht
+wieder auftauchen. Nötig, weil `exporter-dev`s Paritätstest
+(`test_the_preview_and_the_export_share_one_renderer`) sich ausdrücklich
+abschaltet, sobald es nichts mehr zu vergleichen gibt — ab jetzt hält meiner den
+Zustand.
+
+Aufgeräumt: `datetime`, `decimal` und `django.utils.formats`/`timezone` waren
+nur noch für die gelöschten Funktionen importiert und sind raus.
+
+## Testergebnis
+
+`pytest tests/test_editor_api.py`: **116 passed**, keine Änderung an einem
+bestehenden Test nötig.
+
+`pytest -m "not performance"`: **1120 passed, 9 failed**. Alle neun sind
+Fehlschläge auf Markern anderer Agenten, die auf ihre Entmarkierungsrunde
+warten — kein echter Regress:
+
+* `test_security.py::test_the_validate_endpoint_survives_a_lone_surrogate` und
+  `::test_the_preview_endpoint_survives_a_lone_surrogate` — `XPASS(strict)`,
+  **durch meine Änderung** grün geworden, das ist der Zweck. Entmarkierung durch
+  `security-reviewer`.
+* `test_security.py::test_the_export_view_survives_a_stored_lone_surrogate`,
+  `::test_a_lone_surrogate_is_refused_by_the_payload_gate`,
+  `::test_a_duplicate_identifier_is_a_form_error_not_a_500`,
+  `::test_the_import_view_cannot_be_talked_into_the_event_copy_strategy` —
+  `XPASS(strict)`; S-003-Rest, S-004, S-006, alle von anderen behoben.
+* `test_integration.py::test_finding_a_column_format_chosen_in_the_editor_reaches_the_export`
+  (T-001) und
+  `::test_finding_an_aggregated_money_column_keeps_its_two_decimal_places` —
+  `XPASS(strict)`; `exporter-dev` bzw. `query-dev`, `test-engineer` entmarkiert.
+* `test_security.py::test_a_report_full_of_join_columns_costs_one_query_per_column`
+  — kein `xfail`, sondern ein Charakterisierungstest, den `query-dev`s
+  S-005-Behebung überholt hat: er erwartet, dass die Query-Zahl mit der
+  Spaltenzahl wächst, gemessen wird jetzt `(2, 2)`. Gehört
+  `security-reviewer`/`query-dev`, nicht mir, und hängt nicht an meiner
+  Änderung.
+
+`flake8`, `isort -c`, `black --check` über `views/api.py` und
+`tests/test_editor_api.py`: grün. Kein repo-weiter Lauf, kein `git commit`.
+
+## Eine Kleinigkeit für den Orchestrator
+
+`docs/adr/0005-editor.md:96` behauptet noch "**Formatierung ist
+Vorschau-lokal.** `format_cell()` in `views/api.py` …". Das stimmt seit T-001
+nicht mehr. `docs/` ist nicht mein Gebiet, deshalb nur der Hinweis.

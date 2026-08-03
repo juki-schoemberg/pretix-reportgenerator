@@ -408,3 +408,251 @@ außerhalb von `pretix_custom_reports/query/**`, `tests/test_query*.py` und
    schiefgegangen.
 4. **Welle 3 (`test-engineer`):** Query-Zahlen und `nulls_last` gegen PostgreSQL
    nachfahren.
+
+---
+
+# Nachtrag: S-005 und T-003 (Nacharbeitsrunde)
+
+Auftrag: `S-005` aus `docs/security-review.md` und `T-003` aus
+`handoff/blockers.md`. Nur eigene Dateien angefasst:
+`pretix_custom_reports/query/{relations,plan,columns}.py`,
+`tests/test_query_{plan,compile}.py`. Kein Commit.
+
+## S-005 — Dedup über Lookup **und** Bedingung (die „richtige" Variante)
+
+Umgesetzt ist die vom Review bevorzugte Variante, **nicht** der Cap-Fallback.
+Sie ließ sich lokal halten: die `Prefetch`-Konstruktion selbst bleibt, wie sie
+war, geändert hat sich nur, **woher der `to_attr` kommt**.
+
+Vorher: `to_attr = pcr_c<Spaltenindex>` — pro Spalte eindeutig, damit war
+`_dedupe_prefetches` über `(lookup, to_attr)` strukturell wirkungslos.
+
+Jetzt: `relations.join_leaf_to_attr(...)` leitet den Namen aus allem ab, was das
+Leaf-Queryset formt, und aus nichts sonst:
+
+```
+leaf_model._meta.label_lower | lookup | canceled-Regel | inner select_related | Bedingung
+        -> sha256 -> "pcr_j<16 hex>"
+```
+
+Damit heißt „gleicher `dedup_key`" jetzt tatsächlich „austauschbares Queryset",
+und 20 identische `join`-Spalten kosten einen Prefetch statt zwanzig.
+
+Drei Punkte, die dabei nicht offensichtlich waren:
+
+1. **`str(Q)` reicht nicht ganz.** Das Review nennt `str(Q)` als Vergleich, mit
+   dem „üblichen Vorbehalt". Der Vorbehalt ist hier nicht nur theoretisch:
+   `str(Q)` rendert eine Modellinstanz über deren `__str__`, und zwei
+   `Question`-Zeilen mit demselben Label sähen gleich aus. Zusammengelegt hieße
+   das: die Antworten der einen Frage stehen in der Spalte der anderen — falsche
+   Ausgabe, kein Fehler. Deshalb `relations.condition_signature(q)`, ein
+   strengerer Verwandter von `str(Q)`: es signiert nur Skalare (inkl. `Decimal`,
+   `date`, `UUID`) und Listen/Mengen davon, und gibt für alles andere `None`
+   zurück. `None` heißt „kann ich nicht sagen" → der alte, spaltenweise
+   eindeutige Name greift, die Prefetches bleiben getrennt. Die Ersparnis wird
+   also nie gegen Korrektheit eingetauscht.
+2. **`select_related` gehört zur Identität.** `item.name` braucht auf den
+   geprefetchten Positionen `select_related("item")`, `position.attendee_name`
+   nicht. Würden beide einen Prefetch teilen, spart man eine Query und kauft
+   sich ein Item-Lookup je Position ein. Der innere `select_related`-Präfix ist
+   deshalb Teil der Signatur; Spalten, die sich **nur** im Python-seitig
+   gelaufenen Rest unterscheiden (`attendee_name` vs. `attendee_email`), teilen
+   sich den Prefetch dagegen.
+3. **Zwischenebenen** (kein `to_attr`) verhalten sich wie vorher und fallen
+   weiterhin auf eine Query zusammen.
+
+Signaturwechsel, rein intern: `join_prefetch_specs(..., leaf_to_attr)` heißt
+jetzt `join_prefetch_specs(..., fallback_to_attr)` — einziger Aufrufer ist
+`query/columns.py`.
+
+## T-003 — Docstring in `query/columns.py`
+
+Die Zusage ist ersetzt durch die Formel, die tatsächlich gilt, und zwar in der
+Fassung **nach** dem S-005-Fix:
+
+```
+1 + levels x ceil(rows / chunk_size)   Queries
+```
+
+mit dem ausdrücklichen Zusatz, dass *levels* die Zahl der **verschiedenen**
+Prefetch-Ebenen ist und nicht die der `join`-Spalten (das ist neu und nur wegen
+S-005 wahr), plus den gemessenen Zahlen aus `docs/performance.md` 3.3, plus dem
+Hinweis, dass das kein N+1 ist, sondern die Speichergrenze aus 3.5 kauft. Die
+Tabellenzeile „0 / 1 extra" heißt jetzt „0 / below". Kein Verhaltensfix, wie
+empfohlen — Punkt (2) und (3) der Empfehlung sind nicht meiner bzw. bewusst
+nicht getan.
+
+## Tests
+
+Neu in `tests/test_query_compile.py` (mit DB, Query-Zahlen):
+
+- `test_twenty_identical_join_columns_cost_one_prefetch` — die Gegenprobe zu
+  S-005: 20 identische `join`-Spalten, `django_assert_num_queries(2)`, und alle
+  20 Zellen werden trotzdem gerendert.
+- `test_join_columns_with_different_conditions_keep_their_own_prefetch` — zwei
+  Fragen, 4 Queries, Werte nicht vertauscht.
+- `test_join_columns_that_need_different_select_related_stay_apart` — 3 Queries,
+  kein Item-Lookup je Zeile.
+- `test_join_columns_of_the_same_relation_share_across_different_tails` — 2
+  Queries für zwei verschiedene Felder aus einem Prefetch.
+- `test_a_condition_without_a_faithful_text_form_is_never_merged` — `Q` mit
+  Modellinstanz im `extra['relation_filter']` → Fallback, 3 Queries.
+
+Neu in `tests/test_query_plan.py` (ohne DB): Kollaps auf einen Prefetch,
+Unabhängigkeit des Namens von der Spaltenposition, Trennung bei
+unterschiedlicher Bedingung bzw. `select_related`, sowie acht Unit-Tests für
+`condition_signature` (gleich gebaute `Q` signieren gleich; `False` vs.
+`"False"` und `17` vs. `"17"` signieren verschieden; `None` ist eine eigene
+Bedingung; Modellinstanz → `None`; Mengen sortiert, Listen ordnungstreu).
+
+Ergebnis:
+
+```
+pytest tests/test_query*.py tests/test_exporters.py -q   -> 326 passed, 1 xfailed
+pytest -m "not performance" -q                           -> 1092 passed, 6 failed
+pytest tests/test_performance.py -m performance -q       -> 8 passed
+flake8 / isort -c / black --check (nur geänderte Dateien) -> sauber
+```
+
+Zu den 6 Fehlschlägen der Gesamtsuite: **fünf davon sind nicht meine** —
+`XPASS(strict)` in `tests/test_integration.py` und `tests/test_security.py` zu
+Finding 1, S-003, S-004 und S-006. Das sind laufende Arbeiten anderer Agenten im
+selben Arbeitsbaum (`git status` zeigt u. a. `portability/`, `forms.py`,
+`registry/annotations.py` geändert), deren `xfail`-Marker noch stehen.
+
+## Der eine Fehlschlag, der auf mich zurückgeht — und den ich nicht anfassen darf
+
+`tests/test_security.py::test_a_report_full_of_join_columns_costs_one_query_per_column`
+schlägt jetzt fehl: `AssertionError: (2, 2)`. Der Test misst mit
+`assert many - few >= 15`, dass 20 `join`-Spalten mindestens 15 Queries mehr
+kosten als 2 — genau das, was S-005 beschreibt und was jetzt behoben ist. 2
+Spalten kosten 2 Queries, 20 Spalten kosten 2 Queries.
+
+Die Datei gehört dem **`security-reviewer`**, nicht mir
+(`grep -rn "costs_one_query_per_column" tests/` → nur `tests/test_security.py:2083`).
+Ich habe sie **nicht** angefasst. Der zuständige Agent müsste den Test
+umdrehen — aus „misst die Verstärkung" wird „belegt, dass es sie nicht mehr
+gibt", z. B. `assert many == few`. Der Docstring des Tests („Documented
+amplification, measured (S-005)") gehört mit umgeschrieben.
+
+Nicht angefasst und **nicht nötig**: `tests/test_performance.py::test_a_join_column_costs_one_prefetch_per_chunk_not_one_per_row`
+bleibt grün. Der dortige `WIDE_ORDER`-Report hat zwei `join`-Spalten über
+*verschiedene* Relationen (`item.name` mit `select_related`, `answer.bulk-question`
+über zwei Hops), die sich korrekterweise weiterhin nicht zusammenlegen lassen —
+`levels = 3` stimmt unverändert. Nachgemessen, der ganze Performance-Lauf ist
+grün. Der Docstring dieses Tests zitiert allerdings die alte Zusage aus
+`query/columns.py` („costs exactly one query per prefetch level, independent of
+the number of rows") als Beleg für T-003; die steht dort so nicht mehr, das ist
+eine reine Textnachführung für `test-engineer`.
+
+---
+
+# Nachtrag 2: T-002-Restspalte (`SUM`/`MIN`/`MAX`/`AVG` über Geldfelder)
+
+Auftrag aus `handoff/requests/registry-dev-an-query-dev-t002-restspalte.md`.
+Geändert: `query/relations.py`, `query/columns.py`, `tests/test_query_compile.py`,
+`tests/test_query_plan.py`. Kein Commit.
+
+## Was jetzt passiert
+
+Neu in `query/relations.py`:
+
+- `MONEY_AGGREGATES = {SUM, MIN, MAX, AVG}` — die Aggregate, die über einen
+  Betrag wieder einen Betrag liefern. `COUNT`/`COUNT_DISTINCT` sind bewusst
+  draußen (Kardinalität hat keine Skala; „3,00 Positionen" wäre keine
+  Verbesserung), `JOIN` wird ohnehin nie SQL.
+- `money_output_field()` — frische `MoneyField(13, 2)`-Instanz **pro Aufruf**.
+  Ein Django-`Field` nimmt Zustand an, sobald es an einem Ausdruck hängt; eine
+  geteilte Instanz über zwei Annotationen desselben Querysets ist eine Falle.
+- `aggregate_expression(aggregate, target, datatype=None)` — die einzige Stelle,
+  die `AGGREGATE_FUNCTIONS` noch aufruft. Setzt `output_field=MoneyField(...)`
+  genau dann, wenn `datatype is DataType.MONEY` **und** das Aggregat in
+  `MONEY_AGGREGATES` liegt. Die Tabelle `AGGREGATE_FUNCTIONS` bleibt exportiert,
+  trägt aber jetzt den Hinweis, dass man `aggregate_expression` nimmt.
+
+`subquery_aggregate(...)` hat einen neuen Parameter `datatype`, `columns.py`
+reicht `field.datatype` durch — die Angabe der **Registry**, nicht etwas aus dem
+Modellfeld Geschlossenes (CLAUDE.md Regel 2). Das `output_field` reist mit der
+selektierten Spalte aus dem inneren Queryset heraus, die äußere `Subquery` erbt
+die Quantisierung, ohne es noch einmal gesagt zu bekommen — nachgemessen, nicht
+angenommen.
+
+`Cast`/`Round` habe ich nicht noch einmal probiert; die Messung von registry-dev
+und der `MoneyField`-Docstring erklären ausreichend, warum die Skala im Converter
+und nicht im SQL verloren geht.
+
+## Die AVG-Entscheidung: wird quantisiert, und das ist eine Rundung
+
+`AVG` bekommt dasselbe `output_field` wie `SUM`. Das ist, wie registry-dev
+richtig schreibt, keine reine Formatkorrektur mehr — 43,00 / 3 ist periodisch,
+und zwei Nachkommastellen sind eine Rundung (half-even, aus dem Kontext von
+`DecimalField`).
+
+Begründung, im Docstring von `aggregate_expression` ausführlich: der unquantisierte
+Wert *bewahrt keine Präzision*, er exportiert ein Artefakt der Installation.
+SQLite liefert über den Float-Pfad `14.333333333333334`, PostgreSQL ein `numeric`
+mit backendeigener Skala — die Spalte sähe je nach Installation anders aus, und
+genau das ist der Fehler, den T-002 beschreibt. Eine Zelle mit der Überschrift
+„Durchschnittspreis" wird als Geld gelesen, gegen Geld verglichen und im
+Tabellenblatt weiterverrechnet, also wird sie als Geld ausgegeben. Wer den
+exakten Quotienten braucht, hat Summe und Anzahl als eigene Spalten.
+
+## Tests
+
+`tests/test_query_compile.py` (mit DB, Vergleich als **Text**, nicht numerisch —
+`Decimal("43") == Decimal("43.00")` ist ja gerade der Grund, warum das lange
+niemand gefunden hat):
+
+- `test_an_aggregated_amount_keeps_two_decimal_places` — parametrisiert über
+  SUM/MIN/MAX/AVG, prüft `str(value)` **und** `value.as_tuple().exponent == -2`.
+  AVG ist mit `"14.33"` festgenagelt, damit die Rundungsentscheidung sichtbar im
+  Test steht und nicht stillschweigend kippen kann.
+- `test_the_scale_holds_next_to_a_plain_amount_in_the_same_row` — `order.total`
+  (einfache Spalte) und `SUM(position.price)` in derselben Zeile, beide „43.00".
+  Das war das sichtbare Symptom.
+- `test_a_counted_aggregate_stays_an_integer` — `COUNT`/`COUNT_DISTINCT` bleiben
+  `int`.
+- `test_an_aggregate_over_a_non_money_field_is_left_alone` — `MAX` über
+  `position.positionid` bleibt `int`; entscheidend ist der Datentyp der Registry,
+  nicht „ist numerisch".
+
+`tests/test_query_plan.py` (ohne DB): fünf Unit-Tests für `aggregate_expression`
+— Geld-Aggregate tragen `MoneyField(13, 2)`, zählende nicht, Nicht-Geld-Datentypen
+(`None`, `INTEGER`, `DECIMAL`) bleiben unangetastet, jede Instanz ist eine eigene,
+und `JOIN` wirft `CompilationError`.
+
+Ergebnis:
+
+```
+pytest tests/test_query_plan.py tests/test_query_compile.py \
+       tests/test_exporters.py tests/test_registry_money.py -q  -> 235 passed
+pytest -m "not performance" -q                                  -> 1116 passed, 7 failed
+flake8 / isort -c / black --check (nur meine Dateien)           -> sauber
+```
+
+## Zum Fehlschlagbild der Gesamtsuite
+
+Von den sieben Fehlschlägen sind sechs `XPASS(strict)` — Reproduzierer anderer
+Agenten, deren `xfail`-Marker noch stehen, weil der jeweilige Fix gerade erst
+gelandet ist. Einer davon ist **unserer**:
+
+`tests/test_integration.py::test_finding_an_aggregated_money_column_keeps_its_two_decimal_places`
+ist jetzt `XPASS(strict)`, d. h. T-002 ist Ende zu Ende grün — registry-dev hat
+vier Spalten geliefert, diese Änderung die fünfte. Die Datei gehört
+`test-engineer`; der `xfail`-Marker gehört von dort entfernt, ich habe sie nicht
+angefasst.
+
+Der siebte bleibt wie im ersten Nachtrag beschrieben:
+`tests/test_security.py::test_a_report_full_of_join_columns_costs_one_query_per_column`
+(`security-reviewer`), rot **weil** S-005 behoben ist.
+
+## Eine Stelle, die ich bewusst nicht angefasst habe
+
+`query/columns.py` hat einen `F()`-Fallback für mehrsegmentige Pfade, denen
+`select_related` nicht folgen kann; ein Geldwert auf diesem Weg hätte dasselbe
+Skalenproblem. Mit dem heutigen Feldbestand ist der Zweig für Geld nicht
+erreichbar (er verlangt einen Pfad über eine mehrwertige Relation, und der
+bräuchte auf Basis `order` ein Aggregat). Ich habe deshalb keinen ungetesteten
+Sicherungsdraht eingezogen — falls ein Fremdplugin je ein Geldfeld mit einem
+solchen Pfad meldet, ist `ExpressionWrapper(F(path), output_field=MoneyField(...))`
+die Einzeile, die dort hingehört.

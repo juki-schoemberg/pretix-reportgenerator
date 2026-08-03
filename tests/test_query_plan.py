@@ -43,8 +43,14 @@ from pretix_custom_reports.contracts.fields import (
     SortDirection,
 )
 from pretix_custom_reports.contracts.stubs import StubFieldRegistry, stub_registry
+from pretix_custom_reports.query import relations
 from pretix_custom_reports.query.compiler import ReportQueryCompiler
 from pretix_custom_reports.query.plan import build_plan, check_definition
+from pretix_custom_reports.query.relations import (
+    aggregate_expression,
+    condition_signature,
+)
+from pretix_custom_reports.registry.annotations import MoneyField
 
 from .test_query_support import (
     VALID_FIXTURES,
@@ -481,6 +487,234 @@ def test_join_columns_share_one_prefetch_per_intermediate_level(event, reference
     # Two leaf joins over all_positions itself get their own to_attr; the
     # unfiltered intermediate level for the answers chain is shared.
     assert to_attrs.count(None) == 1
+
+
+def test_identical_join_columns_collapse_into_one_prefetch(event, reference):
+    """S-005: the ``to_attr`` names the *rows wanted*, not the column asking.
+
+    Twenty ``join`` columns over one relation with one condition want one list of
+    positions. Before the fix each got ``pcr_c<index>`` as its ``to_attr``, which
+    made ``_dedupe_prefetches`` structurally unable to merge anything.
+    """
+    definition = ReportDefinition(
+        base=Base.ORDER,
+        columns=(Column(field="order.code"),)
+        + tuple(
+            Column(field="position.attendee_name", aggregate=Aggregate.JOIN)
+            for _ in range(20)
+        ),
+    )
+    plan = _plan(definition, event, reference)
+    assert len(plan.prefetch_related) == 1
+    assert plan.prefetch_related[0].to_attr.startswith("pcr_j")
+
+
+def test_the_join_prefetch_name_does_not_depend_on_the_column_position(
+    event, reference
+):
+    """The same column in two reports gets the same prefetch name.
+
+    A name minted from the column index is unique by construction and therefore
+    useless as a de-duplication key -- that was the whole of S-005. Pinned here so
+    that a future refactoring cannot quietly go back to indexing.
+    """
+    join = Column(field="position.attendee_name", aggregate=Aggregate.JOIN)
+    first = _plan(
+        ReportDefinition(base=Base.ORDER, columns=(join, Column(field="order.code"))),
+        event,
+        reference,
+    )
+    later = _plan(
+        ReportDefinition(
+            base=Base.ORDER,
+            columns=(
+                Column(field="order.code"),
+                Column(field="order.email"),
+                Column(field="order.total"),
+                join,
+            ),
+        ),
+        event,
+        reference,
+    )
+    assert first.prefetch_related[0].to_attr == later.prefetch_related[0].to_attr
+
+
+def test_join_columns_with_different_conditions_stay_separate(event, reference):
+    """Two questions, two prefetches -- merging them would swap the answers."""
+    definition = ReportDefinition(
+        base=Base.ORDER,
+        columns=(
+            Column(field="answer.tshirt-size", aggregate=Aggregate.JOIN),
+            Column(field="answer.arrival-date", aggregate=Aggregate.JOIN),
+        ),
+    )
+    plan = _plan(definition, event, reference)
+    to_attrs = [p.to_attr for p in plan.prefetch_related]
+    # One shared intermediate level over ``all_positions`` plus one leaf each.
+    assert to_attrs.count(None) == 1
+    leaves = [attr for attr in to_attrs if attr is not None]
+    assert len(leaves) == 2 and len(set(leaves)) == 2
+
+
+def test_join_columns_that_need_different_select_related_stay_separate(
+    event, reference
+):
+    """Sharing here would trade one query for one item lookup per position."""
+    definition = ReportDefinition(
+        base=Base.ORDER,
+        columns=(
+            Column(field="item.name", aggregate=Aggregate.JOIN),
+            Column(field="position.attendee_name", aggregate=Aggregate.JOIN),
+        ),
+    )
+    plan = _plan(definition, event, reference)
+    assert len({p.to_attr for p in plan.prefetch_related}) == 2
+
+
+def test_join_columns_reading_different_fields_of_one_prefetch_share_it(
+    event, reference
+):
+    """Same rows, same ``select_related``: the tail is walked in Python."""
+    definition = ReportDefinition(
+        base=Base.ORDER,
+        columns=(
+            Column(field="position.attendee_name", aggregate=Aggregate.JOIN),
+            Column(field="position.attendee_email", aggregate=Aggregate.JOIN),
+        ),
+    )
+    plan = _plan(definition, event, reference)
+    assert len(plan.prefetch_related) == 1
+
+
+# ---------------------------------------------------------------------------
+# The output field of a money aggregate (T-002)
+# ---------------------------------------------------------------------------
+
+
+def _declared_output_field(expression):
+    """The ``output_field`` the expression was *given*, or ``None``.
+
+    Read out of the instance dict rather than through ``expression.output_field``
+    on purpose: the property resolves the field from the source expressions, and
+    a bare ``Sum("price")`` cannot do that outside a query. What is interesting
+    here is exactly the difference between "was told" and "will work it out".
+    """
+    return expression.__dict__.get("output_field")
+
+
+@pytest.mark.parametrize(
+    "aggregate", [Aggregate.SUM, Aggregate.MIN, Aggregate.MAX, Aggregate.AVG]
+)
+def test_a_money_aggregate_carries_the_money_output_field(aggregate):
+    """Without it the scale is lost in the converter, not in the SQL (T-002)."""
+    output = _declared_output_field(
+        aggregate_expression(aggregate, "price", DataType.MONEY)
+    )
+    assert isinstance(output, MoneyField)
+    assert (output.max_digits, output.decimal_places) == (13, 2)
+
+
+@pytest.mark.parametrize("aggregate", [Aggregate.COUNT, Aggregate.COUNT_DISTINCT])
+def test_a_counting_aggregate_gets_no_money_output_field(aggregate):
+    """A cardinality has no scale, and "3.00 positions" is not an improvement."""
+    assert aggregate not in relations.MONEY_AGGREGATES
+    expression = aggregate_expression(aggregate, "price", DataType.MONEY)
+    assert _declared_output_field(expression) is None
+
+
+@pytest.mark.parametrize("datatype", [None, DataType.INTEGER, DataType.DECIMAL])
+def test_a_non_money_aggregate_is_left_as_it_was(datatype):
+    """The registry's declaration decides, not "it happens to be numeric"."""
+    expression = aggregate_expression(Aggregate.SUM, "price", datatype)
+    assert _declared_output_field(expression) is None
+
+
+def test_each_money_aggregate_gets_its_own_output_field_instance():
+    """A ``Field`` picks up state once it is attached; sharing one is a trap."""
+    first = aggregate_expression(Aggregate.SUM, "price", DataType.MONEY)
+    second = aggregate_expression(Aggregate.SUM, "price", DataType.MONEY)
+    assert _declared_output_field(first) is not _declared_output_field(second)
+
+
+def test_an_unknown_aggregate_is_a_compilation_error():
+    """``JOIN`` never becomes SQL: it is a prefetch plus a Python join."""
+    with pytest.raises(CompilationError):
+        aggregate_expression(Aggregate.JOIN, "price", DataType.MONEY)
+
+
+# ---------------------------------------------------------------------------
+# The condition signature the de-duplication rests on
+# ---------------------------------------------------------------------------
+
+
+def test_two_separately_built_equal_conditions_sign_equally():
+    """The property the whole de-duplication needs.
+
+    ``Q`` has no canonical form and no useful ``__hash__``; two aggregate filters
+    for the same field are built twice by the same code and have to come out
+    equal.
+    """
+    left = Q(canceled=False) & Q(question=17)
+    right = Q(canceled=False) & Q(question=17)
+    assert left is not right
+    assert condition_signature(left) == condition_signature(right)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        Q(canceled=False) & Q(question=18),
+        Q(canceled=True) & Q(question=17),
+        Q(canceled=False) | Q(question=17),
+        ~(Q(canceled=False) & Q(question=17)),
+        Q(canceled=False),
+        Q(canceled="False") & Q(question=17),
+        Q(canceled=False) & Q(question="17"),
+    ],
+)
+def test_a_different_condition_signs_differently(other):
+    """Including the ones that only *look* the same.
+
+    ``False`` and ``"False"`` are one character apart in a ``str(Q)`` and select
+    different rows. The signature has to tell them apart, or two columns get
+    merged that address different data.
+    """
+    reference = Q(canceled=False) & Q(question=17)
+    assert condition_signature(reference) != condition_signature(other)
+
+
+def test_no_condition_is_itself_a_condition():
+    """No condition at all must not collide with an empty one."""
+    assert condition_signature(None) is not None
+    assert condition_signature(None) != condition_signature(Q())
+
+
+def test_a_condition_holding_an_object_gets_no_signature(event):
+    """Refusing to sign is how the fallback is triggered.
+
+    Two model instances can share a ``str()`` and address different rows, so a
+    condition containing one is treated as unrepresentable and its columns are
+    never merged. ``FakeEvent`` stands in for any such object -- what matters is
+    that it is not a scalar.
+    """
+    assert condition_signature(Q(item=event)) is None
+    assert condition_signature(Q(canceled=False) & Q(item=event)) is None
+    assert condition_signature(Q(item__in=[1, event])) is None
+
+
+def test_a_list_of_scalars_still_signs():
+    """``in`` lookups are the common case and must not lose the saving."""
+    assert condition_signature(Q(status__in=["p", "n"])) is not None
+    assert condition_signature(Q(status__in=["p", "n"])) == condition_signature(
+        Q(status__in=["p", "n"])
+    )
+    assert condition_signature(Q(status__in=["p", "n"])) != condition_signature(
+        Q(status__in=["n", "p"])
+    )
+    assert condition_signature(Q(status__in={"p", "n"})) == condition_signature(
+        Q(status__in={"n", "p"})
+    )
 
 
 def test_a_registry_alias_may_not_look_like_a_compiler_alias(event):
