@@ -445,3 +445,169 @@ Ergebnisse:
 `tests/test_security.py::test_the_change_form_survives_a_stored_lone_surrogate`
 entfernen (beide Parametrisierungen fallen mit einem Marker) — bis dahin ist die
 Suite durch diesen Fix rot. Absichtlich nicht von mir angefasst.
+
+---
+
+# Nachtrag: Liste verlinkt den grafischen Editor (UX-Fix nach Dev-Test)
+
+Auslöser: der Nutzer hat auf der Dev-Instanz festgestellt, dass die Report-Liste
+ausschließlich auf mein schlichtes JSON-Formular verlinkt und der grafische
+Drag&Drop-Editor von `frontend-dev` nirgends erreichbar war.
+
+## Geändert
+
+* `pretix_custom_reports/templates/pretix_custom_reports/report_list.html`
+  * beide „Create a new report"-Buttons (gefüllte Liste + Leerzustand):
+    `event.reports.add` → `editor.new`
+  * Report-Name-Link und Bearbeiten-Stift: `event.reports.edit`
+    (`report=report.pk`) → `editor.edit` (`identifier=report.identifier`)
+  * Kommentarkopf erklärt, warum das Formular trotzdem bleibt
+  * unverändert: Export, Duplizieren, Löschen, Import, Vorlagen; unverändert
+    auch das `can_change`-Gate um die Schreib-Aktionen
+* `pretix_custom_reports/views/crud.py`
+  * neue Konstante `URL_NAME_EDITOR_EDIT = "editor.edit"` (in `__all__`)
+  * `ReportDuplicateView.post()` redirected nach dem Duplizieren in den Editor:
+    `report_url(URL_NAME_EDITOR_EDIT, request.event, identifier=copy.identifier)`
+    statt bisher `URL_NAME_EDIT` mit `report=copy.pk`
+  * Modul-Docstring hält fest, dass `event.reports.add`/`.edit` weiterhin der
+    POST-Endpunkt des Editors und die Handreparatur-Seite für kaputtes JSON
+    sind — nur eben nicht mehr aus der Liste verlinkt
+* `tests/test_permissions.py` — siehe unten
+
+Nicht angefasst: `views/editor.py`, `views/api.py`, `urls.py`, `signals.py`.
+Keine Route entfernt oder umbenannt. Keine neuen Übersetzungsstrings (die
+Button-Texte sind unverändert), also nichts für den `de`-Katalog.
+
+## Wie die `editor.edit`-Signatur verifiziert wurde
+
+Nicht aus dem Gedächtnis, sondern gegen den Quelltext:
+
+* `pretix_custom_reports/views/editor.py` Zeile 349-362, `editor_urlpatterns`:
+  `editor/$` → `editor.new` (nur `organizer`, `event`),
+  `editor/(?P<identifier>[a-zA-Z0-9._-]+)/$` → `editor.edit`, also
+  Routenparameter `identifier`, **nicht** `report`/`pk`.
+* `ReportEditorView.get_report()` (Zeile 74-78) schlägt über
+  `request.event.custom_reports.by_identifier(...)` nach — Event-Scope bleibt
+  gewahrt, ein fremder Report antwortet 404.
+* Reverse-Sicherheit: das Routen-Pattern `[a-zA-Z0-9._-]+` ist genau die
+  Zeichenmenge von `contracts.IDENTIFIER_RE` (`^[a-zA-Z0-9.\-_]+$`,
+  `contracts/fields.py:570`), und `ReportDefinition.save()` erzeugt einen
+  Identifier, falls das Feld leer ist. Eine gespeicherte Zeile hat damit immer
+  einen reversierbaren Identifier — kein Sonderfall im Template nötig.
+* `NoReverseMatch` im Duplizieren-Redirect: nicht möglich. `urls.py` Zeile 39-46
+  hängt `editor_urlpatterns` bedingungslos an `urlpatterns` (seit Welle 4). Ein
+  Fallback würde nur einen kaputten URLconf verstecken, den die Liste ohnehin
+  schon träfe — deshalb bewusst keiner.
+* Namespace: `report_url()` setzt `plugins:pretix_custom_reports:` selbst davor,
+  der Aufruf sieht deshalb aus wie alle anderen in der Datei.
+
+## Tests
+
+Angepasst / ergänzt in `tests/test_permissions.py` (mein Gebiet):
+
+* `test_duplicate`: prüft jetzt `Location == editor.edit(identifier=copy.identifier)`
+  plus die Negativzusicherung, dass die Ziel-URL *nicht* auf `/<pk>/` endet.
+* neu `test_list_links_creation_to_the_graphical_editor`,
+  `test_empty_list_links_creation_to_the_graphical_editor`,
+  `test_list_links_editing_to_the_graphical_editor` (inkl. Zählung: der
+  Editor-Link kommt pro Zeile genau zweimal vor — Name und Stift),
+  `test_list_still_links_duplicate_and_delete_to_this_module`.
+  Die Negativchecks vergleichen mit `href="…"` samt schließendem
+  Anführungszeichen, weil die CRUD-Edit-URL ein Präfix der Delete- und
+  Duplicate-URL ist.
+* `test_read_only_user_sees_no_write_buttons` zusätzlich: für einen
+  Nur-Lese-Nutzer taucht auch keine Editor-URL auf (die Links erben das
+  bestehende `can_change`-Gate; der Editor selbst hängt an `VIEW_PERMISSION`
+  und rendert lesbar, aber ein Link, hinter dem der Nutzer nicht speichern
+  kann, ist eine Sackgasse).
+* `tests/test_models.py` brauchte nichts: dort wird `report_list.html` nicht
+  gerendert.
+
+Ergebnisse:
+
+* `pytest tests/test_permissions.py -q` → **28 passed**
+* `pytest -m "not performance" -q` → **1175 passed, 10 deselected, 2 xfailed**.
+  Die zwei `xfail` sind die erwarteten T-004/T-005. Nichts Rotes, auch nicht in
+  fremden Dateien: `tests/test_editor_api.py` prüft nur das `action=`-Attribut
+  des Editor-Formulars gegen `event.reports.add`/`.edit` (Zeile 566, 580) —
+  diese Routen habe ich unangetastet gelassen, deshalb bleibt das grün.
+* `flake8`, `isort -c`, `black --check` über `views/crud.py` und
+  `tests/test_permissions.py`: grün. Kein repoweiter Lauf.
+* `python -m pretix makemigrations pretix_custom_reports --check --dry-run` →
+  „No changes detected" (es wurde kein Modell angefasst).
+
+Kein Commit.
+
+---
+
+# Nachtrag 2: mehrzeilige `{# … #}`-Kommentare landeten im HTML
+
+Zweiter Fund aus derselben Dev-Instanz-Sitzung, gemeldet vom Orchestrator.
+
+## Die Ursache, selbst nachgewiesen
+
+Djangos `{# … #}` ist ein **Einzeiler**. Der Lexer benutzt
+`tag_re = ({%.*?%}|{{.*?}}|{#.*?#})` (`django/template/base.py`) **ohne**
+`re.DOTALL`, `.` trifft also nie ein `\n`. Steht das `#}` in einer späteren
+Zeile, erkennt der Lexer das `{#` gar nicht erst als Kommentaranfang und der
+komplette Block landet inklusive Trennzeichen als sichtbarer Text im HTML.
+
+Gegen die venv-Version isoliert reproduziert (Django 5.2.16):
+
+```
+single -> 'AB'
+multi  -> 'A{# multi\n   line comment #}B'
+block  -> 'AB'      # {% comment %}…{% endcomment %}
+```
+
+Mehrzeiliges braucht `{% comment %}…{% endcomment %}`.
+
+## Behoben in `report_list.html`
+
+1. vor dem „Import a report"-Button (gefüllte Liste): auf `{% comment %}`
+   umgestellt, Inhalt unverändert. Das war sichtbarer Text mitten zwischen den
+   drei Buttons.
+2. vor dem Export-Icon in der Tabellenzeile: auf `{% comment %}` umgestellt.
+   Das war der schlimmste Fall — der Text wiederholte sich pro Report-Zeile.
+3. Leerzustand, „Same two entry points as above …": auf Wunsch des Nutzers
+   **komplett entfernt**, nicht repariert.
+
+Der `{% comment %}`-Block ganz oben in der Datei war nie betroffen, der ist
+schon immer die richtige Syntax.
+
+## Gegengelesen
+
+Eigener Scan über alle Plugin-Templates nach `{#` ohne `#}` in derselben Zeile:
+in meinen drei Dateien (`report_list.html`, `report_form.html`,
+`report_confirm_delete.html`) **null** Treffer. Die vom Scan zunächst noch
+gemeldeten `editor.html` (2×) und `preview_table.html` (1×) gehören
+`frontend-dev` und sind inzwischen parallel behoben — nicht von mir angefasst.
+
+## Tests (`tests/test_permissions.py`)
+
+* `test_the_list_renders_no_template_comment_markers` — parametrisiert über
+  gefüllte und leere Liste: weder `{#` noch `#}` noch `{% comment %}` darf im
+  Response-Body stehen. Bewusst strukturell statt textbezogen, damit auch der
+  nächste Mehrzeiler auffällt.
+* `test_the_list_renders_no_developer_commentary` — dieselben zwei Varianten,
+  prüft die sechs konkreten Textfragmente der drei Blöcke.
+* `test_no_template_of_this_module_uses_a_multiline_hash_comment` — statischer
+  Wächter über meine drei Templates. Ein Rendering-Test deckt nur die Zweige
+  ab, die er auch erreicht; dieser deckt die Datei ab.
+
+**Mutationstest**, damit die Wächter nicht vakuum-grün sind: den gelöschten
+Mehrzeiler probeweise wieder eingesetzt → **3 failed, 2 passed**, danach
+zurückgebaut (`grep "{#" report_list.html` → keine Treffer, `git diff --stat`
+gegengeprüft).
+
+## Ergebnisse
+
+* `pytest tests/test_permissions.py -q` → **33 passed**
+* `pytest -m "not performance" -q` → **1183 passed, 10 deselected, 2 xfailed**
+  (die erwarteten T-004/T-005)
+* `flake8`, `isort -c`, `black --check` über `tests/test_permissions.py` und
+  `views/crud.py`: grün, kein repoweiter Lauf. Anmerkung: `line[match.end():]`
+  ist zwischen black (will Leerzeichen vor dem Doppelpunkt) und flake8 (E203)
+  strittig — statt `noqa` eine benannte Variable, damit beide zufrieden sind.
+
+Keine neuen Übersetzungsstrings (Kommentare sind nie übersetzbar). Kein Commit.

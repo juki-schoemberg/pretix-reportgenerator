@@ -1,11 +1,19 @@
 {% extends "pretixcontrol/event/base.html" %}
 {# Owner: frontend-dev (ORCHESTRIERUNG.md section 5) #}
-{#
+{% comment %}
     The editor shell. Bootstrap 3 markup and Font Awesome icons, both from the
     control panel's own stack; no CDN, no bundler. All behaviour lives in
     static/pretix_custom_reports/js/report-editor.js, all data in the JSON blob
     at the bottom -- the control panel's CSP forbids inline script.
-#}
+
+    Every comment spanning more than one line in this file is a comment tag and
+    not the short brace-hash form. Django's lexer only recognises the short form
+    when the opener and the closer sit on the same line (verified against the
+    Django in this venv), so a multi-line one is not a comment at all: it renders
+    itself into the page as visible text. That happened here and a user found it.
+    tests/test_editor_api.py::test_the_editor_page_renders_no_raw_django_comment
+    keeps it from happening twice.
+{% endcomment %}
 {% load i18n %}
 {% load static %}
 {% load escapejson %}
@@ -46,16 +54,6 @@
                     </div>
                 </div>
             </div>
-            {#
-                What the CRUD form of persistence-dev expects: "name",
-                "description", "identifier", "base" and "definition" (a JSON
-                string, which forms.JSONField parses). "definition" and "base"
-                are kept in sync by the editor on every change; "identifier" is
-                posted back unchanged, because an empty one would make the model
-                generate a new one and break every scheduled export that refers
-                to this report. See
-                handoff/requests/frontend-dev-an-integrator-urls.md.
-            #}
             <input type="hidden" name="definition" id="pcr-definition-input"/>
             <input type="hidden" name="base" id="pcr-base-input"/>
             {% if report_identifier %}
@@ -295,14 +293,14 @@
                     {% trans "Apply JSON" %}
                 </button>
 
-                {#
+                {% comment %}
                     File import/export and templates live in views/portability.py
                     and views/templates.py (portability-dev). Every one of these
                     links leaves the editor, so report-editor.js asks first when
                     there are unsaved changes -- data-pcr-leave marks them, and
                     "export" gets the sharper warning because the file is built
                     from the stored row, not from what is on screen.
-                #}
+                {% endcomment %}
                 {% if portability.export or portability.import or portability.templates %}
                     <hr/>
                     <div class="btn-group btn-group-sm" id="pcr-portability">

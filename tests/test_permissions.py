@@ -211,6 +211,158 @@ def test_list_hides_reports_of_other_events(
     assert "Foreign report" not in response.content.decode()
 
 
+# ---------------------------------------------------------------------------
+# Where the list sends the user
+# ---------------------------------------------------------------------------
+#
+# Regression guard for the UX bug found on the dev instance: the list used to
+# link to this module's plain JSON form for both creating and changing, so the
+# graphical editor was reachable by typing its URL only. The CRUD routes stay
+# alive -- they are the editor's POST target and the hand-repair fallback for
+# unrenderable JSON -- they are just not linked from the list any more.
+
+
+def test_list_links_creation_to_the_graphical_editor(
+    client_with_perms, event, saved_report
+):
+    content = client_with_perms.get(url("event.reports", event)).content.decode()
+    assert f'href="{url("editor.new", event)}"' in content
+    assert f'href="{url("event.reports.add", event)}"' not in content
+
+
+def test_empty_list_links_creation_to_the_graphical_editor(client_with_perms, event):
+    content = client_with_perms.get(url("event.reports", event)).content.decode()
+    assert "have not created any reports yet" in content
+    assert f'href="{url("editor.new", event)}"' in content
+    assert f'href="{url("event.reports.add", event)}"' not in content
+
+
+def test_list_links_editing_to_the_graphical_editor(
+    client_with_perms, event, saved_report
+):
+    """Name link and pencil icon both go to ``editor.edit``.
+
+    ``editor.edit`` is keyed on the stable identifier, the CRUD route on the
+    primary key -- the two are not interchangeable, which is exactly what makes
+    a copy-paste mistake here silent until someone clicks.
+    """
+    content = client_with_perms.get(url("event.reports", event)).content.decode()
+    editor = url("editor.edit", event, identifier=saved_report.identifier)
+    assert f'href="{editor}"' in content
+    # Twice: the report name and the pencil button.
+    assert content.count(f'href="{editor}"') == 2
+    # The trailing quote matters: the CRUD edit URL is a prefix of the delete
+    # and duplicate URLs, which are still linked.
+    assert f'href="{url("event.reports.edit", event, report=saved_report.pk)}"' not in (
+        content
+    )
+
+
+def test_list_still_links_duplicate_and_delete_to_this_module(
+    client_with_perms, event, saved_report
+):
+    """Only add and edit moved; the rest of the row is unchanged."""
+    content = client_with_perms.get(url("event.reports", event)).content.decode()
+    assert url("event.reports.delete", event, report=saved_report.pk) in content
+    assert url("event.reports.duplicate", event, report=saved_report.pk) in content
+
+
+# ---------------------------------------------------------------------------
+# No template comment leaks into the page
+# ---------------------------------------------------------------------------
+#
+# Second bug from the same dev-instance session. Django's ``{# ... #}`` is a
+# *single line* comment: the lexer's ``tag_re`` is
+# ``({%.*?%}|{{.*?}}|{#.*?#})`` compiled without ``re.DOTALL``
+# (django/template/base.py), so ``.`` never matches a newline. A ``{#`` whose
+# ``#}`` sits on a later line is therefore not recognised as a comment at all
+# and the whole block -- delimiters included -- is rendered as visible text.
+# Verified against Django 5.2.16 in this venv. Multi-line commentary needs
+# ``{% comment %}...{% endcomment %}``.
+#
+# The check below is deliberately structural rather than a list of the three
+# strings that leaked: it catches the next multi-line ``{#`` too, whatever it
+# will say.
+
+#: The three blocks that leaked on the dev instance. Two were converted to
+#: ``{% comment %}``, the third (empty-state "Same two entry points as above")
+#: was dropped on the user's request.
+LEAKED_COMMENT_SNIPPETS = [
+    "Added by the integrator in wave 4",
+    "portability-dev-an-integrator-urls.md",
+    "Export needs read permission only",
+    "outside the can_change block on purpose",
+    "Same two entry points as above",
+    "there is nothing else to start from",
+]
+
+
+@pytest.mark.parametrize("with_report", [True, False], ids=["filled", "empty"])
+def test_the_list_renders_no_template_comment_markers(
+    client_with_perms, event, organizer, with_report
+):
+    """Neither ``{#`` nor ``#}`` may survive into the response body."""
+    if with_report:
+        with scope(organizer=organizer):
+            ReportDefinition.objects.create(
+                event=event,
+                name="Attendee list",
+                identifier="attendees",
+                definition=make_definition(),
+            )
+    content = client_with_perms.get(url("event.reports", event)).content.decode()
+    assert "{#" not in content
+    assert "#}" not in content
+    assert "{% comment %}" not in content
+    assert "{% endcomment %}" not in content
+
+
+@pytest.mark.parametrize("with_report", [True, False], ids=["filled", "empty"])
+def test_the_list_renders_no_developer_commentary(
+    client_with_perms, event, organizer, with_report
+):
+    """The comment texts themselves must not be visible to the user either."""
+    if with_report:
+        with scope(organizer=organizer):
+            ReportDefinition.objects.create(
+                event=event,
+                name="Attendee list",
+                identifier="attendees",
+                definition=make_definition(),
+            )
+    content = client_with_perms.get(url("event.reports", event)).content.decode()
+    for snippet in LEAKED_COMMENT_SNIPPETS:
+        assert snippet not in content, snippet
+
+
+def test_no_template_of_this_module_uses_a_multiline_hash_comment():
+    """Static guard, so the bug cannot come back through an unrendered branch.
+
+    A rendering test only covers the branches a test actually reaches. This one
+    reads the templates owned by persistence-dev (ORCHESTRIERUNG.md section 5)
+    and rejects a ``{#`` that is not closed on the same line.
+    """
+    import re
+    from pathlib import Path
+
+    import pretix_custom_reports
+
+    root = Path(pretix_custom_reports.__file__).parent / "templates"
+    owned = ["report_list.html", "report_form.html", "report_confirm_delete.html"]
+    offenders = []
+    for name in owned:
+        path = root / "pretix_custom_reports" / name
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for match in re.finditer(r"\{#", line):
+                # Named variable, not ``line[match.end():]``: black wants a
+                # space before that colon, flake8 calls the space E203.
+                start = match.end()
+                if "#}" not in line[start:]:
+                    offenders.append(f"{name}:{lineno}")
+    hint = "Django's {# #} comment cannot span lines -- use {% comment %}: "
+    assert not offenders, hint + ", ".join(offenders)
+
+
 def test_create(client_with_perms, event, organizer, user_with_perms):
     response = client_with_perms.post(
         url("event.reports.add", event), form_data(), follow=True
@@ -305,7 +457,12 @@ def test_duplicate(client_with_perms, event, organizer, saved_report):
         )
         assert copy.identifier == "attendees-2"
         assert copy.definition == saved_report.definition
-        assert response["Location"].endswith(f"/{copy.pk}/")
+        # Into the graphical editor, keyed on the identifier -- not into the
+        # plain JSON form, which is keyed on the primary key.
+        assert response["Location"] == url(
+            "editor.edit", event, identifier=copy.identifier
+        )
+        assert not response["Location"].endswith(f"/{copy.pk}/")
         assert LogEntry.objects.filter(
             object_id=copy.pk, action_type=contracts.LOG_ACTION_ADDED
         ).exists()
@@ -377,6 +534,12 @@ def test_read_only_user_sees_no_write_buttons(client_view_only, event, saved_rep
     assert "Attendee list" in content
     assert "/delete" not in content
     assert "/duplicate" not in content
+    # The editor links replaced the CRUD form links, so they inherit the same
+    # ``can_change`` gate. The editor itself is only guarded by the read
+    # permission (it renders read-only), but offering the link to someone who
+    # cannot save is a dead end.
+    assert url("editor.new", event) not in content
+    assert url("editor.edit", event, identifier=saved_report.identifier) not in content
 
 
 def test_change_only_user_cannot_list(client_change_only, event, saved_report):

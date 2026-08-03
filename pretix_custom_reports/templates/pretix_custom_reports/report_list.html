@@ -6,6 +6,18 @@ Deliberately plain: the graphical editor is built by frontend-dev. Permission
 checks in the template use ``can_change`` from the view rather than
 ``request.eventpermset`` directly, so the same template works outside the
 control middleware.
+
+Creating and changing a report goes to the graphical editor
+(``editor.new`` / ``editor.edit``, frontend-dev) rather than to this module's
+own ``event.reports.add`` / ``event.reports.edit`` form. The editor is a
+superset of that form -- it carries name, description, a hidden identifier and
+its own "Definition as JSON" panel -- and it posts to exactly those two CRUD
+URLs (``save_url()`` in views/editor.py). So the plain form stays reachable as
+a hand-repair fallback for a report whose JSON is too broken for the editor,
+it is just not linked from here any more.
+
+Note the different route argument: ``editor.edit`` takes the stable
+``identifier``, the CRUD routes take the numeric ``report`` primary key.
 {% endcomment %}
 {% load i18n %}
 {% block title %}{% trans "Reports" %}{% endblock %}
@@ -14,14 +26,16 @@ control middleware.
     {% if reports %}
         {% if can_change %}
             <p>
-                <a href="{% url "plugins:pretix_custom_reports:event.reports.add" organizer=request.event.organizer.slug event=request.event.slug %}"
+                <a href="{% url "plugins:pretix_custom_reports:editor.new" organizer=request.event.organizer.slug event=request.event.slug %}"
                    class="btn btn-default">
                     <span class="fa fa-plus"></span> {% trans "Create a new report" %}
                 </a>
-                {# Added by the integrator in wave 4, proposed verbatim in
-                   handoff/requests/portability-dev-an-integrator-urls.md
-                   section 6: import and templates are finished features that
-                   were reachable by URL only. #}
+                {% comment %}
+                    Added by the integrator in wave 4, proposed verbatim in
+                    handoff/requests/portability-dev-an-integrator-urls.md
+                    section 6: import and templates are finished features that
+                    were reachable by URL only.
+                {% endcomment %}
                 <a href="{% url "plugins:pretix_custom_reports:event.reports.import" organizer=request.event.organizer.slug event=request.event.slug %}"
                    class="btn btn-default">
                     <span class="fa fa-upload"></span> {% trans "Import a report" %}
@@ -48,7 +62,7 @@ control middleware.
                         <tr>
                             <td>
                                 {% if can_change %}
-                                    <strong><a href="{% url "plugins:pretix_custom_reports:event.reports.edit" organizer=request.event.organizer.slug event=request.event.slug report=report.pk %}">{{ report.name }}</a></strong>
+                                    <strong><a href="{% url "plugins:pretix_custom_reports:editor.edit" organizer=request.event.organizer.slug event=request.event.slug identifier=report.identifier %}">{{ report.name }}</a></strong>
                                 {% else %}
                                     <strong>{{ report.name }}</strong>
                                 {% endif %}
@@ -66,14 +80,17 @@ control middleware.
                                 {% endif %}
                             </td>
                             <td class="text-right flip">
-                                {# Export needs read permission only, so it sits
-                                   outside the can_change block on purpose. #}
+                                {% comment %}
+                                    Export needs read permission only, so it
+                                    sits outside the can_change block on
+                                    purpose.
+                                {% endcomment %}
                                 <a href="{% url "plugins:pretix_custom_reports:event.reports.export" organizer=request.event.organizer.slug event=request.event.slug report=report.pk %}"
                                    class="btn btn-default btn-sm" title="{% trans "Export" %}" data-toggle="tooltip">
                                     <span class="fa fa-download"></span>
                                 </a>
                                 {% if can_change %}
-                                    <a href="{% url "plugins:pretix_custom_reports:event.reports.edit" organizer=request.event.organizer.slug event=request.event.slug report=report.pk %}"
+                                    <a href="{% url "plugins:pretix_custom_reports:editor.edit" organizer=request.event.organizer.slug event=request.event.slug identifier=report.identifier %}"
                                        class="btn btn-default btn-sm" title="{% trans "Edit" %}" data-toggle="tooltip">
                                         <span class="fa fa-edit"></span>
                                     </a>
@@ -104,12 +121,10 @@ control middleware.
                 {% endblocktrans %}
             </p>
             {% if can_change %}
-                <a href="{% url "plugins:pretix_custom_reports:event.reports.add" organizer=request.event.organizer.slug event=request.event.slug %}"
+                <a href="{% url "plugins:pretix_custom_reports:editor.new" organizer=request.event.organizer.slug event=request.event.slug %}"
                    class="btn btn-primary btn-lg">
                     <span class="fa fa-plus"></span> {% trans "Create a new report" %}
                 </a>
-                {# Same two entry points as above -- with an empty list they
-                   matter most, because there is nothing else to start from. #}
                 <a href="{% url "plugins:pretix_custom_reports:event.reports.import" organizer=request.event.organizer.slug event=request.event.slug %}"
                    class="btn btn-default btn-lg">
                     <span class="fa fa-upload"></span> {% trans "Import a report" %}

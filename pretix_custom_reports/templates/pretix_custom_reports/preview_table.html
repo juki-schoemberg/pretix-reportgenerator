@@ -1,10 +1,14 @@
 {# Owner: frontend-dev (ORCHESTRIERUNG.md section 5) #}
-{#
+{% comment %}
     The live preview table, rendered on the server (SPEC.md F2) and returned as
     the "html" member of POST api/preview/. Cell values are already display
     strings; Django's autoescaping is what keeps order data from turning into
     markup, so never mark anything in here as safe.
-#}
+
+    A comment tag and not the short brace-hash form, because this one spans
+    several lines and Django only lexes the short form within a single line --
+    otherwise this paragraph would be served inside the preview payload.
+{% endcomment %}
 {% load i18n %}
 <div class="pcr-preview-table-wrapper">
     {% if columns %}

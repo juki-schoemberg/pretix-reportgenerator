@@ -631,3 +631,99 @@ warten — kein echter Regress:
 `docs/adr/0005-editor.md:96` behauptet noch "**Formatierung ist
 Vorschau-lokal.** `format_cell()` in `views/api.py` …". Das stimmt seit T-001
 nicht mehr. `docs/` ist nicht mein Gebiet, deshalb nur der Hinweis.
+
+---
+
+# Nachtrag 2: Blindtext auf der Editor-Seite
+
+Vom Nutzer an der Dev-Instanz gefunden, vom Orchestrator isoliert: ein
+Template-Kommentar stand als sichtbarer Text auf der Editor-Seite.
+
+## Ursache
+
+Djangos kurze Kommentarform `{# ... #}` ist **nicht mehrzeilig**. Sie wird von
+`django.template.base.tag_re` gelext, und deren Kommentar-Alternative matcht
+nicht über einen Zeilenumbruch hinweg. Ein Kommentar, dessen Öffner und
+Schließer auf verschiedenen Zeilen stehen, ist deshalb überhaupt kein
+Kommentar — er ist Zeichendaten und landet wortwörtlich im gerenderten HTML.
+
+Gegen die Django-Version dieser venv nachgeprüft, statt aus dem Gedächtnis
+(CLAUDE.md Regel 1):
+
+```
+django 5.2.16
+single: 'ab'                    Template('a{# hi #}b')
+multi : 'a{#\n hi \n#}b'        Template('a{#\n hi \n#}b')      <- kein Kommentar
+comment tag: 'ab'               Template('a{% comment %}\n hi \n{% endcomment %}b')
+```
+
+`{% comment %}` hat die Einschränkung nicht: es ist ein Block-Tag, über das der
+Parser mit `skip_past` hinwegläuft, Zeilenumbrüche inklusive.
+
+## Was ich geändert habe
+
+Vier Stellen, alle in meinen zwei Templates:
+
+| Datei | Stelle | Was |
+| --- | --- | --- |
+| `editor.html` | Kopf, "The editor shell. Bootstrap 3 markup …" | auf `{% comment %}` umgestellt |
+| `editor.html` | vor den versteckten Inputs, "What the CRUD form of persistence-dev expects …" | **gelöscht** (der vom Nutzer gemeldete Blindtext) |
+| `editor.html` | Portability-Knöpfe, "File import/export and templates live in …" | auf `{% comment %}` umgestellt |
+| `preview_table.html` | Kopf, "The live preview table, rendered on the server …" | auf `{% comment %}` umgestellt |
+
+In den beiden Kopfkommentaren steht jetzt zusätzlich, **warum** es ein
+Comment-Tag ist. Ohne die Begründung baut der nächste, der dort etwas ergänzt,
+denselben Fehler wieder ein, weil die kurze Form überall sonst in der Datei
+korrekt funktioniert — sie ist ja einzeilig.
+
+Selbst gegengelesen statt nur der Liste vertraut: ein kleines Skript hat beide
+Dateien zeilenweise nach jedem `{#` ohne `#}` auf derselben Zeile und nach jedem
+verwaisten `#}` durchsucht. Ergebnis nach der Änderung: null. Die vier
+verbliebenen `{# … #}` in `editor.html` und das eine in `preview_table.html`
+sind einzeilige Abschnittsmarker und Owner-Zeilen und damit korrekt.
+
+### Zum gelöschten Kommentar
+
+Der Inhalt war nicht wertlos, deshalb hier, damit er nicht verloren geht: das
+CRUD-Formular von `persistence-dev` erwartet `name`, `description`,
+`identifier`, `base` und `definition` (JSON-String, den `forms.JSONField`
+parst). `definition` und `base` hält der Editor bei jeder Änderung nach;
+`identifier` wird unverändert zurückgepostet, **weil ein leerer das Modell einen
+neuen erzeugen lässt und damit jeden Scheduled Export bricht, der auf diesen
+Report zeigt**. Das ist der einzige nicht offensichtliche Teil der drei
+versteckten Inputs. Steht damit hier und in
+`handoff/requests/frontend-dev-an-integrator-urls.md`, nicht mehr im Template.
+
+## Verifikation
+
+Nicht per Grep über die Templatedatei, sondern am gerenderten Response über
+`django.test.Client` mit echtem Login (`client_with_perms` meldet sich in
+`conftest.py` mit E-Mail und Passwort an, kein `force_login`-Kurzschluss). Ein
+Grep über die Datei würde weiter grün bleiben, sobald die Shell einmal ein
+Fragment von woanders einbindet.
+
+Drei neue Tests in `tests/test_editor_api.py`:
+
+* `test_the_editor_page_renders_no_raw_django_comment` — `editor.new`: Status
+  200 (damit der Test nicht auf einem Login-Redirect grün wird), kein `{#`, kein
+  `#}`, und zusätzlich alle drei Kommentarabsätze namentlich.
+* `test_the_stored_editor_page_renders_no_raw_django_comment` — dieselbe Vorlage
+  über `editor.edit` mit einem gespeicherten Report.
+* `test_the_preview_html_renders_no_raw_django_comment` — das `html`-Element der
+  Antwort von `POST api/preview/`, also `preview_table.html`.
+
+Die groben `"{#" not in content`-Zusicherungen sind Absicht: sie fangen die
+ganze Fehlerklasse und nicht nur die vier bekannten Absätze.
+
+## Testergebnis
+
+`pytest tests/test_editor_api.py`: **119 passed** (116 + 3 neue).
+
+`pytest -m "not performance"`: **1183 passed, 2 xfailed, 0 failed**. Die neun
+`XPASS(strict)`-Fehlschläge aus meinem vorigen Nachtrag sind weg —
+`security-reviewer` und `test-engineer` haben ihre Marker inzwischen entfernt.
+Die Suite ist damit vollständig grün.
+
+`flake8`, `isort -c`, `black --check` über `tests/test_editor_api.py`: grün.
+Templates sind nicht Teil der Python-Linter. Kein repo-weiter Lauf, kein
+`git commit`.

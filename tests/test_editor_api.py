@@ -462,6 +462,61 @@ def test_editor_page_loads(client_with_perms, event):
 
 
 @pytest.mark.django_db
+def test_the_editor_page_renders_no_raw_django_comment(client_with_perms, event):
+    """A user found template comments printed on the page as visible text.
+
+    ``{#`` .. ``#}`` is lexed by ``django.template.base.tag_re``, whose comment
+    alternative does not match across a newline. A comment spanning several
+    lines is therefore not a comment at all: it is character data and lands in
+    the response verbatim. ``{% comment %}`` has no such limit, because it is a
+    block tag the parser skips past.
+
+    Checked from the outside, on the rendered page, because that is where the
+    defect was visible and because a grep over the template file would keep
+    passing the day the shell starts including a partial from somewhere else.
+    """
+    response = client_with_perms.get(url_for("editor.new", event))
+    assert response.status_code == 200  # not a login redirect: this must be the page
+    content = response.content.decode()
+    assert "{#" not in content
+    assert "#}" not in content
+    # And the three paragraphs by name, in case the braces ever become legal.
+    assert "What the CRUD form of persistence-dev expects" not in content
+    assert "The editor shell. Bootstrap 3 markup" not in content
+    assert "File import/export and templates live in" not in content
+
+
+@pytest.mark.django_db
+def test_the_stored_editor_page_renders_no_raw_django_comment(
+    client_with_perms, event, stored_report
+):
+    """Same template, the other route -- the one a user actually opens twice."""
+    report = stored_report(load_fixture("minimal_order"), name="Comments")
+    response = client_with_perms.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    )
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "{#" not in content
+    assert "#}" not in content
+
+
+@pytest.mark.django_db
+def test_the_preview_html_renders_no_raw_django_comment(
+    client_with_perms, event, event_data
+):
+    """Same defect, same fix, in the fragment the preview returns as "html"."""
+    payload = post_json(
+        client_with_perms,
+        url_for("api.preview", event),
+        {"definition": load_fixture("minimal_order")},
+    ).json()
+    assert "{#" not in payload["html"]
+    assert "#}" not in payload["html"]
+    assert "The live preview table, rendered on the server" not in payload["html"]
+
+
+@pytest.mark.django_db
 def test_editor_page_denied_without_permission(client_without_perms, event):
     resp = client_without_perms.get(url_for("editor.new", event))
     assert resp.status_code == 403

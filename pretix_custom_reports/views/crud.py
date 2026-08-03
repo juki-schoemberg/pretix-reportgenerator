@@ -11,6 +11,13 @@ preview endpoints belong to ``frontend-dev`` (``views/editor.py``,
 modules write through the same model and the same form, so the validation and
 the audit log are shared.
 
+The create and change *forms* here are no longer the user-facing entry point:
+the report list links to the graphical editor instead, and the editor posts
+back to :data:`URL_NAME_ADD` / :data:`URL_NAME_EDIT`. The routes therefore stay
+exactly as they are -- they are the write endpoint of the editor, and they
+remain directly reachable as a hand-repair page for a report whose stored JSON
+is too broken for the editor to render.
+
 Permissions (exact strings from docs/pretix-api-notes.md section 8.1)
 --------------------------------------------------------------------
 
@@ -58,6 +65,7 @@ __all__ = [
     "ReportFormMixin",
     "ReportListView",
     "ReportUpdateView",
+    "URL_NAME_EDITOR_EDIT",
     "VIEW_PERMISSION",
     "event_urlpatterns",
     "report_url",
@@ -81,6 +89,16 @@ URL_NAME_ADD = "event.reports.add"
 URL_NAME_EDIT = "event.reports.edit"
 URL_NAME_DUPLICATE = "event.reports.duplicate"
 URL_NAME_DELETE = "event.reports.delete"
+
+#: The graphical editor (``views/editor.py``, frontend-dev). Reversed here for
+#: one redirect only, see :class:`ReportDuplicateView`. This is not a new
+#: dependency between the two modules but the mirror image of the existing one:
+#: ``editor.py`` already reverses :data:`URL_NAME_ADD` and :data:`URL_NAME_EDIT`
+#: as its form target. The route is unconditionally part of ``urls.py``
+#: (``editor_urlpatterns`` since wave 4), so no ``NoReverseMatch`` fallback is
+#: needed -- and a silent fallback would only hide a broken URLconf that the
+#: list template would hit anyway.
+URL_NAME_EDITOR_EDIT = "editor.edit"
 
 
 def report_url(name: str, event, **kwargs) -> str:
@@ -241,7 +259,14 @@ class ReportDuplicateView(EventReportMixin, EventPermissionRequiredMixin, View):
         copy = source.duplicate(name=name, created_by=request.user)
         copy.log_added(user=request.user, data={"duplicated_from": source.pk})
         messages.success(request, _("The report has been duplicated."))
-        return redirect(report_url(URL_NAME_EDIT, request.event, report=copy.pk))
+        # Into the graphical editor, not into the plain JSON form: renaming the
+        # fresh copy is the whole point of duplicating, and that is what the
+        # editor is for. ``editor.edit`` is keyed on the stable identifier, not
+        # on the primary key; ``save()`` guarantees a non-empty identifier, so
+        # the reverse always matches the route pattern.
+        return redirect(
+            report_url(URL_NAME_EDITOR_EDIT, request.event, identifier=copy.identifier)
+        )
 
 
 class ReportDeleteView(

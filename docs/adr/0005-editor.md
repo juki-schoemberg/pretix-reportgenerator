@@ -93,12 +93,17 @@ Das Limit ist `contracts.PREVIEW_ROW_LIMIT`. Der Client darf weniger anfordern,
 nie mehr; die Zahl wird geklemmt, nicht validiert-und-abgelehnt, und `iter_rows`
 bekommt sie zusätzlich als zweite Bremse.
 
-**Formatierung ist Vorschau-lokal.** `format_cell()` in `views/api.py` setzt
-`ColumnFormat` für die Anzeige um (Datumsstil, Zahlenstil, Boolean-Stil).
-Werte, die schon als `str` ankommen, werden unverändert durchgereicht — die
-Funktion kann also nicht doppelt formatieren, wenn Compiler oder Exporter das
-später selbst tun. Für CSV/XLSX bleibt `ListExporter` zuständig (CLAUDE.md
-Regel 6).
+**Formatierung war ursprünglich Vorschau-lokal, ist es seit Finding T-001 nicht
+mehr.** `format_cell_value()` setzt `ColumnFormat` für die Anzeige um
+(Datumsstil, Zahlenstil, Boolean-Stil) und lebt seit der T-001-Behebung
+(Nacharbeit nach Welle 4, siehe `handoff/blockers.md`) in `exporters.py`;
+`views/api.py` ruft sie über `get_cell_renderer()` lazy auf, damit die
+Vorschau denselben Weg wie CSV/XLSX nimmt und nicht mehr formatieren darf, was
+die Datei nicht auch zeigt. Werte, die schon als `str` ankommen, werden
+unverändert durchgereicht — die Funktion kann also nicht doppelt formatieren,
+wenn Compiler oder Exporter das später selbst tun. Für CSV/XLSX bleibt
+`ListExporter` zuständig (CLAUDE.md Regel 6), die Formatierung selbst ist eine
+dritte, geteilte Schicht davor.
 
 ## 5. Entscheidung 4 — ein Widget je Datentyp, Freitext ist die Ausnahme
 
