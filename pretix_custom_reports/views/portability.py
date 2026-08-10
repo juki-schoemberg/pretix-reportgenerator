@@ -80,7 +80,15 @@ URL_NAMESPACE = "plugins:pretix_custom_reports"
 URL_NAME_LIST = "event.reports"
 URL_NAME_EXPORT = "event.reports.export"
 URL_NAME_IMPORT = "event.reports.import"
-URL_NAME_EDIT = "event.reports.edit"
+
+#: The graphical editor (``views/editor.py``, frontend-dev), where an imported
+#: report is handed to the user. Same constant and same reasoning as
+#: ``views/crud.py``'s ``URL_NAME_EDITOR_EDIT``: spelled out rather than
+#: imported, because ``editor.py`` already imports *this* module and the reverse
+#: dependency would be a cycle. The route is unconditionally part of ``urls.py``
+#: (``editor_urlpatterns``), so no ``NoReverseMatch`` fallback -- a silent
+#: fallback would only hide a broken URLconf.
+URL_NAME_EDITOR_EDIT = "editor.edit"
 
 #: Field name of the hidden input that carries the original document into the
 #: confirmation step.
@@ -278,7 +286,15 @@ class ReportImportView(EventReportMixin, EventPermissionRequiredMixin, TemplateV
             return self._render_confirmation(plan, text, attempted=True)
 
         messages.success(request, _("The report has been imported."))
-        return redirect(report_url(URL_NAME_EDIT, request.event, report=report.pk))
+        # Into the graphical editor, not into the plain JSON form: looking at
+        # what just arrived is the next thing the user wants, and the editor is
+        # where that happens. Keyed on the stable identifier, which ``save()``
+        # guarantees to be non-empty.
+        return redirect(
+            report_url(
+                URL_NAME_EDITOR_EDIT, request.event, identifier=report.identifier
+            )
+        )
 
     def _render_confirmation(self, plan, text: str, attempted: bool):
         if attempted and not plan.ok:

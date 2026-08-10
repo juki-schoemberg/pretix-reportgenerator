@@ -11,10 +11,62 @@
  * only cover what Bootstrap does not have.
  */
 
+/* -- page structure ------------------------------------------------------ */
+/*
+ * Four blocks with a rule between them: name/base, content, arrangement,
+ * result. A user reported the editor as "everything is there, but cramped and
+ * in no particular order", and the fix is separation and a reading order, not
+ * new controls. Bootstrap 3 has no section primitive, hence these rules.
+ */
+
+.pcr-section {
+    margin-bottom: 6px;
+}
+
+.pcr-section-title {
+    font-size: 1.3em;
+    font-weight: bold;
+    margin: 0 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #eee;
+}
+
+/* The one-line "what is this block for" next to a section heading. Reset from
+   Bootstrap's <small>, which would sit on the same baseline and read as part of
+   the heading. */
+.pcr-section-title > small {
+    display: block;
+    margin-top: 3px;
+    font-size: 0.68em;
+    font-weight: normal;
+    color: #767676;
+}
+
+.pcr-section-divider {
+    margin: 22px 0;
+    border-top: 2px solid #ddd;
+}
+
+/* The repeated save button at the very bottom. The page is long enough that
+   scrolling back up to the first one is a real annoyance; it submits #pcr-form
+   through the HTML5 form owner attribute. */
+.pcr-save-bar {
+    margin: 18px 0 0;
+    padding-top: 14px;
+    border-top: 2px solid #ddd;
+}
+
+.pcr-reference-event > div {
+    margin-top: 4px;
+}
+
 /* -- field library ------------------------------------------------------- */
 
+/* Taller than it used to be: the report base moved out of this column into the
+   first block, so the library is now the whole left column and the right column
+   (columns plus filters) is considerably taller than it. */
 .pcr-library-list {
-    max-height: 30em;
+    max-height: 34em;
     overflow-y: auto;
 }
 
@@ -292,6 +344,10 @@
 }
 
 .pcr-preview-status {
+    margin-bottom: 6px;
+}
+
+.pcr-preview-note {
     margin-bottom: 6px;
 }
 

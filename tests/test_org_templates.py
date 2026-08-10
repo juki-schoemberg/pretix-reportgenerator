@@ -335,6 +335,146 @@ def test_the_template_list_shows_templates_and_not_event_reports(
     assert b"An event report" not in response.content
 
 
+# ---------------------------------------------------------------------------
+# Where the template list sends the user
+# ---------------------------------------------------------------------------
+#
+# Same UX bug as the one fixed for ``report_list.html`` (see
+# ``tests/test_permissions.py``, section "Where the list sends the user"): the
+# list linked to this module's plain JSON form, so the graphical editor was
+# reachable by typing its URL only. The two form routes stay alive -- they are
+# the editor's POST target and the hand-repair page for a template whose JSON is
+# too broken to render -- they are just not linked from the list any more.
+#
+# Both route pairs are keyed on the numeric primary key here: a template has no
+# event, so there is nothing stabler than the pk to address it by, unlike the
+# event-level ``editor.edit`` which takes the identifier.
+
+
+@pytest.mark.django_db
+def test_the_template_list_links_creation_to_the_graphical_editor(
+    client_with_perms, organizer, event, template
+):
+    content = client_with_perms.get(
+        organizer_path("organizer.templates", organizer)
+    ).content.decode()
+    editor = organizer_path("organizer.templates.editor.new", organizer)
+    assert f'href="{editor}"' in content
+    assert f'href="{organizer_path("organizer.templates.add", organizer)}"' not in (
+        content
+    )
+
+
+@pytest.mark.django_db
+def test_the_empty_template_list_links_creation_to_the_graphical_editor(
+    client_with_perms, organizer, event
+):
+    """The other branch of the page: no template rows at all.
+
+    The "create" button sits above the ``{% if templates %}``, so it is the same
+    markup -- but a test that only ever renders the filled page would keep
+    passing if someone moves it inside.
+    """
+    content = client_with_perms.get(
+        organizer_path("organizer.templates", organizer)
+    ).content.decode()
+    assert "no report templates yet" in content
+    editor = organizer_path("organizer.templates.editor.new", organizer)
+    assert f'href="{editor}"' in content
+    assert f'href="{organizer_path("organizer.templates.add", organizer)}"' not in (
+        content
+    )
+
+
+@pytest.mark.django_db
+def test_the_template_list_links_editing_to_the_graphical_editor(
+    client_with_perms, organizer, event, template
+):
+    """Name link and pencil icon both go to the editor."""
+    content = client_with_perms.get(
+        organizer_path("organizer.templates", organizer)
+    ).content.decode()
+    editor = organizer_path(
+        "organizer.templates.editor.edit", organizer, template=template.pk
+    )
+    # Twice: the template name and the pencil button.
+    assert content.count(f'href="{editor}"') == 2
+    # The trailing quote matters: the form's URL is a prefix of the export and
+    # delete URLs, which are still linked.
+    crud = organizer_path("organizer.templates.edit", organizer, template=template.pk)
+    assert f'href="{crud}"' not in content
+
+
+@pytest.mark.django_db
+def test_the_template_list_still_links_export_and_delete_to_this_module(
+    client_with_perms, organizer, event, template
+):
+    """Only add and edit moved; the rest of the row is unchanged."""
+    content = client_with_perms.get(
+        organizer_path("organizer.templates", organizer)
+    ).content.decode()
+    for name in ("organizer.templates.export", "organizer.templates.delete"):
+        url = organizer_path(name, organizer, template=template.pk)
+        assert f'href="{url}"' in content, name
+
+
+@pytest.mark.django_db
+def test_the_template_list_renders_no_raw_django_comment(
+    client_with_perms, organizer, event, template
+):
+    """The page explains itself in comments; none of them may reach the user.
+
+    ``{# ... #}`` is lexed by ``django.template.base.tag_re``, compiled without
+    ``re.DOTALL``: a comment spanning lines is not a comment at all and lands in
+    the response verbatim. That happened on ``report_list.html``.
+    """
+    content = client_with_perms.get(
+        organizer_path("organizer.templates", organizer)
+    ).content.decode()
+    assert "{#" not in content
+    assert "#}" not in content
+    assert "{% comment %}" not in content
+    assert "Creating and changing a template goes to the graphical editor" not in (
+        content
+    )
+
+
+def test_no_template_of_this_module_uses_a_multiline_hash_comment():
+    """Static guard over the templates owned by portability-dev.
+
+    Counterpart of the persistence-dev guard in ``tests/test_permissions.py``.
+    A rendering test only covers the branches some test happens to reach; this
+    one reads the files and rejects a ``{#`` that is not closed on the same line.
+    """
+    import re
+    from pathlib import Path
+
+    import pretix_custom_reports
+
+    root = Path(pretix_custom_reports.__file__).parent / "templates"
+    owned = [
+        "import_confirm.html",
+        "import_form.html",
+        "resolution_report.html",
+        "template_apply.html",
+        "template_confirm_delete.html",
+        "template_form.html",
+        "template_list.html",
+        "template_pick.html",
+    ]
+    offenders = []
+    for name in owned:
+        path = root / "pretix_custom_reports" / name
+        assert path.exists(), name
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for match in re.finditer(r"\{#", line):
+                start = match.end()
+                if "#}" not in line[start:]:
+                    offenders.append(f"{name}:{lineno}")
+    hint = "Django's {# #} comment cannot span lines -- use {% comment %}: "
+    assert not offenders, hint + ", ".join(offenders)
+
+
 @pytest.mark.django_db
 def test_creating_a_template_stores_it_on_the_organizer(
     client_with_perms, organizer, event
@@ -513,6 +653,28 @@ def test_the_apply_page_refuses_to_write_until_a_choice_is_made(
     with scopes_disabled():
         copy = ReportDefinition.objects.get(event=event)
     assert [c["field"] for c in copy.definition["columns"]] == ["order.code"]
+
+
+@pytest.mark.django_db
+def test_a_loaded_template_lands_in_the_graphical_editor(
+    client_with_perms, event, template
+):
+    """The copy is handed to the user in the editor, not in the JSON form.
+
+    Loading a template is the start of editing, not the end of it: the copy
+    usually needs a name of its own and often a column more. Keyed on the stable
+    identifier like every other link into the editor.
+    """
+    make_questions(event)
+    url = report_path("event.reports.templates.apply", event, template=template.pk)
+    response = client_with_perms.post(url, {"action": "confirm", "strategy": "abort"})
+    assert response.status_code == 302
+    with scopes_disabled():
+        copy = ReportDefinition.objects.get(event=event)
+    assert response["Location"] == report_path(
+        "editor.edit", event, identifier=copy.identifier
+    )
+    assert not response["Location"].endswith(f"/{copy.pk}/")
 
 
 @pytest.mark.django_db

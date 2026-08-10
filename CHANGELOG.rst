@@ -32,7 +32,9 @@ Added
 * **Import and export of report definitions** as JSON, by file upload or by
   pasting, with a resolution report shown before anything is written.
 * **Organizer-level templates** with "load a template" as an editable copy per
-  event.
+  event. Templates are built in the same graphical editor as reports, against a
+  **reference event** that supplies the field library and the live preview; the
+  choice of reference event is not stored with the template.
 * **Event copy support**: reports travel with a copied event, including
   resolution of renamed questions and across organizers.
 * **Third-party field signal** ``register_report_fields``, documented with a

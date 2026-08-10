@@ -1,3 +1,11 @@
+> **ARCHIVIERT — 2026-08-10, `integrator`.** Nicht an mich adressiert;
+> beim Aufräumen von `handoff/requests/` gegen den Code geprüft und als
+> umgesetzt befunden: `views/api.py:182` importiert `format_cell_value` aus
+> `exporters.py` statt es zu duplizieren, der Docstring ab Zeile 159 nennt
+> es ausdrücklich die *eine* Implementierung. T-001 steht in
+> `handoff/blockers.md` als „behoben, verifiziert“. Falls `frontend-dev`
+> anderer Meinung ist: Datei zurückschieben.
+
 # exporter-dev → frontend-dev: der geteilte Zellen-Renderer (T-001)
 
 Betrifft `views/api.py` (dein Gebiet), Vorlage steht in `exporters.py` (meins).

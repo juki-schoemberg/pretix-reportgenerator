@@ -186,3 +186,52 @@ eigenen `setup.cfg` setzt.
   `CLAUDE.md` und `.github/workflows/tests.yml` sind entsprechend korrigiert.
 * Ein Integrationstest schlägt seit dem Verdrahten fehl, weil er die
   Event-Kopie doppelt ausführt — gemeldet, nicht repariert (fremdes Gebiet).
+
+---
+
+## 9. Nachtrag 2026-08-10: Vorlagen-Editor, Navigationslabel, Log-Links
+
+Nachgetragen statt oben eingearbeitet, weil ADRs nicht rückwirkend umgeschrieben
+werden (`ORCHESTRIERUNG.md` Abschnitt 6: „unveränderlich"). Wer die Abschnitte 2
+und 5 liest, muss
+diesen Nachtrag mitlesen — die drei Punkte hier setzen dort etwas außer Kraft.
+
+**a) `template_editor_urlpatterns` ist die siebte Routenliste.** Aus
+`views/editor.py` (frontend-dev), verdrahtet neben
+`templates_organizer_urlpatterns`, weil beides Organizer-Ebene ist. Damit sind es
+**22 Routen**, nicht 20. Anleitung und Begründung der pk-Adressierung:
+`handoff/requests/erledigt/frontend-dev-an-integrator-template-editor-urls.md`.
+Die beiden Namen `organizer.templates.editor.new` / `.edit` sind Vertrag —
+`template_list.html` verlinkt sie **ohne** `try/except`, sie fehlen zu lassen
+kostet die ganze Vorlagenliste, nicht nur einen Knopf.
+
+**b) Das Event-Label heißt „Reports", nicht mehr „Exports".** Nutzerwunsch: die
+Menüpunkte auf Event- und Veranstalter-Ebene sollen erkennbar zusammengehören.
+„Exports" war zudem eine Fehlbenennung — das Plugin ist ein Report-Builder, kein
+zweiter Exporteur (`PretixPluginMeta.description`). Das Organizer-Label bleibt
+„Report templates"; das gemeinsame Wort „Report" ist die Verbindung. Der String
+steht an drei Stellen und muss dort synchron bleiben:
+`signals.py::navbar_event_entry`, `apps.py::PretixPluginMeta.navigation_links`
+(Plugin-Einstellungsliste über `EventPlugins.prepare_links`) und
+`tests/test_smoke.py::NAV_LABEL`. Im `de`-Katalog ändert sich nichts: „Exports"
+und „Reports" waren beide mit „Auswertungen" übersetzt.
+
+`placeholder.html` benutzt weiterhin `{% trans "Exports" %}` und hält den msgid
+allein am Leben. Sie ist seit Abschnitt 2 toter Code und bleibt fremdes
+Dateigebiet — mitgeändert wird sie deshalb nicht, gemeldet ist sie weiterhin.
+
+**c) Log-Einträge verlinken in den Editor, nicht ins JSON-Formular.** Abschnitt 5
+schrieb Vorlagen den Link auf `organizer.templates.edit` und Event-Reports den
+auf `event.reports.edit` zu. Beides sind die reinen Formularansichten. Das ist
+dieselbe Fehlerklasse wie in der Reportliste (Commit `3a56a0a`) und die Log-Seite
+war der letzte verbliebene Ort dieser Art. Jetzt:
+
+| Fall | Ziel | Adressierung |
+|---|---|---|
+| Event-Report | `editor.edit` | `identifier` |
+| Vorlage | `organizer.templates.editor.edit` | `pk` |
+
+Die zwei Adressierungsarten sind kein Versehen, sondern Abschnitt 3 dieser ADR
+plus Abschnitt 2 der Handoff-Datei aus (a). Der `NoReverseMatch`-Fallback auf
+den reinen Namen bleibt: eine unauflösbare Route darf die Log-Seite nicht
+zerlegen.

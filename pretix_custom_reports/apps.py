@@ -37,8 +37,12 @@ class PluginApp(PluginConfig):
         settings_links = []
         # (label, urlname, extra kwargs) -- "organizer" and "event" are injected
         # by pretix, do not pass them here.
+        # Keep the label in sync with ``signals.py::navbar_event_entry`` and
+        # ``tests/test_smoke.py::NAV_LABEL``; it is the same menu entry, once in
+        # the sidebar and once in the plugin settings list
+        # (``EventPlugins.prepare_links``).
         navigation_links = [
-            (_("Exports"), "plugins:pretix_custom_reports:event.index", {}),
+            (_("Reports"), "plugins:pretix_custom_reports:event.index", {}),
         ]
 
     def ready(self):

@@ -1,0 +1,106 @@
+{% extends "pretixcontrol/organizers/base.html" %}
+{# Owner: frontend-dev (ORCHESTRIERUNG.md section 5) #}
+{% comment %}
+    Pick the reference event for the template editor.
+
+    A template has no event, but a field library only exists for one: which
+    questions, items and meta properties exist is event data. So the editor works
+    against one event of this organizer, and this page is where that event is
+    chosen. views/editor.py skips this page when there is exactly one usable
+    event -- an in-between page with a single option is friction, not a choice.
+
+    method="get" on purpose: the answer belongs in the URL as
+    ?reference_event=<slug>, which makes the editor's address bookmarkable and
+    means this page needs no view logic of its own. No CSRF token for the same
+    reason -- a GET form changes nothing.
+
+    An empty event list is not an error page but this same page with the
+    explanation: the plugin is active somewhere in this organizer (otherwise the
+    view answers 404), but this user cannot read orders in any of those events,
+    and the preview would show nothing but 403s.
+{% endcomment %}
+{% load i18n %}
+
+{% block title %}{% trans "Template editor" %}{% endblock %}
+
+{% block inner %}
+    <h1>{% trans "Template editor" %}</h1>
+
+    {% if template %}
+        <p>
+            {% blocktrans trimmed with name=report_name %}
+                Template: <strong>{{ name }}</strong>
+            {% endblocktrans %}
+        </p>
+    {% endif %}
+
+    {% if events %}
+        <p>
+            {% blocktrans trimmed %}
+                Report templates live at organizer level and have no event of
+                their own. The editor therefore needs a reference event: its
+                questions, products and meta properties make up the field library,
+                and the live preview shows that event's orders. Pick the event
+                that resembles the events you want to use this template in.
+            {% endblocktrans %}
+        </p>
+        <p class="help-block">
+            {% blocktrans trimmed %}
+                The choice is not stored with the template. Fields whose filter
+                values only exist in one event are marked “event values” in the
+                editor and are remapped when the template is loaded into another
+                event.
+            {% endblocktrans %}
+        </p>
+
+        <form method="get" class="form-horizontal">
+            <div class="form-group">
+                <label class="col-md-3 control-label" for="pcr-reference-event">
+                    {% trans "Reference event" %}
+                </label>
+                <div class="col-md-9">
+                    <select class="form-control" id="pcr-reference-event"
+                            name="{{ reference_event_param }}">
+                        {% for event in events %}
+                            <option value="{{ event.slug }}">
+                                {{ event.name }} ({{ event.slug }})
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <div class="col-md-9 col-md-offset-3">
+                    <button type="submit" class="btn btn-primary" id="pcr-reference-event-submit">
+                        {% trans "Open the editor" %}
+                    </button>
+                    {% if list_url %}
+                        <a href="{{ list_url }}" class="btn btn-default">
+                            {% trans "Cancel" %}
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+        </form>
+    {% else %}
+        <div class="alert alert-warning">
+            {% blocktrans trimmed %}
+                There is no event you could use as a reference. The template editor
+                needs an event of this organizer that has the report plugin enabled
+                and whose orders you are allowed to view, because the field library
+                and the live preview come from that event.
+            {% endblocktrans %}
+        </div>
+        <p>
+            {% blocktrans trimmed %}
+                Ask for permission to view orders in one of these events, or edit
+                the template's JSON definition directly.
+            {% endblocktrans %}
+        </p>
+        {% if list_url %}
+            <a href="{{ list_url }}" class="btn btn-default">
+                {% trans "Back to the templates" %}
+            </a>
+        {% endif %}
+    {% endif %}
+{% endblock %}

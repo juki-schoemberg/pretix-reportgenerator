@@ -16,14 +16,14 @@ from django.urls import re_path
 
 from .views.api import api_urlpatterns
 from .views.crud import ReportListView, event_urlpatterns
-from .views.editor import editor_urlpatterns
+from .views.editor import editor_urlpatterns, template_editor_urlpatterns
 from .views.portability import portability_event_urlpatterns
 from .views.templates import (
     templates_event_urlpatterns,
     templates_organizer_urlpatterns,
 )
 
-#: The event-level entry point behind the "Exports" navigation entry and behind
+#: The event-level entry point behind the "Reports" navigation entry and behind
 #: ``PretixPluginMeta.navigation_links``. Wave 4 decision (integrator): this
 #: points at the real report list instead of the wave-0a placeholder, so the
 #: menu entry leads somewhere useful. ``event.reports`` stays as the canonical
@@ -43,4 +43,5 @@ urlpatterns = [
     + portability_event_urlpatterns  # portability-dev: file import/export (2)
     + templates_event_urlpatterns  # portability-dev: use a template (2)
     + templates_organizer_urlpatterns  # portability-dev: manage templates (5)
+    + template_editor_urlpatterns  # frontend-dev: template editor (2)
 )

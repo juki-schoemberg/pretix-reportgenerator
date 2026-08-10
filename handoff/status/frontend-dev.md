@@ -727,3 +727,261 @@ Die Suite ist damit vollständig grün.
 `flake8`, `isort -c`, `black --check` über `tests/test_editor_api.py`: grün.
 Templates sind nicht Teil der Python-Linter. Kein repo-weiter Lauf, kein
 `git commit`.
+
+---
+
+# Nachtrag 3: Layout aufgeräumt (A) und grafischer Editor für Vorlagen (B)
+
+**Stand:** 2026-08-10. Zwei unabhängige Aufträge, beide erledigt. Kein Commit
+(Modus A). Keine Fremddatei angefasst.
+
+## A — Layout des Editors
+
+Nutzer-Feedback war: alles da, aber gedrängt und die Reihenfolge ergibt keinen
+Sinn. Umgesetzt sind vier Blöcke mit je einer Überschrift, einer Einzeiler-
+Erläuterung und einem `<hr class="pcr-section-divider">` dazwischen:
+
+| Block | `id` | Inhalt |
+|---|---|---|
+| 1 | `pcr-section-basics` | Name, Beschreibung, **Report base** (aus der linken Spalte hierher gezogen) |
+| 2 | `pcr-section-content` | Field library (links) · Columns + **Filters** (rechts) |
+| 3 | `pcr-section-arrangement` | Sorting (`col-md-8`) · Options (`col-md-4`) |
+| 4 | `pcr-section-result` | Live preview · Definition as JSON |
+
+**Kein einziges bestehendes `id` hat sich geändert**, nur die Position im
+Dokument und die umgebenden Wrapper. `report-editor.js` ist unverändert — das war
+die Bedingung und sie hält: die Playwright-Tests (echtes Drag & Drop, select2,
+Basiswechsel, Live-Vorschau) laufen ohne Anpassung durch.
+
+### Warum die Filters in Block 2 und nicht in Block 3
+
+Wie vorgegeben, mit derselben Begründung, die ich auch gewählt hätte: eine
+Bedingung entsteht durch Ziehen eines Feldes aus der Bibliothek links, genau wie
+eine Spalte. Spalten und Filter beantworten zusammen die *eine* Frage „was landet
+im Report" — Filter über die Zeilen, Spalten über die Spalten. Sortierung und
+Optionen ordnen dieses Ergebnis nur noch um. Kein Abweichungsbedarf.
+
+### Zweiter Speichern-Knopf
+
+`#pcr-save` bleibt oben in Block 1 (nicht ersetzt), zusätzlich steht
+`#pcr-save-bottom` unter Block 4. Der untere Knopf liegt **außerhalb** von
+`#pcr-form` und postet über das HTML5-Attribut `form="pcr-form"` — die Seite hat
+weiter genau ein Formular, `report-editor.js` weiter genau einen
+`submit`-Handler (und der ist der, der das versteckte `definition`-Feld füllt,
+also darf es keinen zweiten geben).
+
+Zur ausdrücklichen Frage: **`#pcr-save` wird von `report-editor.js` nicht
+angesprochen** — geprüft per Grep über `js/`, `py`, `html`, `css`; die einzigen
+Treffer waren das Template selbst und zwei Zusicherungen in
+`tests/test_editor_api.py`. Es war also kein Mechanismus mitzugeben. Trotzdem
+tragen jetzt **beide** Knöpfe die gemeinsame Klasse `pcr-save`, damit ein
+künftiges „alle Speichern-Knöpfe" nicht wieder wissen muss, dass es zwei sind;
+die Einzel-IDs bleiben, weil die bestehenden Tests auf `id="pcr-save"` prüfen.
+Das `disabled` bei fehlendem `save_url` bekommen beide
+(`test_both_save_buttons_are_disabled_together`).
+
+### Dateien
+
+* `templates/pretix_custom_reports/editor.html` — nur umsortiert und umhüllt,
+  plus die Template-Modus-Zweige aus Auftrag B.
+* `static/pretix_custom_reports/css/report-editor.css` — neuer Abschnitt „page
+  structure" (`.pcr-section`, `.pcr-section-title`, `.pcr-section-divider`,
+  `.pcr-save-bar`), und `.pcr-library-list` von `30em` auf `34em`: die linke
+  Spalte ist ohne das Base-Panel kürzer als die rechte.
+
+Live nachgesehen, nicht nur getestet: `GET
+/control/event/demo/demo-event/customreports/editor/` auf dem laufenden Server
+liefert 200, drei Trenner und die vierzehn IDs in der geplanten Reihenfolge.
+
+## B — Grafischer Editor für Veranstalter-Vorlagen
+
+`TemplateEditorView` in `views/editor.py`, gleiche Shell, gleiches JavaScript,
+gleiche JSON-Endpunkte. **`views/api.py`, `registry/**` und `views/templates.py`
+sind unverändert** — wie angekündigt, und ich habe es gegen den installierten
+Code geprüft, nicht geglaubt (Regel 1):
+
+* `forms.ReportDefinitionForm.Meta.fields` ist wirklich
+  `("name", "description", "identifier", "base", "definition")`, `definition` ist
+  ein `JSONField` (`PrettyJSONFormField`), das den JSON-**String** des versteckten
+  Inputs parst, und der Eigentümer (`event`/`organizer`) kommt über
+  `__init__(organizer=…)` aus der View, nicht aus dem Body. Die Annahme stimmt.
+* Der Beweis ist kein Kommentar, sondern ein Test:
+  `test_template_editor_post_round_trip`, parametrisiert über **jede** Golden
+  Fixture — Editor-Formular → `TemplateCreateView` → Datenbank → Editor-Seite,
+  Definition unverändert, danach noch ein Update über `TemplateUpdateView` mit
+  demselben `identifier`.
+
+### Aufbau
+
+`EditorShellMixin` trägt jetzt alles Gemeinsame (Kontext, `js_strings`, URL-Bau);
+`ReportEditorView` und `TemplateEditorView` unterscheiden sich in genau vier
+Punkten: Gate, `url_kwargs()`, `api_url()` und `get_report()`. Kein zweites
+Template für die Shell — `editor.html` bekommt `is_template` und
+`editor_base_template` und entscheidet daran über Titel, Referenz-Event-Hinweis,
+Vorschau-Warnung und Portabilitäts-Knöpfe.
+
+Der Mixin war nötig, weil `ReportEditorView` `EventPermissionRequiredMixin` erbt
+und dessen `as_view()` den View in `event_permission_required` wickelt — eine
+Unterklasse davon wäre auf Organizer-Ebene an einem fehlenden `request.event`
+zerbrochen.
+
+**Fallstrick, der mich einmal erwischt hat:** meine erste Fassung nannte den
+Kontext-Hook `extra_context()`. Das ist der Name eines *Attributs* von Djangos
+`ContextMixin` (`django/views/generic/base.py`), das `get_context_data()` mit
+`kwargs.update(self.extra_context)` verarbeitet, sobald es nicht `None` ist — bei
+einer Methode also `TypeError: 'method' object is not iterable`, und zwar auf
+**jeder** Editor-Seite, nicht nur der neuen. Heißt jetzt `shell_extra_context()`.
+
+### Basis-Template
+
+`editor.html` beginnt mit `{% extends editor_base_template|default:"…" %}`.
+Verifiziert in pretix 2026.6.0: `pretixcontrol/event/base.html` setzt nur
+`title`, `pretixcontrol/organizers/base.html` umschließt zusätzlich einen
+`inner`-Block — beide lassen `content` frei, und den überschreiben wir. Der
+Rest von `pretixcontrol/base.html` fragt `request.event` überall defensiv ab
+(`{% if request.event and … %}`), also läuft die Seite ohne Event.
+
+### Referenz-Event
+
+`?reference_event=<slug>`. Zulässig sind Events des Organizers mit
+`plugins__contains="pretix_custom_reports"` **und** `event.orders:read` für diesen
+Nutzer — beides notwendig, weil sonst die API-Endpunkte 404 respektive 403
+antworten und der Editor als leere Seite mit rotem Kasten enden würde.
+
+* **genau eins** → automatisch gewählt, kein Zwischenschritt, und dann auch kein
+  „anderes Event wählen"-Link (der führte zurück auf dieselbe Seite).
+* **mehrere** → `editor_choose_event.html`, ein `<select>` mit `method="get"`.
+  Kein CSRF-Token, weil ein GET-Formular nichts ändert.
+* **ungültig / nicht berechtigt / anderer Organizer** → dieselbe Auswahlseite mit
+  einer `messages.error`, Status 200. Die drei Fälle werden bewusst *nicht*
+  unterschieden: für den Nutzer bedeuten sie dasselbe, und sie
+  auseinanderzuhalten würde verraten, welche Slugs existieren.
+* **keins** → dieselbe Seite, aber mit Erklärung statt Auswahl. Das trifft den
+  Organizer-Admin ohne Bestellrecht; ohne diesen Zweig hätte er eine Seite
+  bekommen, deren jede Anfrage 403 antwortet.
+
+`api.fields`, `api.preview` und `api.validate` werden mit
+`{organizer, event: reference_event.slug}` reversed, alles andere nur mit
+`{organizer}`.
+
+### Sicherheit
+
+* Gate: `OrganizerPluginActiveMixin` + `OrganizerPermissionRequiredMixin` mit
+  `ORGANIZER_CHANGE_PERMISSION` — dieselbe einzelne Berechtigung, an der
+  `TemplateListView` schon hängt, also kein getrennter Lesemodus und
+  `may_change()` ist genau diese Prüfung.
+* Die **Vorschau bleibt event-gegattet**. `views/api.py` ist unangetastet, also
+  gilt weiter `event.orders:read` plus das harte Event-Scoping des Querysets, und
+  das Limit kommt weiter vom Server.
+  `test_template_editor_preview_stays_gated_on_the_reference_event` prüft beide
+  Richtungen mit zwei verschiedenen Nutzern.
+  Nebenbefund: der abgewiesene Nutzer bekommt **404, nicht 403** — pretix'
+  `ControlMiddleware` wirft `Http404`, bevor irgendeine View läuft, wenn der
+  Nutzer im Event gar keine Berechtigung hat. Der Test erlaubt beides, damit ein
+  künftiger pretix-Wechsel nicht wie ein Loch in unserem Gate aussieht.
+* Der Editor schickt weiter ausschließlich Feld-Keys; am JSON-Vertrag hat sich
+  nichts geändert (`js_strings()` hat **keinen** neuen Eintrag).
+* `ReportDefinition.objects.templates_for_organizer(organizer).get(pk=…)` ist
+  Mandantengrenze und XOR-Filter in einem. Ein Event-Report ist über diese Route
+  strukturell nicht erreichbar, nicht per Filter, den man vergessen kann — Test
+  `test_template_editor_404s_for_a_report_that_is_not_a_template`.
+
+### Routen
+
+`template_editor_urlpatterns` (eigene Liste), Namen und Routen exakt wie
+festgelegt:
+
+```
+^control/organizer/(?P<organizer>[^/]+)/customreports/templates/editor/$
+    -> organizer.templates.editor.new
+^control/organizer/(?P<organizer>[^/]+)/customreports/templates/editor/(?P<template>\d+)/$
+    -> organizer.templates.editor.edit
+```
+
+Kopierfertige Anforderung:
+`handoff/requests/frontend-dev-an-integrator-template-editor-urls.md`.
+`urls.py` habe ich **nicht** angefasst.
+
+## Parallelarbeit: alles passt zusammen
+
+Anders als erwartet gab es **keinen** `NoReverseMatch`. `portability-dev` hat
+`template_list.html` parallel schon auf `organizer.templates.editor.new` /
+`.edit` mit `template=<pk>` umgestellt und `TemplateApplyView` auf `editor.edit`
+— exakt die Namen und Kwargs aus dem Contract. Meine Testsuite hängt die Routen
+selbst in die URLconf (`editor_routes`-Fixture, jetzt inklusive
+`template_editor_urlpatterns` und `templates_organizer_urlpatterns`), reverst also
+den echten Namespace und läuft unverändert weiter, sobald der Integrator die eine
+Zeile ergänzt.
+
+**Ein Hinweis für den Orchestrator, weil es die Reihenfolge betrifft:**
+`template_list.html` reverst die zwei neuen Namen mit `{% url %}` — also *nicht*
+defensiv. Solange `template_editor_urlpatterns` nicht in `urls.py` steht, wirft
+die Vorlagenliste `NoReverseMatch`. Die zwei Änderungen (portability-devs Template
+und integrators `urls.py`) müssen zusammen landen; einzeln ist die Vorlagenliste
+kaputt. Mein eigener Teil ist davon nicht betroffen, `views/editor.py` reverst
+alles über `url_or_none()`.
+
+## Tests
+
+`tests/test_editor_api.py`, neu (119 → 152 Tests):
+
+*Layout (A)*
+
+* `test_editor_page_orders_its_four_blocks` — vierzehn IDs in der geplanten
+  Dokumentreihenfolge.
+* `test_editor_page_separates_the_four_blocks` — drei Trenner, vier
+  Überschriften, und die CSS-Regeln dazu existieren wirklich.
+* `test_the_report_base_sits_in_the_first_block`
+* `test_editor_repeats_the_save_button_at_the_end_of_the_page` — ein Formular,
+  zwei Knöpfe, der untere außerhalb und per `form="pcr-form"` hinein.
+* `test_both_save_buttons_are_disabled_together`
+
+*Vorlagen-Editor (B)*
+
+* `test_template_editor_points_at_the_reference_events_endpoints` (a)
+* `test_template_editor_asks_which_event_when_there_are_several` (b)
+* `test_template_editor_handles_an_unusable_reference_event` (c), parametrisiert
+  über unbekannten Slug, Event ohne Plugin und einen kodierten Slug
+* `test_template_editor_post_round_trip` (d), parametrisiert über jede Golden
+  Fixture
+* `test_template_editor_offers_export_only` (e)
+* plus: Auto-Auswahl bei genau einem Event, Weg zurück zur Auswahl inkl.
+  `data-pcr-leave`, fremder Organizer, kein nutzbares Event, fehlende
+  Organizer-Berechtigung (403), Login-Redirect, gespeicherte Vorlage öffnen,
+  404 für Nicht-Vorlage und für unbekannte PK, ungespeicherte Vorlage nicht
+  exportierbar, Kommentar-Blindtext auf beiden neuen Pfaden, Vorschau-Gate.
+
+**Ein Fixture-Fallstrick zum Weitersagen:** `client_organizer_only` baut sich
+einen **eigenen** `Client()`. pytest-djangos `client` ist *ein* Objekt pro Test —
+ein zweites Login darauf ersetzt das erste, und ein Test mit zwei Nutzern
+(Vorschau-Gate) prüft dann zweimal denselben. Das hat mich einen falsch-roten
+Test gekostet.
+
+## Testergebnis
+
+`pytest tests/test_editor_api.py`: **152 passed**, davon 10 Browser- und
+Node-Tests (Playwright läuft hier, wird nicht übersprungen).
+
+`pytest -m "not performance"` über das ganze Repo: **1224 passed, 2 xfailed, 0
+failed** — inklusive `tests/test_org_templates.py` und `tests/test_portability.py`
+mit den parallelen Änderungen von `portability-dev`.
+
+`flake8`, `isort -c`, `black --check` über `views/editor.py` und
+`tests/test_editor_api.py`: grün. Kein repo-weiter Formatierlauf, kein
+`git commit`.
+
+## Offen / bewusst nicht gemacht
+
+* **Keine Übersetzung.** Alle neuen Strings englisch; der `de`-Katalog ist Sache
+  des `integrator`. Was neu ist und wo, steht in Abschnitt 5 der Handoff-Datei.
+* **Kein Menüeintrag** für den Vorlagen-Editor. `signals.py` ist fremdes Gebiet,
+  und der Einstieg über die Vorlagenliste genügt.
+* **Referenz-Event wird nicht gespeichert.** Bewusst: es ist eine Sicht auf die
+  Vorlage, keine Eigenschaft von ihr. Eine Vorlage mit gemerktem Event wäre eine
+  halbe Event-Bindung und würde die XOR-Zusicherung des Modells verwässern. Wenn
+  Nutzer es doch vermissen, gehört es in eine Nutzereinstellung und nicht in
+  `ReportDefinition`.
+* **Der Vorlagen-Editor ist nicht live geprüft**, weil seine Routen noch nicht in
+  `urls.py` stehen (integrators Datei). Abgedeckt ist er über die Testsuite, die
+  die echten Routen, den echten Namespace und die echte Middleware-Kette
+  verwendet.

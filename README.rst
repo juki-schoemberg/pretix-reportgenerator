@@ -82,7 +82,12 @@ Features
 **Organizer-level templates**
   Report definitions kept on the organizer. "Load a template" in an event
   creates an editable copy; event-specific references (questions, products) go
-  through the same resolution step as a file import.
+  through the same resolution step as a file import. Templates are built in the
+  same graphical editor as reports: because a template has no event of its own
+  and a field library only exists *for* an event, you pick a **reference event**
+  whose questions, products and meta properties make up the field library and
+  whose orders feed the live preview. That choice is not stored with the
+  template.
 
 **Event copy**
   Copying an event takes its reports along, including the resolution of renamed
@@ -107,6 +112,9 @@ From a checkout::
 Then restart the pretix web and Celery processes — newly registered entry
 points are not picked up by a running autoreloader — and activate the plugin
 per event under *Settings → Plugins → Output and export formats*.
+
+Afterwards the event sidebar carries a **Reports** entry and the organizer
+sidebar a **Report templates** entry. Both are permission-gated, see below.
 
 Permissions:
 

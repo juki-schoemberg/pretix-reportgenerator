@@ -21,7 +21,11 @@ import pretix_custom_reports
 from pretix_custom_reports.signals import URL_NAMESPACE, VIEW_PERMISSION
 
 MODULE_NAME = "pretix_custom_reports"
-NAV_LABEL = "Exports"
+#: The event-level navigation label. Defined once here and asserted in both
+#: directions (rendered for a permitted user, absent for a limited one). Same
+#: string in ``signals.py::navbar_event_entry`` and
+#: ``apps.py::PretixPluginMeta.navigation_links``.
+NAV_LABEL = "Reports"
 
 
 def _dispatch_uids(signal):
@@ -201,15 +205,20 @@ def _plugin_routes():
 
 
 def test_every_route_list_of_every_agent_is_wired_up():
-    """urls.py concatenates six module variables; none may go missing.
+    """urls.py concatenates seven module variables; none may go missing.
 
     Each agent maintains their routes next to their views (see
     docs/adr/0006-verdrahtung.md section 1). A dropped ``+`` in urls.py would
-    otherwise only show up in that agent's own tests.
+    otherwise only show up in that agent's own tests -- or, for
+    ``template_editor_urlpatterns``, as a ``NoReverseMatch`` on the template
+    list, which links to those two names without a fallback.
     """
     from pretix_custom_reports.views.api import api_urlpatterns
     from pretix_custom_reports.views.crud import event_urlpatterns
-    from pretix_custom_reports.views.editor import editor_urlpatterns
+    from pretix_custom_reports.views.editor import (
+        editor_urlpatterns,
+        template_editor_urlpatterns,
+    )
     from pretix_custom_reports.views.portability import (
         portability_event_urlpatterns,
     )
@@ -226,6 +235,7 @@ def test_every_route_list_of_every_agent_is_wired_up():
         portability_event_urlpatterns,
         templates_event_urlpatterns,
         templates_organizer_urlpatterns,
+        template_editor_urlpatterns,
     ):
         assert {p.name for p in source} <= wired
 
@@ -319,6 +329,11 @@ def test_the_log_object_link_survives_an_organizer_template(organizer, event):
     ``logentry.event.slug``; for a template that attribute is ``None`` and the
     inherited implementation would raise while *rendering the log page*. See
     docs/adr/0006-verdrahtung.md section 5.
+
+    Also pins the *target*: both links lead into the graphical editor, not into
+    the raw JSON form -- same fix as the report list got in commit 3a56a0a. The
+    two addressing schemes are deliberate: the event editor takes the stable
+    identifier, the template editor the primary key.
     """
     from django_scopes import scopes_disabled
     from pretix.base.logentrytypes import log_entry_types
@@ -350,9 +365,9 @@ def test_the_log_object_link_survives_an_organizer_template(organizer, event):
     report_link = str(logtype.get_object_link(report_entry))
 
     assert "A template" in template_link
-    assert "/customreports/templates/" in template_link
+    assert f"/customreports/templates/editor/{template.pk}/" in template_link
     assert "A report" in report_link
-    assert "/customreports/reports/" in report_link
+    assert "/customreports/editor/rep/" in report_link
 
 
 def test_exactly_one_migration_ships():

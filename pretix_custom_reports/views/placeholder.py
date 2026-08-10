@@ -17,7 +17,7 @@ from ..signals import VIEW_PERMISSION
 
 
 class EventIndexView(EventPermissionRequiredMixin, TemplateView):
-    """Empty placeholder behind the event-level "Exports" menu entry."""
+    """Empty placeholder behind the event-level "Reports" menu entry."""
 
     permission = VIEW_PERMISSION
     template_name = "pretix_custom_reports/placeholder.html"

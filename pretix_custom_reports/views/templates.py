@@ -14,6 +14,19 @@ Event level (``.../customreports/reports/templates/``)
     Pick a template, look at the resolution report, create the copy. Needs the
     event-level change permission, because that is where the new report lands.
 
+Who links to the two organizer-level forms
+------------------------------------------
+
+Nobody any more, on purpose. ``template_list.html`` sends "create" and "edit" to
+the graphical editor (``organizer.templates.editor.*``, frontend-dev), which
+picks a reference event to build the field library from and then posts to
+:class:`TemplateCreateView` / :class:`TemplateUpdateView` -- the very views
+below, with the very same ``ReportDefinitionForm``. The forms and their routes
+therefore stay exactly as they are: they are the editor's write endpoint, and
+they remain directly reachable as a hand-repair page for a template whose stored
+JSON is too broken for the editor to render. Same move ``views/crud.py`` made
+for event reports.
+
 The "load" step is not a link but a two-request flow with a confirmation, for
 the same reason the file import has one: the target event may not know every
 question the template names, and dropping a column is a decision the user makes,
@@ -93,7 +106,17 @@ URL_NAME_EVENT_PICK = "event.reports.templates"
 URL_NAME_EVENT_APPLY = "event.reports.templates.apply"
 
 URL_NAME_EVENT_LIST = "event.reports"
-URL_NAME_EVENT_EDIT = "event.reports.edit"
+
+#: Where a freshly loaded copy is handed to the user: the graphical editor
+#: (``views/editor.py``, frontend-dev), keyed on the stable identifier. Not the
+#: JSON form -- see the module docstring of ``views/portability.py``.
+URL_NAME_EVENT_EDITOR_EDIT = "editor.edit"
+
+#: The organizer-level editor for templates, frontend-dev's counterpart to the
+#: two forms in here. Named for documentation only; ``template_list.html``
+#: reverses these by name.
+URL_NAME_ORG_EDITOR_NEW = "organizer.templates.editor.new"
+URL_NAME_ORG_EDITOR_EDIT = "organizer.templates.editor.edit"
 
 FORM_STRATEGY = "strategy"
 FORM_ACTION = "action"
@@ -396,7 +419,11 @@ class TemplateApplyView(EventTemplateMixin, EventPermissionRequiredMixin, Templa
             return self.render_to_response(self._context(plan))
 
         messages.success(request, _("The template has been loaded into this event."))
-        return redirect(report_url(URL_NAME_EVENT_EDIT, request.event, report=copy.pk))
+        return redirect(
+            report_url(
+                URL_NAME_EVENT_EDITOR_EDIT, request.event, identifier=copy.identifier
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

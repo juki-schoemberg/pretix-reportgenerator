@@ -83,6 +83,28 @@ def _reload_urlconf():
     clear_url_caches()
 
 
+def _template_editor_urlpatterns():
+    """frontend-dev's organizer-level editor routes, if they exist yet.
+
+    ``template_list.html`` links "create" and "edit" to
+    ``organizer.templates.editor.new`` / ``.edit`` instead of to the JSON forms
+    of ``views/templates.py``, so rendering that page needs those two routes to
+    reverse. They live in ``views/editor.py`` in their own list, waiting for the
+    integrator to add them to ``urls.py``.
+
+    Attached here for the same reason every other route in this function is:
+    ``urls.py`` belongs to the integrator, and a test of this module should not
+    depend on the order in which two agents finish. The ``ImportError`` branch
+    keeps this module importable while frontend-dev is still building -- the
+    link tests then fail with ``NoReverseMatch``, which is the honest answer.
+    """
+    try:
+        from pretix_custom_reports.views.editor import template_editor_urlpatterns
+    except ImportError:  # pragma: no cover - only before frontend-dev lands
+        return []
+    return list(template_editor_urlpatterns)
+
+
 def install_plugin_urls():
     """Attach every route of wave 1 and 2 to the plugin URLconf.
 
@@ -101,6 +123,7 @@ def install_plugin_urls():
         + list(portability_event_urlpatterns)
         + list(templates_event_urlpatterns)
         + list(templates_organizer_urlpatterns)
+        + _template_editor_urlpatterns()
     )
     known = {p.name for p in plugin_urls.urlpatterns}
     added = [p for p in wanted if p.name not in known]
@@ -1186,6 +1209,32 @@ def test_import_view_pastes_a_bare_definition(client_with_perms, event):
     assert response.status_code == 302
     with scopes_disabled():
         assert ReportDefinition.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_a_successful_import_lands_in_the_graphical_editor(client_with_perms, event):
+    """Not in the JSON form.
+
+    Looking at what just arrived is the next thing a user does after an import,
+    and the editor is where that happens -- the plain form of ``views/crud.py``
+    is a repair path, not a destination (same move as ``ReportDuplicateView``).
+    ``editor.edit`` is keyed on the stable identifier, the form on the primary
+    key, so the two are not interchangeable.
+    """
+    response = client_with_perms.post(
+        report_path("event.reports.import", event),
+        {
+            "document": json.dumps(definition(columns=("order.code",))),
+            "action": "confirm",
+        },
+    )
+    assert response.status_code == 302
+    with scopes_disabled():
+        stored = ReportDefinition.objects.get()
+    assert response["Location"] == report_path(
+        "editor.edit", event, identifier=stored.identifier
+    )
+    assert not response["Location"].endswith(f"/{stored.pk}/")
 
 
 @pytest.mark.django_db

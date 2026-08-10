@@ -5,6 +5,31 @@ Owner from wave 2 on: portability-dev (see ORCHESTRIERUNG.md section 5).
 Organizer-level template management (SPEC.md F10). Extends the organizer base
 template, which fills ``{% block inner %}`` -- not ``content`` like the
 event-level pages.
+
+Creating and changing a template goes to the graphical editor
+(``organizer.templates.editor.new`` / ``.edit``, frontend-dev) rather than to
+this module's own ``organizer.templates.add`` / ``.edit`` form, the same move
+``report_list.html`` made for event reports: the editor is what SPEC.md F2 calls
+the core feature, the JSON textarea was never meant to be the front door. The
+editor asks for a reference event first, because a template has no event of its
+own and therefore no field library to build against; it then posts to exactly
+those two CRUD URLs, whose ``ReportDefinitionForm`` (name, description,
+identifier, base, definition) is what it fills in. So the plain form stays
+reachable as a hand-repair fallback for a template whose JSON is too broken for
+the editor -- it is just not linked from here any more.
+
+Both route pairs take the numeric ``template`` primary key. A template has no
+event to scope an identifier to, so unlike the event-level ``editor.edit``
+there is nothing stabler to address it by.
+
+No permission gate in here: the whole view requires the organizer-level change
+permission (``views/templates.py``), so anyone who can see this page can also
+write.
+
+Multi-line commentary uses the ``comment`` block tag, never the short
+hash-brace form: that one cannot span lines and would render as visible text.
+Guarded by ``tests/test_org_templates.py``, both from the rendered page and
+statically over every template of this module.
 {% endcomment %}
 {% load i18n %}
 {% block title %}{% trans "Report templates" %}{% endblock %}
@@ -18,7 +43,7 @@ event-level pages.
         {% endblocktrans %}
     </p>
     <p>
-        <a href="{% url "plugins:pretix_custom_reports:organizer.templates.add" organizer=request.organizer.slug %}"
+        <a href="{% url "plugins:pretix_custom_reports:organizer.templates.editor.new" organizer=request.organizer.slug %}"
            class="btn btn-default">
             <span class="fa fa-plus"></span> {% trans "Create a new template" %}
         </a>
@@ -39,7 +64,7 @@ event-level pages.
                     {% for template in templates %}
                         <tr>
                             <td>
-                                <strong><a href="{% url "plugins:pretix_custom_reports:organizer.templates.edit" organizer=request.organizer.slug template=template.pk %}">{{ template.name }}</a></strong>
+                                <strong><a href="{% url "plugins:pretix_custom_reports:organizer.templates.editor.edit" organizer=request.organizer.slug template=template.pk %}">{{ template.name }}</a></strong>
                                 {% if template.description %}
                                     <br><small class="text-muted">{{ template.description }}</small>
                                 {% endif %}
@@ -48,7 +73,7 @@ event-level pages.
                             <td>{{ template.get_base_display }}</td>
                             <td>{{ template.instances.count }}</td>
                             <td class="text-right flip">
-                                <a href="{% url "plugins:pretix_custom_reports:organizer.templates.edit" organizer=request.organizer.slug template=template.pk %}"
+                                <a href="{% url "plugins:pretix_custom_reports:organizer.templates.editor.edit" organizer=request.organizer.slug template=template.pk %}"
                                    class="btn btn-default btn-sm" title="{% trans "Edit" %}" data-toggle="tooltip">
                                     <span class="fa fa-edit"></span>
                                 </a>

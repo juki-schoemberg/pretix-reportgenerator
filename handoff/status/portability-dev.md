@@ -508,3 +508,124 @@ durch das Payload-Gate, sondern über `views/api.py`. Das ist der dritte Teil
 von S-003 und liegt bei `frontend-dev`.
 
 `tests/test_security.py` und `views/api.py` habe ich nicht angefasst.
+
+---
+
+## Nachtrag 2026-08-10 — Vorlagen-Liste führt in den grafischen Editor
+
+Auftrag: dasselbe wie der Commit „UX-Fix: Report-Liste führt in den grafischen
+Editor, nicht ins JSON-Formular" (3a56a0a) für die Veranstalter-Vorlagen. Der
+Nutzer legt Reports und Vorlagen ausschließlich über den Drag&Drop-Editor an;
+die JSON-Formulare bleiben als **unverlinkter** Reparaturpfad bestehen.
+
+### Geändert
+
+`pretix_custom_reports/templates/pretix_custom_reports/template_list.html`
+
+* „Create a new template" → `organizer.templates.editor.new`
+  (vorher `organizer.templates.add`). Der Button steht über dem
+  `{% if templates %}` und gilt damit für die gefüllte *und* die leere Liste;
+  bewusst kein zweiter Button im Empty-State, sonst stünde er doppelt auf der
+  Seite.
+* Name-Link **und** Bearbeiten-Icon jeder Zeile → `organizer.templates.editor.edit`
+  mit `template=<pk>`. Nicht `identifier`: eine Vorlage hat kein Event, an das
+  ein Identifier gebunden wäre, deshalb nehmen hier alle Routen die pk — anders
+  als das eventseitige `editor.edit`. Frontend-devs Routenliste
+  (`views/editor.py`, `template_editor_urlpatterns`) sieht das genauso.
+* Export- und Löschen-Icon bleiben unverändert auf `organizer.templates.export`
+  / `.delete`.
+* Kopfkommentar analog `report_list.html` erweitert: warum die JSON-Form noch
+  existiert, warum sie nicht verlinkt ist, warum hier die pk statt des
+  Identifiers adressiert wird, und dass mehrzeilige Kommentare den
+  `{% comment %}`-Block brauchen. Alles in `{% comment %}`; die kurze
+  Hash-Syntax kommt in der Datei bewusst überhaupt nicht mehr vor (siehe
+  Guard-Test unten — der prüft rein textuell und schlägt sonst über die eigene
+  Erklärung an; genau das ist beim ersten Versuch passiert).
+
+`template_form.html`, `TemplateCreateView`, `TemplateUpdateView` und ihre
+Routen: **unverändert**. Sie sind das POST-Ziel des neuen Editor-Modus
+(`ReportDefinitionForm` mit name/description/identifier/base/definition) und
+gleichzeitig die Handreparatur-Seite für eine Vorlage, deren JSON zu kaputt für
+den Editor ist.
+
+### Über den Auftrag hinaus: zwei Redirects, die noch ins JSON-Formular führten
+
+Beim Nachsehen, was sonst noch in die Formulare zeigt, blieben zwei
+**Redirects** in meinen eigenen Dateien übrig — dieselbe Fehlerklasse, die
+3a56a0a in `crud.py` für „Duplizieren" behoben hat, nur eine Ebene weiter:
+
+* `views/portability.py`, `ReportImportView`: nach erfolgreichem Import ging es
+  auf `event.reports.edit`, also direkt in die JSON-Textarea. Jetzt
+  `editor.edit` mit dem Identifier.
+* `views/templates.py`, `TemplateApplyView`: nach „Vorlage laden" dasselbe.
+  Jetzt ebenfalls `editor.edit` mit dem Identifier der Kopie.
+
+Beide Male ist der Editor das, was der Nutzer als nächstes will (die Kopie
+umbenennen, die übersprungene Spalte ersetzen). Die dafür nötigen Konstanten
+heißen wie in `crud.py` `URL_NAME_EDITOR_EDIT` bzw.
+`URL_NAME_EVENT_EDITOR_EDIT` und sind ausgeschrieben statt importiert:
+`views/editor.py` importiert bereits aus beiden Modulen, der umgekehrte Import
+wäre ein Zyklus. Die nun ungenutzten `URL_NAME_EDIT` / `URL_NAME_EVENT_EDIT`
+sind entfallen. **Das war nicht ausdrücklich beauftragt** — wer es nicht will,
+kann die beiden Redirects und die zwei Tests
+`test_a_successful_import_lands_in_the_graphical_editor` /
+`test_a_loaded_template_lands_in_the_graphical_editor` isoliert zurücknehmen,
+der Rest hängt nicht daran.
+
+### Tests
+
+`tests/test_org_templates.py`, neuer Abschnitt „Where the template list sends
+the user":
+
+* `test_the_template_list_links_creation_to_the_graphical_editor`
+* `test_the_empty_template_list_links_creation_to_the_graphical_editor`
+* `test_the_template_list_links_editing_to_the_graphical_editor` — erwartet den
+  Editor-Link genau **zweimal** (Name + Stift) und verbietet den Formular-Link;
+  die Prüfung schließt das `"` mit ein, weil die Formular-URL ein Präfix der
+  Export- und Delete-URL ist.
+* `test_the_template_list_still_links_export_and_delete_to_this_module`
+* `test_the_template_list_renders_no_raw_django_comment` — gerendert
+* `test_no_template_of_this_module_uses_a_multiline_hash_comment` — statisch
+  über alle acht Templates in meinem Eigentum, Gegenstück zu
+  `tests/test_permissions.py::test_no_template_of_this_module_uses_a_multiline_hash_comment`
+* `test_a_loaded_template_lands_in_the_graphical_editor`
+
+`tests/test_portability.py`:
+
+* `test_a_successful_import_lands_in_the_graphical_editor`
+* `install_plugin_urls()` hängt jetzt zusätzlich frontend-devs
+  `template_editor_urlpatterns` an, wenn sie importierbar sind (neue Hilfsfunktion
+  `_template_editor_urlpatterns()`, `ImportError` → leere Liste). Begründung wie
+  bei allen anderen Routen dort: `urls.py` gehört dem `integrator`, und ein Test
+  dieses Moduls soll nicht davon abhängen, in welcher Reihenfolge zwei Agenten
+  fertig werden. Ohne diese Zeile fielen die Link-Tests **und** der bestehende
+  `test_the_template_list_shows_templates_and_not_event_reports` mit
+  `NoReverseMatch` aus, weil `template_list.html` die Editor-Routen reversen
+  muss, um überhaupt zu rendern.
+
+### Stand
+
+```
+pytest tests/test_org_templates.py tests/test_portability.py -q -> 149 passed
+pytest -m "not performance" -q -> 1224 passed, 10 deselected, 2 xfailed
+flake8 / isort -c / black --check über meine 4 geänderten Dateien -> rc 0
+```
+
+Zwischenstand-Notiz zur Reihenfolge: als ich anfing, existierten die beiden
+Routennamen nur als Contract, und die Tests fielen erwartungsgemäß mit
+`NoReverseMatch`. Inzwischen liegt `template_editor_urlpatterns` in
+`views/editor.py` (frontend-dev), deshalb ist alles grün — **aber** die Liste
+ist in der laufenden Instanz erst erreichbar, wenn der `integrator` diese Liste
+in `urls.py` aufnimmt. Bis dahin wirft `/control/organizer/<org>/customreports/templates/`
+beim Rendern `NoReverseMatch`. Das ist der einzige offene Punkt aus diesem
+Nachtrag.
+
+### Für andere, nicht von mir angefasst
+
+* `signals.py` (integrator): `get_object_link_info` verlinkt eine Vorlage im
+  Log weiterhin auf `organizer.templates.edit`, also ins JSON-Formular. Kein
+  Fehler (die Route lebt), aber inkonsistent zur Liste — Kandidat für
+  `organizer.templates.editor.edit`. Gleiches gilt für den Event-Zweig und
+  `event.reports.edit`.
+* `docs/adr/0006-verdrahtung.md` Zeile 128 beschreibt genau diese Log-Verlinkung
+  und würde mitwandern.

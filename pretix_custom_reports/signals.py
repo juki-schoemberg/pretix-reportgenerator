@@ -59,7 +59,16 @@ PLUGIN_MODULE = "pretix_custom_reports"
 
 @receiver(nav_event, dispatch_uid="pretix_custom_reports_nav_event")
 def navbar_event_entry(sender, request, **kwargs):
-    """Add the event-level "Exports" entry to the control panel navigation."""
+    """Add the event-level "Reports" entry to the control panel navigation.
+
+    The label was "Exports" until wave 4 follow-up. It is "Reports" now for two
+    reasons: the plugin is a report builder, not another exporter (see
+    ``PluginApp.PretixPluginMeta.description``), and the organizer-level entry
+    is called "Report templates" -- sharing the word "Report" is what tells a
+    user that the two menu entries belong together. Three places carry the same
+    string and have to stay in sync: here, ``apps.py::navigation_links`` and
+    ``tests/test_smoke.py::NAV_LABEL``.
+    """
     if not request.user.has_event_permission(
         request.organizer, request.event, VIEW_PERMISSION, request=request
     ):
@@ -67,7 +76,7 @@ def navbar_event_entry(sender, request, **kwargs):
     url = request.resolver_match
     return [
         {
-            "label": _("Exports"),
+            "label": _("Reports"),
             "url": reverse(
                 f"{URL_NAMESPACE}:event.index",
                 kwargs={
@@ -199,7 +208,16 @@ class ReportLogEntryType(EventLogEntryType):
     template has no event at all (``ReportDefinition.event`` is ``None``, the
     XOR with ``organizer``). It would raise ``AttributeError`` while *rendering
     the log page* -- the pitfall named in
-    handoff/requests/persistence-dev-an-integrator-urls.md section 4.
+    handoff/requests/erledigt/persistence-dev-an-integrator-urls.md section 4.
+
+    Both branches link into the *graphical editor*, not into the raw JSON form
+    -- same reasoning as the report list (commit 3a56a0a): the editor is the
+    place users are meant to work in, the form is the fallback. Note the two
+    addressing schemes, they are deliberate and documented in
+    handoff/requests/erledigt/frontend-dev-an-integrator-template-editor-urls.md
+    section 2: the event-level ``editor.edit`` takes the stable ``identifier``, the
+    organizer-level ``organizer.templates.editor.edit`` takes the primary key,
+    because it sits next to ``organizer.templates.edit``/``.export``.
 
     No shredder mixin on purpose: ``shred_pii`` is not called anywhere in
     pretix 2026.6.0, and pretix' own ``CoreEventLogEntryType`` does not declare
@@ -222,7 +240,7 @@ class ReportLogEntryType(EventLogEntryType):
                 if report.organizer_id is None:
                     return {"val": str(report)}
                 href = reverse(
-                    f"{URL_NAMESPACE}:organizer.templates.edit",
+                    f"{URL_NAMESPACE}:organizer.templates.editor.edit",
                     kwargs={
                         "organizer": report.organizer.slug,
                         "template": report.pk,
@@ -230,11 +248,11 @@ class ReportLogEntryType(EventLogEntryType):
                 )
             else:
                 href = reverse(
-                    f"{URL_NAMESPACE}:event.reports.edit",
+                    f"{URL_NAMESPACE}:editor.edit",
                     kwargs={
                         "organizer": report.event.organizer.slug,
                         "event": report.event.slug,
-                        "report": report.pk,
+                        "identifier": report.identifier,
                     },
                 )
         except NoReverseMatch:  # pragma: no cover -- URLs are wired in urls.py

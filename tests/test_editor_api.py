@@ -88,9 +88,15 @@ from pretix_custom_reports.models import ReportDefinition
 from pretix_custom_reports.signals import URL_NAMESPACE
 from pretix_custom_reports.views.api import api_urlpatterns
 from pretix_custom_reports.views.crud import event_urlpatterns
-from pretix_custom_reports.views.editor import editor_urlpatterns
+from pretix_custom_reports.views.editor import (
+    editor_urlpatterns,
+    template_editor_urlpatterns,
+)
 from pretix_custom_reports.views.portability import portability_event_urlpatterns
-from pretix_custom_reports.views.templates import templates_event_urlpatterns
+from pretix_custom_reports.views.templates import (
+    templates_event_urlpatterns,
+    templates_organizer_urlpatterns,
+)
 
 from .conftest import PASSWORD, VIEW_PERMISSION
 
@@ -127,8 +133,11 @@ def editor_routes():
     Exactly what ``urls.py`` will do; done here because that file has another
     owner. Since wave 2 the CRUD routes are in here too (the editor's form posts
     to them) and so are portability-dev's event routes (the editor links to
-    them). The organizer-level template routes are left out on purpose: the
-    editor never links to those.
+    them). The organizer-level template routes joined them when the editor
+    learned to edit organizer templates: ``TemplateEditorView`` posts to
+    ``organizer.templates.add``/``.edit`` and links to ``.export``, and its own
+    two routes come from ``template_editor_urlpatterns``, which the integrator
+    still has to wire (handoff/requests/frontend-dev-an-integrator-template-editor-urls.md).
 
     Reverting is important: other test modules must see the unmodified URLconf.
     """
@@ -139,10 +148,12 @@ def editor_routes():
     original = list(plugin_urls.urlpatterns)
     plugin_urls.urlpatterns = (
         list(editor_urlpatterns)
+        + list(template_editor_urlpatterns)
         + list(api_urlpatterns)
         + list(event_urlpatterns)
         + list(portability_event_urlpatterns)
         + list(templates_event_urlpatterns)
+        + list(templates_organizer_urlpatterns)
         + original
     )
     importlib.reload(maindomain_urlconf)
@@ -2538,3 +2549,641 @@ def test_no_stub_is_left_in_the_editor_views():
         # them under a different path.
         assert "stub_registry(" not in source, name
         assert "stub_compiler(" not in source, name
+
+
+# ---------------------------------------------------------------------------
+# Page layout
+# ---------------------------------------------------------------------------
+#
+# A user's verdict on the first version: "everything you need is there, but it
+# is cramped and confusing, and the order does not really make sense". The fix
+# is four separated blocks in the order the work happens -- what the report is
+# called, what goes into it, how the result is arranged, what comes out -- plus a
+# second save button at the bottom of a page that is long enough to make
+# scrolling back up annoying.
+#
+# These tests assert on *order and separation*, not on styling: pixels are not
+# testable from here, but "the preview is below the columns" and "there is a rule
+# between the blocks" are.
+
+
+#: The four blocks and, inside each of them, the elements that belong to it, in
+#: the order the page is meant to read. Every entry is an id, because that is
+#: what report-editor.js addresses too -- rename one and this list breaks
+#: together with the JavaScript, which is the point.
+LAYOUT_ORDER = [
+    'id="pcr-section-basics"',
+    'id="pcr-name"',
+    'id="pcr-description"',
+    'id="pcr-base"',
+    'id="pcr-section-content"',
+    'id="pcr-library"',
+    'id="pcr-columns"',
+    'id="pcr-filters"',
+    'id="pcr-section-arrangement"',
+    'id="pcr-sorting"',
+    'id="pcr-opt-rowlimit"',
+    'id="pcr-section-result"',
+    'id="pcr-preview-panel"',
+    'id="pcr-json"',
+]
+
+
+@pytest.mark.django_db
+def test_editor_page_orders_its_four_blocks(client_with_perms, event):
+    """Name/base, then content, then arrangement, then result."""
+    content = client_with_perms.get(url_for("editor.new", event)).content.decode()
+    positions = []
+    for marker in LAYOUT_ORDER:
+        assert marker in content, marker
+        positions.append((marker, content.index(marker)))
+    assert positions == sorted(positions, key=lambda entry: entry[1]), positions
+
+
+@pytest.mark.django_db
+def test_editor_page_separates_the_four_blocks(client_with_perms, event):
+    """Three rules for four blocks, and a heading on each block."""
+    content = client_with_perms.get(url_for("editor.new", event)).content.decode()
+    assert content.count('class="pcr-section-divider"') == 3
+    assert content.count('class="pcr-section-title"') == 4
+    # The stylesheet has to carry the rules, otherwise the markup is decoration.
+    css = (
+        PLUGIN_ROOT / "static" / "pretix_custom_reports" / "css" / "report-editor.css"
+    ).read_text(encoding="utf-8")
+    assert ".pcr-section-divider" in css
+    assert ".pcr-section-title" in css
+
+
+@pytest.mark.django_db
+def test_the_report_base_sits_in_the_first_block(client_with_perms, event):
+    """Choosing the base is a decision about the whole report, not about a field.
+
+    It used to sit on top of the field library, which is why it read like part of
+    it. Both ids stay -- report-editor.js renders into ``#pcr-base-choices`` and
+    unhides ``#pcr-base-impact`` -- only their place in the document changed.
+    """
+    content = client_with_perms.get(url_for("editor.new", event)).content.decode()
+    assert 'id="pcr-base-choices"' in content
+    assert 'id="pcr-base-impact"' in content
+    assert content.index('id="pcr-base"') < content.index('id="pcr-library"')
+    assert content.index('id="pcr-base"') < content.index('id="pcr-section-content"')
+
+
+@pytest.mark.django_db
+def test_editor_repeats_the_save_button_at_the_end_of_the_page(
+    client_with_perms, event
+):
+    """A second button, one form, no nesting.
+
+    ``form="pcr-form"`` is the HTML5 form owner attribute: the button submits the
+    form up in the first block without being inside it, so the page keeps exactly
+    one ``<form>`` of ours and report-editor.js keeps its single submit handler --
+    which is what writes the hidden ``definition`` input before the POST goes out.
+    """
+    content = client_with_perms.get(url_for("editor.new", event)).content.decode()
+    assert content.count('id="pcr-form"') == 1
+    assert content.count('id="pcr-save"') == 1
+    assert content.count('id="pcr-save-bottom"') == 1
+    # The bottom button is outside the form and points back into it.
+    assert content.index("</form>") < content.index('id="pcr-save-bottom"')
+    assert 'form="pcr-form"' in content
+    # ... and it is below the JSON panel, i.e. at the end of the page.
+    assert content.index('id="pcr-json"') < content.index('id="pcr-save-bottom"')
+    # A shared class, so anything that wants "the save buttons" gets both
+    # without having to know that there are two.
+    assert content.count("btn btn-primary pcr-save") == 2
+
+
+@pytest.mark.django_db
+def test_both_save_buttons_are_disabled_together(
+    client_read_only, event, stored_report
+):
+    """Whatever disables one must disable the other, or the page lies twice."""
+    report = stored_report(load_fixture("minimal_order"))
+    content = client_read_only.get(
+        url_for("editor.edit", event, identifier=report.identifier)
+    ).content.decode()
+    for marker in ('id="pcr-save"', 'id="pcr-save-bottom"'):
+        assert "disabled" in content.split(marker)[1].split(">")[0], marker
+
+
+# ---------------------------------------------------------------------------
+# The template editor (organizer level)
+# ---------------------------------------------------------------------------
+#
+# Same shell, same JavaScript, same JSON endpoints -- but an organizer-level
+# report template has no event, and a field library only exists *for* an event:
+# which questions, products and meta properties there are is event data. So the
+# user picks a reference event and the editor talks to that event's
+# api/fields/, api/preview/ and api/validate/. views/api.py is untouched.
+#
+# The critical assumption is that portability-dev's TemplateCreateView and
+# TemplateUpdateView accept the editor's POST unchanged.
+# test_template_editor_post_round_trip is the proof, and it is parametrised over
+# every golden fixture for the same reason its event-level twin is.
+
+#: Organizer-level change permission. Deliberately spelled out rather than
+#: imported, for the same reason as CHANGE_PERMISSION above: if that string ever
+#: moves, the users built here must stop matching it *visibly*.
+ORGANIZER_CHANGE_PERMISSION = "organizer.settings.general:write"
+
+
+def organizer_url_for(name, organizer, **kwargs):
+    return reverse(
+        f"{URL_NAMESPACE}:{name}",
+        kwargs={"organizer": organizer.slug, **kwargs},
+    )
+
+
+def template_editor_url(organizer, reference_event=None, template=None):
+    """The template editor's URL, with or without the reference event."""
+    if template is None:
+        url = organizer_url_for("organizer.templates.editor.new", organizer)
+    else:
+        url = organizer_url_for(
+            "organizer.templates.editor.edit", organizer, template=template
+        )
+    if reference_event is not None:
+        url += f"?reference_event={reference_event.slug}"
+    return url
+
+
+@pytest.fixture
+def second_event(organizer):
+    """A second event with the plugin on, so the picker has something to pick."""
+    from pretix.base.models import Event
+
+    with scopes_disabled():
+        return Event.objects.create(
+            organizer=organizer,
+            name="Second Event",
+            slug="second",
+            date_from=now() + datetime.timedelta(days=60),
+            plugins="pretix_custom_reports",
+            live=True,
+        )
+
+
+@pytest.fixture
+def stored_template(organizer):
+    """Factory for a saved organizer template (``event=None``)."""
+
+    def make(definition, name="Stored template", identifier=""):
+        with scopes_disabled():
+            return ReportDefinition.objects.create(
+                organizer=organizer,
+                name=name,
+                identifier=identifier,
+                definition=definition,
+            )
+
+    return make
+
+
+@pytest.fixture
+def user_organizer_only(organizer):
+    """May change organizer settings, may not read orders in any event.
+
+    ``all_events=False`` and no ``limit_events``: ``_get_teams_for_event``
+    therefore finds no team for any event of this organizer, so every
+    ``has_event_permission`` is False while the organizer-level check passes
+    (verified in pretix/base/models/auth.py).
+    """
+    user = User.objects.create_user("organizer-only@example.org", PASSWORD)
+    team = Team.objects.create(
+        organizer=organizer,
+        name="Organizer settings only",
+        all_events=False,
+        all_event_permissions=False,
+        all_organizer_permissions=True,
+    )
+    team.members.add(user)
+    return user
+
+
+@pytest.fixture
+def client_organizer_only(user_organizer_only):
+    """Its own ``Client``, not pytest-django's shared one.
+
+    ``client`` is a single object per test: a fixture that logs in on it replaces
+    whoever was logged in before, so a test that wants two users at once (the
+    preview gate below) must not build the second one on top of the first.
+    """
+    own = Client()
+    assert own.login(email=user_organizer_only.email, password=PASSWORD)
+    return own
+
+
+@pytest.mark.django_db
+def test_template_editor_points_at_the_reference_events_endpoints(
+    client_with_perms, organizer, event
+):
+    """(a) The page loads, and every JSON endpoint belongs to the reference event.
+
+    That is the whole trick: no new API and no organizer-level field registry.
+    The editor's config carries the *event* URLs, which are gated on
+    ``event.orders:read`` and on the plugin being active there.
+    """
+    resp = client_with_perms.get(template_editor_url(organizer, reference_event=event))
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'id="pcr-editor"' in content
+    assert 'id="pcr-config"' in content
+
+    config = editor_config(content)
+    assert config["urls"]["fields"] == url_for("api.fields", event)
+    assert config["urls"]["preview"] == url_for("api.preview", event)
+    assert config["urls"]["validate"] == url_for("api.validate", event)
+    assert config["schema_version"]
+
+    # Template mode is visible: the title, the reference-event hint and the note
+    # that the preview shows that event's real orders.
+    assert "Template editor" in content
+    assert "Report editor" not in content
+    assert "Reference event:" in content
+    assert event.name in content
+    assert 'id="pcr-preview-note"' in content
+
+    # A new template posts to portability-dev's create view.
+    assert (
+        f'action="{organizer_url_for("organizer.templates.add", organizer)}"' in content
+    )
+    assert "disabled" not in content.split('id="pcr-save"')[1].split(">")[0]
+
+
+@pytest.mark.django_db
+def test_template_editor_renders_no_raw_django_comment(
+    client_with_perms, organizer, event
+):
+    """The same lexer trap as on the event page, on both new code paths."""
+    for url in (
+        template_editor_url(organizer, reference_event=event),
+        template_editor_url(organizer),  # auto-selected, so also the editor
+    ):
+        content = client_with_perms.get(url).content.decode()
+        assert "{#" not in content
+        assert "#}" not in content
+        assert "Pick the reference event for the template editor" not in content
+        assert "The reference-event hint lives inside" not in content
+
+
+@pytest.mark.django_db
+def test_template_editor_picks_the_only_usable_event_by_itself(
+    client_with_perms, organizer, event, event_without_plugin
+):
+    """One candidate is not a choice, so do not ask.
+
+    ``event_without_plugin`` is not a candidate: the API routes answer 404 for an
+    event that has the plugin switched off, so offering it would mean offering a
+    broken editor.
+    """
+    resp = client_with_perms.get(template_editor_url(organizer))
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'id="pcr-editor"' in content
+    assert 'id="pcr-reference-event"' not in content
+    assert editor_config(content)["urls"]["fields"] == url_for("api.fields", event)
+    # With nothing to choose from, the "use a different event" link would lead
+    # straight back to this page.
+    assert 'id="pcr-choose-event"' not in content
+
+
+@pytest.mark.django_db
+def test_template_editor_asks_which_event_when_there_are_several(
+    client_with_perms, organizer, event, second_event, event_without_plugin
+):
+    """(b) No reference event and more than one candidate: the in-between page."""
+    resp = client_with_perms.get(template_editor_url(organizer))
+    assert resp.status_code == 200
+    content = resp.content.decode()
+
+    assert 'id="pcr-editor"' not in content
+    assert 'id="pcr-reference-event"' in content
+    assert 'method="get"' in content
+    assert 'name="reference_event"' in content
+    assert f'value="{event.slug}"' in content
+    assert f'value="{second_event.slug}"' in content
+    # The event without the plugin is not on offer.
+    assert f'value="{event_without_plugin.slug}"' not in content
+
+    # And the answer really opens the editor for that event.
+    resp = client_with_perms.get(
+        template_editor_url(organizer, reference_event=second_event)
+    )
+    assert resp.status_code == 200
+    assert editor_config(resp.content.decode())["urls"]["fields"] == url_for(
+        "api.fields", second_event
+    )
+
+
+@pytest.mark.django_db
+def test_template_editor_offers_a_way_back_to_the_event_picker(
+    client_with_perms, organizer, event, second_event
+):
+    """With several candidates the choice must be revisable -- and guarded.
+
+    The link leaves the page, so it carries ``data-pcr-leave="page"`` like the
+    import and template links do; report-editor.js asks before throwing unsaved
+    changes away. It has to sit *inside* ``#pcr-editor``, because that is where
+    the guard looks (``#pcr-editor a[data-pcr-leave]``).
+    """
+    content = client_with_perms.get(
+        template_editor_url(organizer, reference_event=event)
+    ).content.decode()
+    assert 'id="pcr-choose-event"' in content
+    before, after = content.split('id="pcr-choose-event"', 1)
+    assert 'data-pcr-leave="page"' in after[:200]
+    # The link goes back to the picker, not to the page it is on.
+    assert "reference_event" not in before.rsplit("<a ", 1)[1]
+    assert content.index('id="pcr-editor"') < content.index('id="pcr-choose-event"')
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("slug", ["does-not-exist", "plain", "dummy%20"])
+def test_template_editor_handles_an_unusable_reference_event(
+    client_with_perms, organizer, event, second_event, event_without_plugin, slug
+):
+    """(c) Not a 500: an unusable slug means "please choose".
+
+    ``plain`` is ``event_without_plugin`` -- it exists and this user may read it,
+    but the plugin is off there. The three cases (unknown, plugin off, no
+    permission) are deliberately not told apart in the answer: they mean the same
+    thing to the user, and distinguishing them would leak which slugs exist.
+    """
+    resp = client_with_perms.get(
+        template_editor_url(organizer) + f"?reference_event={slug}"
+    )
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'id="pcr-editor"' not in content
+    assert 'id="pcr-reference-event"' in content
+    assert "cannot be used as a reference" in content
+
+
+@pytest.mark.django_db
+def test_template_editor_ignores_an_event_of_another_organizer(
+    client_with_perms, organizer, event
+):
+    """CLAUDE.md rule 4: the candidates come from this organizer, full stop."""
+    from pretix.base.models import Event, Organizer
+
+    other_org = Organizer.objects.create(name="Other", slug="other-org")
+    with scopes_disabled():
+        foreign = Event.objects.create(
+            organizer=other_org,
+            name="Foreign",
+            slug="foreign",
+            date_from=now() + datetime.timedelta(days=30),
+            plugins="pretix_custom_reports",
+            live=True,
+        )
+    resp = client_with_perms.get(
+        template_editor_url(organizer) + f"?reference_event={foreign.slug}"
+    )
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'id="pcr-editor"' not in content
+    assert "cannot be used as a reference" in content
+
+
+@pytest.mark.django_db
+def test_template_editor_says_so_when_no_event_can_be_used(
+    client_organizer_only, user_organizer_only, organizer, event
+):
+    """An organizer admin without order access gets a message, not a 403 storm.
+
+    The plugin *is* active in the organizer, so ``OrganizerPluginActiveMixin``
+    lets the request through; this user simply cannot read orders anywhere, and
+    every request the editor would then make would answer 403.
+    """
+    assert user_organizer_only.has_organizer_permission(
+        organizer, ORGANIZER_CHANGE_PERMISSION
+    )
+    assert not user_organizer_only.has_event_permission(
+        organizer, event, VIEW_PERMISSION
+    )
+    resp = client_organizer_only.get(template_editor_url(organizer))
+    assert resp.status_code == 200
+    content = resp.content.decode()
+    assert 'id="pcr-editor"' not in content
+    assert 'id="pcr-reference-event"' not in content
+    assert "There is no event you could use as a reference" in content
+
+
+@pytest.mark.django_db
+def test_template_editor_needs_the_organizer_change_permission(
+    client_without_perms, organizer, event
+):
+    """Reading orders in an event says nothing about organizer templates."""
+    resp = client_without_perms.get(
+        template_editor_url(organizer, reference_event=event)
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.django_db
+def test_template_editor_requires_login(client, organizer, event):
+    resp = client.get(template_editor_url(organizer, reference_event=event))
+    assert resp.status_code == 302
+    assert "/control/login" in resp["Location"]
+
+
+@pytest.mark.django_db
+def test_template_editor_opens_a_stored_template(
+    client_with_perms, organizer, event, stored_template
+):
+    """The edit route, its save target and the identifier that must survive."""
+    template = stored_template(load_fixture("wide_order"), name="Wide template")
+    resp = client_with_perms.get(
+        template_editor_url(organizer, reference_event=event, template=template.pk)
+    )
+    assert resp.status_code == 200
+    content = resp.content.decode()
+
+    assert (
+        editor_config(content)["initial"]
+        == validate_definition(load_fixture("wide_order")).as_dict()
+    )
+    assert 'value="Wide template"' in content
+    assert (
+        'action="'
+        + organizer_url_for("organizer.templates.edit", organizer, template=template.pk)
+        + '"'
+    ) in content
+    assert f'name="identifier" value="{template.identifier}"' in content
+
+
+@pytest.mark.django_db
+def test_template_editor_404s_for_a_report_that_is_not_a_template(
+    client_with_perms, organizer, event, stored_report
+):
+    """An event-level report must not be reachable through the organizer route.
+
+    ``templates_for_organizer`` is ``organizer=<this one>`` **and**
+    ``event IS NULL``, so this is structural rather than a filter someone has to
+    remember (CLAUDE.md rule 4).
+    """
+    report = stored_report(load_fixture("minimal_order"))
+    resp = client_with_perms.get(
+        template_editor_url(organizer, reference_event=event, template=report.pk)
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.django_db
+def test_template_editor_404s_for_an_unknown_template(
+    client_with_perms, organizer, event
+):
+    """And the 404 comes before the event picker, not after it."""
+    assert (
+        client_with_perms.get(
+            template_editor_url(organizer, template=999999)
+        ).status_code
+        == 404
+    )
+
+
+@pytest.mark.django_db
+def test_template_editor_offers_export_only(
+    client_with_perms, organizer, event, stored_template
+):
+    """(e) No import, and above all no "load a template".
+
+    There is no organizer-level file import (``views/portability.py`` is event
+    level), and loading a template into a template is meaningless -- a template
+    is the thing that gets loaded. Export exists and needs a stored row.
+    """
+    template = stored_template(load_fixture("minimal_order"))
+    content = client_with_perms.get(
+        template_editor_url(organizer, reference_event=event, template=template.pk)
+    ).content.decode()
+
+    assert 'id="pcr-export"' in content
+    assert (
+        organizer_url_for("organizer.templates.export", organizer, template=template.pk)
+        in content
+    )
+    assert 'data-pcr-leave="export"' in content
+
+    assert 'id="pcr-import"' not in content
+    assert 'id="pcr-templates"' not in content
+    assert "Load a template" not in content
+    assert "Import from a file" not in content
+    assert url_for("event.reports.templates", event) not in content
+    assert url_for("event.reports.import", event) not in content
+
+    # And following the link really produces the file.
+    resp = client_with_perms.get(
+        organizer_url_for("organizer.templates.export", organizer, template=template.pk)
+    )
+    assert resp.status_code == 200
+    assert resp["Content-Type"] == "application/json"
+
+
+@pytest.mark.django_db
+def test_an_unsaved_template_cannot_be_exported_yet(
+    client_with_perms, organizer, event
+):
+    content = client_with_perms.get(
+        template_editor_url(organizer, reference_event=event)
+    ).content.decode()
+    assert 'id="pcr-export"' not in content
+    assert "Save this template to be able to export it as a file." in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("slug", FIXTURE_SLUGS)
+def test_template_editor_post_round_trip(client_with_perms, organizer, event, slug):
+    """(d) The proof that ``ReportDefinitionForm`` takes the editor's POST as is.
+
+    Editor form -> portability-dev's TemplateCreateView -> database -> editor
+    page, with the definition unchanged. This is the one assumption the whole
+    feature rests on -- that no change to ``views/templates.py`` or ``forms.py``
+    is needed -- so it is checked against every golden fixture, exactly like its
+    event-level twin.
+    """
+    raw = load_fixture(slug)
+    canonical = validate_definition(raw)
+
+    resp = client_with_perms.post(
+        organizer_url_for("organizer.templates.add", organizer),
+        data={
+            "name": slug,
+            "description": "from the editor",
+            # A new template posts an empty identifier and lets the model mint
+            # one, exactly as the editor's markup does.
+            "identifier": "",
+            "base": canonical.base.value,
+            # Exactly what the hidden input carries: the canonical document as a
+            # JSON string.
+            "definition": canonical.as_json(),
+        },
+    )
+    assert resp.status_code == 302, (
+        resp.context["form"].errors if resp.context and "form" in resp.context else ""
+    )
+
+    with scopes_disabled():
+        stored = ReportDefinition.objects.templates_for_organizer(organizer).get(
+            name=slug
+        )
+    assert stored.event_id is None
+    assert stored.organizer_id == organizer.pk
+    assert stored.definition == canonical.as_dict()
+
+    content = client_with_perms.get(
+        template_editor_url(organizer, reference_event=event, template=stored.pk)
+    ).content.decode()
+    assert editor_config(content)["initial"] == canonical.as_dict()
+
+    # ... and saving again keeps the identifier, which is what "load this
+    # template" and every scheduled export of a copy refer to.
+    identifier = stored.identifier
+    assert f'name="identifier" value="{identifier}"' in content
+    resp = client_with_perms.post(
+        organizer_url_for("organizer.templates.edit", organizer, template=stored.pk),
+        data={
+            "name": f"{slug} renamed",
+            "description": "",
+            "identifier": identifier,
+            "base": canonical.base.value,
+            "definition": canonical.as_json(),
+        },
+    )
+    assert resp.status_code == 302
+    with scopes_disabled():
+        stored.refresh_from_db()
+    assert stored.name == f"{slug} renamed"
+    assert stored.identifier == identifier
+    assert stored.definition == canonical.as_dict()
+
+
+@pytest.mark.django_db
+def test_template_editor_preview_stays_gated_on_the_reference_event(
+    client_with_perms, client_organizer_only, organizer, event, event_data
+):
+    """The preview shows real order data, so it stays gated on the event.
+
+    Two halves of one statement: the endpoint the template editor points at
+    really works for a user who may read that event's orders, and it really
+    refuses a user who may not -- even though that second user may change this
+    organizer's templates. An unguarded preview would be a data leak
+    (SPEC.md section 4).
+    """
+    url = url_for("api.preview", event)
+    payload = post_json(
+        client_with_perms, url, {"definition": load_fixture("minimal_order")}
+    ).json()
+    assert payload["ok"] is True
+    assert payload["limit"] <= PREVIEW_ROW_LIMIT
+
+    # 404, not 403, and that is pretix' choice rather than ours: for an event URL
+    # whose user holds no permission at all in that event, ControlMiddleware
+    # raises Http404 before any view runs ("The selected event was not found or
+    # you have no permission ...", pretix/control/middleware.py). Either answer
+    # is a refusal; the assertion allows both so that a future pretix release
+    # switching between them does not read as a hole in our gate.
+    refused = post_json(
+        client_organizer_only, url, {"definition": load_fixture("minimal_order")}
+    )
+    assert refused.status_code in (403, 404)

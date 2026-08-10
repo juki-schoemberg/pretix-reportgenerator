@@ -1,10 +1,22 @@
-{% extends "pretixcontrol/event/base.html" %}
+{% extends editor_base_template|default:"pretixcontrol/event/base.html" %}
 {# Owner: frontend-dev (ORCHESTRIERUNG.md section 5) #}
 {% comment %}
     The editor shell. Bootstrap 3 markup and Font Awesome icons, both from the
     control panel's own stack; no CDN, no bundler. All behaviour lives in
     static/pretix_custom_reports/js/report-editor.js, all data in the JSON blob
     at the bottom -- the control panel's CSP forbids inline script.
+
+    The base template is a context variable because two views render this page:
+    ReportEditorView below an event (pretixcontrol/event/base.html) and
+    TemplateEditorView below an organizer (pretixcontrol/organizers/base.html).
+    Both leave "content" to the page; the organizer base only wraps an extra
+    "inner" block inside it, which this page does not use.
+
+    Layout, after user feedback that everything was there but cramped and in no
+    particular order: four blocks with a rule between them, in the order the work
+    actually happens -- what the report is called, what goes into it, how it is
+    arranged, what comes out. Every element id is unchanged, because
+    report-editor.js addresses all of them by id.
 
     Every comment spanning more than one line in this file is a comment tag and
     not the short brace-hash form. Django's lexer only recognises the short form
@@ -18,7 +30,9 @@
 {% load static %}
 {% load escapejson %}
 
-{% block title %}{% trans "Report editor" %}{% endblock %}
+{% block title %}
+    {% if is_template %}{% trans "Template editor" %}{% else %}{% trans "Report editor" %}{% endif %}
+{% endblock %}
 
 {% block custom_header %}
     {{ block.super }}
@@ -27,325 +41,477 @@
 {% endblock %}
 
 {% block content %}
-    <h1>{% trans "Report editor" %}</h1>
+    <h1>
+        {% if is_template %}{% trans "Template editor" %}{% else %}{% trans "Report editor" %}{% endif %}
+    </h1>
 
     <div id="pcr-editor" class="pcr-editor">
+
+        {% comment %}
+            The reference-event hint lives inside #pcr-editor on purpose: the
+            "you have unsaved changes" guard binds to
+            "#pcr-editor a[data-pcr-leave]", so a link outside would leave the
+            page without asking.
+        {% endcomment %}
+        {% if is_template and reference_event %}
+            <div class="alert alert-info pcr-reference-event">
+                <span class="fa fa-info-circle" aria-hidden="true"></span>
+                <strong>
+                    {% blocktrans trimmed with name=reference_event.name %}
+                        Reference event: {{ name }}
+                    {% endblocktrans %}
+                </strong>
+                <div>
+                    {% blocktrans trimmed %}
+                        A template has no event of its own, so the field library,
+                        the validation and the preview below come from this event.
+                        Fields marked “event values” have filter values that only
+                        exist in this event and are remapped when the template is
+                        loaded somewhere else.
+                    {% endblocktrans %}
+                    {% if choose_event_url %}
+                        <a href="{{ choose_event_url }}" id="pcr-choose-event"
+                           data-pcr-leave="page">
+                            {% trans "Use a different reference event" %}
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+        {% endif %}
 
         <div id="pcr-errors" class="hidden"></div>
         <div id="pcr-warnings" class="hidden"></div>
         <div id="pcr-local-issues" class="hidden"></div>
 
-        <form method="post" id="pcr-form" action="{{ save_url|default_if_none:"" }}">
-            {% csrf_token %}
-            <div class="row">
-                <div class="col-md-6">
-                    <div class="form-group">
-                        <label for="pcr-name">{% trans "Name" %}</label>
-                        <input type="text" class="form-control" id="pcr-name" name="name"
-                               maxlength="190" value="{{ report_name|default_if_none:"" }}"/>
-                    </div>
-                </div>
-                <div class="col-md-6">
-                    <div class="form-group">
-                        <label for="pcr-description">{% trans "Description" %}</label>
-                        <input type="text" class="form-control" id="pcr-description"
-                               name="description" maxlength="500"
-                               value="{{ report_description|default_if_none:"" }}"/>
-                    </div>
-                </div>
-            </div>
-            <input type="hidden" name="definition" id="pcr-definition-input"/>
-            <input type="hidden" name="base" id="pcr-base-input"/>
-            {% if report_identifier %}
-                <input type="hidden" name="identifier" value="{{ report_identifier }}"/>
-            {% endif %}
-            <div class="form-group">
-                <button type="submit" class="btn btn-primary" id="pcr-save"
-                        {% if not save_url %}disabled{% endif %}>
-                    <span class="fa fa-save" aria-hidden="true"></span>
-                    {% trans "Save" %}
-                </button>
-                {% if not save_url %}
-                    <span class="help-block">
-                        {% blocktrans trimmed %}
-                            You cannot save this report: either you may view reports but
-                            not change them, or the report views are not reachable in
-                            this installation. Copy the JSON from the panel at the bottom
-                            in the meantime.
-                        {% endblocktrans %}
-                    </span>
-                {% endif %}
-            </div>
-        </form>
+        {# ------------------------------------------------- 1: what it is #}
+        <section class="pcr-section" id="pcr-section-basics">
+            <h2 class="pcr-section-title">
+                {% trans "Name and report base" %}
+                <small>
+                    {% if is_template %}
+                        {% trans "What this template is called and what one row of it stands for." %}
+                    {% else %}
+                        {% trans "What this report is called and what one row of it stands for." %}
+                    {% endif %}
+                </small>
+            </h2>
 
-        <div class="row">
-            {# ---------------------------------------------------- left column #}
-            <div class="col-md-4">
-                <div class="panel panel-default" id="pcr-base">
-                    <div class="panel-heading">
-                        <h3 class="panel-title">{% trans "Report base" %}</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div id="pcr-base-choices"></div>
-                        <div id="pcr-base-impact" class="hidden"></div>
-                    </div>
-                </div>
-
-                <div class="panel panel-default" id="pcr-library">
-                    <div class="panel-heading">
-                        <h3 class="panel-title">{% trans "Field library" %}</h3>
-                    </div>
-                    <div class="panel-body">
+            <form method="post" id="pcr-form" action="{{ save_url|default_if_none:"" }}">
+                {% csrf_token %}
+                <div class="row">
+                    <div class="col-md-6">
                         <div class="form-group">
-                            <label class="sr-only" for="pcr-library-search">
-                                {% trans "Search fields" %}
-                            </label>
-                            <input type="search" class="form-control" id="pcr-library-search"
-                                   placeholder="{% trans "Search fields …" %}"/>
+                            <label for="pcr-name">{% trans "Name" %}</label>
+                            <input type="text" class="form-control" id="pcr-name" name="name"
+                                   maxlength="190" value="{{ report_name|default_if_none:"" }}"/>
                         </div>
-                        <div class="checkbox">
-                            <label>
-                                <input type="checkbox" id="pcr-library-all"/>
-                                {% trans "Also show fields that need the other report base" %}
-                            </label>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="pcr-description">{% trans "Description" %}</label>
+                            <input type="text" class="form-control" id="pcr-description"
+                                   name="description" maxlength="500"
+                                   value="{{ report_description|default_if_none:"" }}"/>
                         </div>
-                        <p class="help-block">
-                            {% blocktrans trimmed %}
-                                Drag a field into the column list, or use the buttons to
-                                add it as a column, filter or sorting stage.
-                            {% endblocktrans %}
-                        </p>
-                        <div id="pcr-library-list" class="pcr-library-list"></div>
                     </div>
                 </div>
-            </div>
-
-            {# --------------------------------------------------- right column #}
-            <div class="col-md-8">
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h3 class="panel-title">
-                            {% trans "Columns" %}
-                            <span class="badge" id="pcr-columns-count">0</span>
-                        </h3>
-                    </div>
-                    <div class="panel-body">
-                        <p class="text-muted hidden-print" id="pcr-columns-empty">
-                            {% blocktrans trimmed %}
-                                No columns yet. Drag fields here from the field library.
-                            {% endblocktrans %}
-                        </p>
-                        <table class="table table-condensed pcr-table">
-                            <thead>
-                                <tr>
-                                    <th class="pcr-col-handle"><span class="sr-only">{% trans "Order" %}</span></th>
-                                    <th>{% trans "Field" %}</th>
-                                    <th>{% trans "Column title" %}</th>
-                                    <th>{% trans "Aggregate" %}</th>
-                                    <th>{% trans "Format" %}</th>
-                                    <th class="text-right">{% trans "Actions" %}</th>
-                                </tr>
-                            </thead>
-                            <tbody id="pcr-columns"></tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h3 class="panel-title">{% trans "Filters" %}</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div class="form-inline pcr-filter-head">
-                            <label for="pcr-filter-root-op">{% trans "A row is included when it matches" %}</label>
-                            <select id="pcr-filter-root-op" class="form-control input-sm"></select>
-                        </div>
-                        <p class="text-muted" id="pcr-filters-empty">
-                            {% blocktrans trimmed %}
-                                No filters: the report covers every order of this event.
-                            {% endblocktrans %}
-                        </p>
-                        <div id="pcr-filters" class="pcr-filters"></div>
-                        <div class="btn-group btn-group-sm">
-                            <button type="button" class="btn btn-default" id="pcr-add-condition">
-                                <span class="fa fa-plus" aria-hidden="true"></span>
-                                {% trans "Add condition" %}
-                            </button>
-                            <button type="button" class="btn btn-default" id="pcr-add-group">
-                                <span class="fa fa-plus" aria-hidden="true"></span>
-                                {% trans "Add group" %}
-                            </button>
-                        </div>
-                        <p class="help-block">
-                            {% blocktrans trimmed %}
-                                One level of grouping is available: conditions at the top
-                                level are combined with each other, and each group is
-                                combined as one condition.
-                            {% endblocktrans %}
-                        </p>
-                    </div>
-                </div>
-
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h3 class="panel-title">
-                            {% trans "Sorting" %}
-                            <span class="badge" id="pcr-sorting-count">0</span>
-                        </h3>
-                    </div>
-                    <div class="panel-body">
-                        <p class="text-muted" id="pcr-sorting-empty">
-                            {% blocktrans trimmed %}
-                                No sorting: rows come in whatever order the database
-                                returns them.
-                            {% endblocktrans %}
-                        </p>
-                        <table class="table table-condensed pcr-table">
-                            <thead>
-                                <tr>
-                                    <th class="pcr-col-handle"><span class="sr-only">{% trans "Order" %}</span></th>
-                                    <th>{% trans "Field" %}</th>
-                                    <th>{% trans "Direction" %}</th>
-                                    <th class="text-right">{% trans "Actions" %}</th>
-                                </tr>
-                            </thead>
-                            <tbody id="pcr-sorting"></tbody>
-                        </table>
-                        <button type="button" class="btn btn-default btn-sm" id="pcr-add-sort">
-                            <span class="fa fa-plus" aria-hidden="true"></span>
-                            {% trans "Add sorting stage" %}
-                        </button>
-                    </div>
-                </div>
-
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h3 class="panel-title">{% trans "Options" %}</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div class="checkbox">
-                            <label>
-                                <input type="checkbox" id="pcr-opt-canceled"/>
-                                {% trans "Include canceled positions" %}
-                            </label>
-                            <span class="help-block hidden" id="pcr-opt-canceled-help">
+                <input type="hidden" name="definition" id="pcr-definition-input"/>
+                <input type="hidden" name="base" id="pcr-base-input"/>
+                {% if report_identifier %}
+                    <input type="hidden" name="identifier" value="{{ report_identifier }}"/>
+                {% endif %}
+                <div class="form-group">
+                    <button type="submit" class="btn btn-primary pcr-save" id="pcr-save"
+                            {% if not save_url %}disabled{% endif %}>
+                        <span class="fa fa-save" aria-hidden="true"></span>
+                        {% trans "Save" %}
+                    </button>
+                    {% if not save_url %}
+                        <span class="help-block">
+                            {% if is_template %}
                                 {% blocktrans trimmed %}
-                                    Only meaningful for reports with one row per order
-                                    position.
+                                    You cannot save this template: either you may
+                                    not change this organizer's settings, or the
+                                    template views are not reachable in this
+                                    installation. Copy the JSON from the panel at
+                                    the bottom in the meantime.
                                 {% endblocktrans %}
-                            </span>
+                            {% else %}
+                                {% blocktrans trimmed %}
+                                    You cannot save this report: either you may view
+                                    reports but not change them, or the report views
+                                    are not reachable in this installation. Copy the
+                                    JSON from the panel at the bottom in the
+                                    meantime.
+                                {% endblocktrans %}
+                            {% endif %}
+                        </span>
+                    {% endif %}
+                </div>
+            </form>
+
+            {% comment %}
+                Deliberately outside #pcr-form: report-editor.js renders radio
+                buttons in here and posts the chosen base through the hidden
+                #pcr-base-input, so these controls must not be form fields.
+            {% endcomment %}
+            <div class="panel panel-default" id="pcr-base">
+                <div class="panel-heading">
+                    <h3 class="panel-title">{% trans "Report base" %}</h3>
+                </div>
+                <div class="panel-body">
+                    <div id="pcr-base-choices"></div>
+                    <div id="pcr-base-impact" class="hidden"></div>
+                </div>
+            </div>
+        </section>
+
+        <hr class="pcr-section-divider"/>
+
+        {# ---------------------------------------------- 2: what is in it #}
+        <section class="pcr-section" id="pcr-section-content">
+            <h2 class="pcr-section-title">
+                {% trans "Content" %}
+                <small>
+                    {% comment %}
+                        Filters sit in this block rather than with sorting: like
+                        the columns they are built by dragging a field out of the
+                        library on the left, and together with the columns they
+                        answer the one question "what ends up in the report".
+                        Sorting and the options only rearrange that result.
+                    {% endcomment %}
+                    {% trans "Which fields become columns, and which rows are included." %}
+                </small>
+            </h2>
+
+            <div class="row">
+                {# ------------------------------------------------ left column #}
+                <div class="col-md-4">
+                    <div class="panel panel-default" id="pcr-library">
+                        <div class="panel-heading">
+                            <h3 class="panel-title">{% trans "Field library" %}</h3>
                         </div>
-                        <div class="checkbox">
-                            <label>
-                                <input type="checkbox" id="pcr-opt-testmode"/>
-                                {% trans "Include test mode orders" %}
-                            </label>
+                        <div class="panel-body">
+                            <div class="form-group">
+                                <label class="sr-only" for="pcr-library-search">
+                                    {% trans "Search fields" %}
+                                </label>
+                                <input type="search" class="form-control" id="pcr-library-search"
+                                       placeholder="{% trans "Search fields …" %}"/>
+                            </div>
+                            <div class="checkbox">
+                                <label>
+                                    <input type="checkbox" id="pcr-library-all"/>
+                                    {% trans "Also show fields that need the other report base" %}
+                                </label>
+                            </div>
+                            <p class="help-block">
+                                {% blocktrans trimmed %}
+                                    Drag a field into the column list, or use the buttons to
+                                    add it as a column, filter or sorting stage.
+                                {% endblocktrans %}
+                            </p>
+                            <div id="pcr-library-list" class="pcr-library-list"></div>
                         </div>
-                        <div class="form-group">
-                            <label for="pcr-opt-rowlimit">{% trans "Maximum number of rows" %}</label>
-                            <input type="number" min="1" class="form-control pcr-rowlimit"
-                                   id="pcr-opt-rowlimit"
-                                   placeholder="{% trans "no limit" %}"/>
+                    </div>
+                </div>
+
+                {# ----------------------------------------------- right column #}
+                <div class="col-md-8">
+                    <div class="panel panel-default">
+                        <div class="panel-heading">
+                            <h3 class="panel-title">
+                                {% trans "Columns" %}
+                                <span class="badge" id="pcr-columns-count">0</span>
+                            </h3>
+                        </div>
+                        <div class="panel-body">
+                            <p class="text-muted hidden-print" id="pcr-columns-empty">
+                                {% blocktrans trimmed %}
+                                    No columns yet. Drag fields here from the field library.
+                                {% endblocktrans %}
+                            </p>
+                            <table class="table table-condensed pcr-table">
+                                <thead>
+                                    <tr>
+                                        <th class="pcr-col-handle"><span class="sr-only">{% trans "Order" %}</span></th>
+                                        <th>{% trans "Field" %}</th>
+                                        <th>{% trans "Column title" %}</th>
+                                        <th>{% trans "Aggregate" %}</th>
+                                        <th>{% trans "Format" %}</th>
+                                        <th class="text-right">{% trans "Actions" %}</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="pcr-columns"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="panel panel-default">
+                        <div class="panel-heading">
+                            <h3 class="panel-title">{% trans "Filters" %}</h3>
+                        </div>
+                        <div class="panel-body">
+                            <div class="form-inline pcr-filter-head">
+                                <label for="pcr-filter-root-op">{% trans "A row is included when it matches" %}</label>
+                                <select id="pcr-filter-root-op" class="form-control input-sm"></select>
+                            </div>
+                            <p class="text-muted" id="pcr-filters-empty">
+                                {% blocktrans trimmed %}
+                                    No filters: the report covers every order of this event.
+                                {% endblocktrans %}
+                            </p>
+                            <div id="pcr-filters" class="pcr-filters"></div>
+                            <div class="btn-group btn-group-sm">
+                                <button type="button" class="btn btn-default" id="pcr-add-condition">
+                                    <span class="fa fa-plus" aria-hidden="true"></span>
+                                    {% trans "Add condition" %}
+                                </button>
+                                <button type="button" class="btn btn-default" id="pcr-add-group">
+                                    <span class="fa fa-plus" aria-hidden="true"></span>
+                                    {% trans "Add group" %}
+                                </button>
+                            </div>
+                            <p class="help-block">
+                                {% blocktrans trimmed %}
+                                    One level of grouping is available: conditions at the top
+                                    level are combined with each other, and each group is
+                                    combined as one condition.
+                                {% endblocktrans %}
+                            </p>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
 
-        {# ----------------------------------------------------------- preview #}
-        <div class="panel panel-default" id="pcr-preview-panel">
-            <div class="panel-heading">
-                <h3 class="panel-title">
-                    {% trans "Live preview" %}
-                    <span class="pcr-preview-controls">
-                        <label class="pcr-inline-check">
-                            <input type="checkbox" id="pcr-preview-auto" checked/>
-                            {% trans "refresh automatically" %}
-                        </label>
-                        <button type="button" class="btn btn-default btn-xs" id="pcr-preview-refresh">
-                            <span class="fa fa-refresh" aria-hidden="true"></span>
-                            {% trans "Refresh" %}
-                        </button>
-                    </span>
-                </h3>
-            </div>
-            <div class="panel-body">
-                <p class="pcr-preview-status" id="pcr-preview-status"></p>
-                <div id="pcr-preview" class="pcr-preview"></div>
-            </div>
-        </div>
+        <hr class="pcr-section-divider"/>
 
-        {# -------------------------------------------------------------- JSON #}
-        <div class="panel panel-default">
-            <div class="panel-heading">
-                <h3 class="panel-title">{% trans "Definition as JSON" %}</h3>
-            </div>
-            <div class="panel-body">
-                <p class="help-block">
-                    {% blocktrans trimmed %}
-                        This is exactly what gets stored. You can paste a definition
-                        here and apply it.
-                    {% endblocktrans %}
-                </p>
-                <textarea id="pcr-json" class="form-control pcr-json" rows="12"
-                          spellcheck="false"></textarea>
-                <button type="button" class="btn btn-default btn-sm" id="pcr-json-apply">
-                    {% trans "Apply JSON" %}
-                </button>
+        {# ------------------------------------ 3: how the result is arranged #}
+        <section class="pcr-section" id="pcr-section-arrangement">
+            <h2 class="pcr-section-title">
+                {% trans "Sorting and options" %}
+                <small>{% trans "The order of the rows, and which rows count at all." %}</small>
+            </h2>
 
-                {% comment %}
-                    File import/export and templates live in views/portability.py
-                    and views/templates.py (portability-dev). Every one of these
-                    links leaves the editor, so report-editor.js asks first when
-                    there are unsaved changes -- data-pcr-leave marks them, and
-                    "export" gets the sharper warning because the file is built
-                    from the stored row, not from what is on screen.
-                {% endcomment %}
-                {% if portability.export or portability.import or portability.templates %}
-                    <hr/>
-                    <div class="btn-group btn-group-sm" id="pcr-portability">
-                        {% if portability.export %}
-                            <a href="{{ portability.export }}" class="btn btn-default"
-                               id="pcr-export" data-pcr-leave="export">
-                                <span class="fa fa-download" aria-hidden="true"></span>
-                                {% trans "Export as a file" %}
-                            </a>
-                        {% endif %}
-                        {% if portability.import %}
-                            <a href="{{ portability.import }}" class="btn btn-default"
-                               id="pcr-import" data-pcr-leave="page">
-                                <span class="fa fa-upload" aria-hidden="true"></span>
-                                {% trans "Import from a file" %}
-                            </a>
-                        {% endif %}
-                        {% if portability.templates %}
-                            <a href="{{ portability.templates }}" class="btn btn-default"
-                               id="pcr-templates" data-pcr-leave="page">
-                                <span class="fa fa-clone" aria-hidden="true"></span>
-                                {% trans "Load a template" %}
-                            </a>
-                        {% endif %}
+            <div class="row">
+                <div class="col-md-8">
+                    <div class="panel panel-default">
+                        <div class="panel-heading">
+                            <h3 class="panel-title">
+                                {% trans "Sorting" %}
+                                <span class="badge" id="pcr-sorting-count">0</span>
+                            </h3>
+                        </div>
+                        <div class="panel-body">
+                            <p class="text-muted" id="pcr-sorting-empty">
+                                {% blocktrans trimmed %}
+                                    No sorting: rows come in whatever order the database
+                                    returns them.
+                                {% endblocktrans %}
+                            </p>
+                            <table class="table table-condensed pcr-table">
+                                <thead>
+                                    <tr>
+                                        <th class="pcr-col-handle"><span class="sr-only">{% trans "Order" %}</span></th>
+                                        <th>{% trans "Field" %}</th>
+                                        <th>{% trans "Direction" %}</th>
+                                        <th class="text-right">{% trans "Actions" %}</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="pcr-sorting"></tbody>
+                            </table>
+                            <button type="button" class="btn btn-default btn-sm" id="pcr-add-sort">
+                                <span class="fa fa-plus" aria-hidden="true"></span>
+                                {% trans "Add sorting stage" %}
+                            </button>
+                        </div>
                     </div>
-                    <p class="help-block">
-                        {% if portability.export %}
-                            {% blocktrans trimmed %}
-                                The exported file contains the saved report, not the
-                                changes you have not saved yet.
-                            {% endblocktrans %}
-                        {% else %}
-                            {% blocktrans trimmed %}
-                                Save this report to be able to export it as a file.
-                            {% endblocktrans %}
-                        {% endif %}
-                        {% if portability.import or portability.templates %}
-                            {% blocktrans trimmed %}
-                                Importing a file or loading a template opens a
-                                separate page and replaces what you see here.
-                            {% endblocktrans %}
-                        {% endif %}
-                    </p>
-                {% endif %}
+                </div>
+
+                <div class="col-md-4">
+                    <div class="panel panel-default">
+                        <div class="panel-heading">
+                            <h3 class="panel-title">{% trans "Options" %}</h3>
+                        </div>
+                        <div class="panel-body">
+                            <div class="checkbox">
+                                <label>
+                                    <input type="checkbox" id="pcr-opt-canceled"/>
+                                    {% trans "Include canceled positions" %}
+                                </label>
+                                <span class="help-block hidden" id="pcr-opt-canceled-help">
+                                    {% blocktrans trimmed %}
+                                        Only meaningful for reports with one row per order
+                                        position.
+                                    {% endblocktrans %}
+                                </span>
+                            </div>
+                            <div class="checkbox">
+                                <label>
+                                    <input type="checkbox" id="pcr-opt-testmode"/>
+                                    {% trans "Include test mode orders" %}
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label for="pcr-opt-rowlimit">{% trans "Maximum number of rows" %}</label>
+                                <input type="number" min="1" class="form-control pcr-rowlimit"
+                                       id="pcr-opt-rowlimit"
+                                       placeholder="{% trans "no limit" %}"/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
+        </section>
+
+        <hr class="pcr-section-divider"/>
+
+        {# --------------------------------------------- 4: what comes out #}
+        <section class="pcr-section" id="pcr-section-result">
+            <h2 class="pcr-section-title">
+                {% trans "Result" %}
+                <small>{% trans "What this report produces right now." %}</small>
+            </h2>
+
+            {# ------------------------------------------------------- preview #}
+            <div class="panel panel-default" id="pcr-preview-panel">
+                <div class="panel-heading">
+                    <h3 class="panel-title">
+                        {% trans "Live preview" %}
+                        <span class="pcr-preview-controls">
+                            <label class="pcr-inline-check">
+                                <input type="checkbox" id="pcr-preview-auto" checked/>
+                                {% trans "refresh automatically" %}
+                            </label>
+                            <button type="button" class="btn btn-default btn-xs" id="pcr-preview-refresh">
+                                <span class="fa fa-refresh" aria-hidden="true"></span>
+                                {% trans "Refresh" %}
+                            </button>
+                        </span>
+                    </h3>
+                </div>
+                <div class="panel-body">
+                    {% if is_template and reference_event %}
+                        <p class="help-block pcr-preview-note" id="pcr-preview-note">
+                            {% blocktrans trimmed with name=reference_event.name %}
+                                The preview shows real orders of the reference event
+                                “{{ name }}”. A template itself has no data; only a
+                                copy loaded into an event does.
+                            {% endblocktrans %}
+                        </p>
+                    {% endif %}
+                    <p class="pcr-preview-status" id="pcr-preview-status"></p>
+                    <div id="pcr-preview" class="pcr-preview"></div>
+                </div>
+            </div>
+
+            {# ---------------------------------------------------------- JSON #}
+            <div class="panel panel-default">
+                <div class="panel-heading">
+                    <h3 class="panel-title">{% trans "Definition as JSON" %}</h3>
+                </div>
+                <div class="panel-body">
+                    <p class="help-block">
+                        {% blocktrans trimmed %}
+                            This is exactly what gets stored. You can paste a definition
+                            here and apply it.
+                        {% endblocktrans %}
+                    </p>
+                    <textarea id="pcr-json" class="form-control pcr-json" rows="12"
+                              spellcheck="false"></textarea>
+                    <button type="button" class="btn btn-default btn-sm" id="pcr-json-apply">
+                        {% trans "Apply JSON" %}
+                    </button>
+
+                    {% comment %}
+                        File import/export and templates live in views/portability.py
+                        and views/templates.py (portability-dev). Every one of these
+                        links leaves the editor, so report-editor.js asks first when
+                        there are unsaved changes -- data-pcr-leave marks them, and
+                        "export" gets the sharper warning because the file is built
+                        from the stored row, not from what is on screen.
+
+                        In template mode only "export" is offered: there is no
+                        organizer-level file import, and loading a template into a
+                        template is meaningless. views/editor.py decides that, this
+                        page only renders what it is given.
+                    {% endcomment %}
+                    {% comment %}
+                        The block also renders when there is no button at all,
+                        which happens exactly once: an unsaved template, where
+                        export needs a stored row and neither import nor "load a
+                        template" exists. The help text below is then the whole
+                        point -- it says why there is nothing here yet.
+                    {% endcomment %}
+                    {% if portability.export or portability.import or portability.templates or is_template %}
+                        <hr/>
+                        {% if portability.export or portability.import or portability.templates %}
+                        <div class="btn-group btn-group-sm" id="pcr-portability">
+                            {% if portability.export %}
+                                <a href="{{ portability.export }}" class="btn btn-default"
+                                   id="pcr-export" data-pcr-leave="export">
+                                    <span class="fa fa-download" aria-hidden="true"></span>
+                                    {% trans "Export as a file" %}
+                                </a>
+                            {% endif %}
+                            {% if portability.import %}
+                                <a href="{{ portability.import }}" class="btn btn-default"
+                                   id="pcr-import" data-pcr-leave="page">
+                                    <span class="fa fa-upload" aria-hidden="true"></span>
+                                    {% trans "Import from a file" %}
+                                </a>
+                            {% endif %}
+                            {% if portability.templates %}
+                                <a href="{{ portability.templates }}" class="btn btn-default"
+                                   id="pcr-templates" data-pcr-leave="page">
+                                    <span class="fa fa-clone" aria-hidden="true"></span>
+                                    {% trans "Load a template" %}
+                                </a>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+                        <p class="help-block">
+                            {% if portability.export %}
+                                {% blocktrans trimmed %}
+                                    The exported file contains the saved report, not the
+                                    changes you have not saved yet.
+                                {% endblocktrans %}
+                            {% elif is_template %}
+                                {% blocktrans trimmed %}
+                                    Save this template to be able to export it as a file.
+                                {% endblocktrans %}
+                            {% else %}
+                                {% blocktrans trimmed %}
+                                    Save this report to be able to export it as a file.
+                                {% endblocktrans %}
+                            {% endif %}
+                            {% if portability.import or portability.templates %}
+                                {% blocktrans trimmed %}
+                                    Importing a file or loading a template opens a
+                                    separate page and replaces what you see here.
+                                {% endblocktrans %}
+                            {% endif %}
+                        </p>
+                    {% endif %}
+                </div>
+            </div>
+        </section>
+
+        {% comment %}
+            The second save button. form="pcr-form" submits the form up in block
+            1 without nesting anything (HTML5 form owner attribute), so the page
+            keeps exactly one form and report-editor.js keeps its single submit
+            handler. Both buttons carry the class pcr-save so that anything which
+            wants to address "the save buttons" can do so without knowing there
+            are two.
+        {% endcomment %}
+        <div class="pcr-save-bar">
+            <button type="submit" form="pcr-form" class="btn btn-primary pcr-save"
+                    id="pcr-save-bottom" {% if not save_url %}disabled{% endif %}>
+                <span class="fa fa-save" aria-hidden="true"></span>
+                {% trans "Save" %}
+            </button>
         </div>
     </div>
 

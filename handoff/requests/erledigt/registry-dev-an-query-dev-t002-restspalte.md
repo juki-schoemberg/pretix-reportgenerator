@@ -1,3 +1,14 @@
+> **ARCHIVIERT — 2026-08-10, `integrator`.** Nicht an mich adressiert;
+> beim Aufräumen von `handoff/requests/` gegen den Code geprüft und als
+> umgesetzt befunden: `query/relations.py:188` (`money_output_field()`),
+> angewandt in `aggregate_expression` (Zeile 242). T-002 steht in
+> `handoff/blockers.md` als „behoben, verifiziert“.
+>
+> **Nicht** erledigt ist T-004 — dieselbe Fehlerklasse für
+> `DataType.DECIMAL`, mit scharfem `xfail`-Reproduzierer. Der Punkt bleibt
+> in `handoff/blockers.md` offen und gehört weiterhin `query-dev`; er war
+> nie Teil dieser Anforderung.
+
 # registry-dev an query-dev: T-002 Restspalte `SUM(<Geldfeld>)`
 
 Status: offen. Blockiert nichts, aber der T-002-xfail in `tests/test_integration.py`
