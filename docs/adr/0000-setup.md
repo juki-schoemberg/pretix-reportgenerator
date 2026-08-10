@@ -115,9 +115,12 @@ Cookiecutter bietet „Apache" oder „pretix Enterprise" an. Gewählt:
 - „pretix Enterprise" eine kommerzielle Lizenz der pretix GmbH ist und für ein
   Fremdplugin nicht in Frage kommt.
 
-`LICENSE` enthält den Kurzhinweis in der Form, die das Cookiecutter erzeugt
-(Volltext per URL referenziert). `MANIFEST.in` nimmt die Datei ins sdist auf,
-`check-manifest` verlangt sie.
+`LICENSE` enthielt bis zur Veröffentlichung auf GitHub den Kurzhinweis in der
+Form, die das Cookiecutter erzeugt (Volltext per URL referenziert). Beim Anlegen
+des öffentlichen Repos (`github.com/thebootable/pretix-reportgenerator`) wurde
+stattdessen GitHubs Apache-2.0-Volltextvorlage übernommen, mit ausgefüllter
+Copyright-Zeile — inhaltlich dieselbe Lizenz, nur ausführlicher. `MANIFEST.in`
+nimmt die Datei ins sdist auf, `check-manifest` verlangt sie.
 
 **Rechteinhaber und Autor: „JuKi Schömberg e.V."** — vom Auftraggeber
 festgelegt. Eingetragen in `LICENSE` (Copyright), `pyproject.toml`
