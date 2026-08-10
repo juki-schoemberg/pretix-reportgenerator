@@ -31,6 +31,12 @@ classifiers = [
 dependencies = [
 ]
 
+[project.urls]
+Homepage = "https://github.com/juki-schoemberg/pretix-reportgenerator"
+Repository = "https://github.com/juki-schoemberg/pretix-reportgenerator"
+Issues = "https://github.com/juki-schoemberg/pretix-reportgenerator/issues"
+Changelog = "https://github.com/juki-schoemberg/pretix-reportgenerator/blob/main/CHANGELOG.rst"
+
 [project.entry-points."pretix.plugin"]
 pretix_custom_reports = "pretix_custom_reports:PretixPluginMeta"
 

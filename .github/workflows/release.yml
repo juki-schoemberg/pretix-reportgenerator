@@ -1,0 +1,55 @@
+# Owner from wave 1 on: integrator (see ORCHESTRIERUNG.md section 5)
+#
+# Publishes to PyPI via Trusted Publishing (OIDC) when a GitHub Release is
+# published -- no API token stored as a secret. This requires a one-time,
+# manual setup on pypi.org: add a "pending publisher" for this repository,
+# workflow file (release.yml) and environment (pypi) under the project owner's
+# PyPI account before the first release. See
+# https://docs.pypi.org/trusted-publishers/adding-a-publisher/
+#
+# gettext is required at build time (pretix_plugin_build.build.CustomBuild
+# runs compilemessages for the wheel), same as in tests.yml.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install system dependencies
+        run: sudo apt update && sudo apt install -y gettext
+      - name: Install build dependencies
+        run: pip3 install build pretix-plugin-build
+      - name: Build
+        run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pretix-custom-reports
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
