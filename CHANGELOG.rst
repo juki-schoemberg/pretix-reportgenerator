@@ -8,7 +8,7 @@ there and ``PretixPluginMeta.version`` reports it to pretix.
 0.1.0 (unreleased)
 ------------------
 
-First feature-complete build. Not published yet.
+First feature-complete build.
 
 Added
 ~~~~~

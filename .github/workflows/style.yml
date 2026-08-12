@@ -59,7 +59,12 @@ jobs:
       - name: Install pretix
         run: pip3 install "pretix==2026.6.0"
       - name: Install dependencies
-        run: pip3 install twine check-manifest pretix-plugin-build setuptools build -Ue .
+        # setuptools -U matters: an unpinned "setuptools" is a no-op for pip if
+        # the runner already has one installed, and `python setup.py sdist`
+        # below runs without build isolation. A pre-PEP-639 setuptools (found
+        # locally at 65.5.0) rejects `license = "Apache-2.0"` in
+        # pyproject.toml with "must be valid exactly by one definition".
+        run: pip3 install -U twine check-manifest pretix-plugin-build setuptools build -Ue .
       - name: Run check-manifest
         run: check-manifest .
       - name: Build package
