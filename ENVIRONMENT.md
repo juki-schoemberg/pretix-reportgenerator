@@ -23,10 +23,10 @@ Stoppen mit `Ctrl+C`.
 |---|---|
 | pretix | **v2026.6.0** (Release vom 2026-07-01, neuestes stabiles Release) |
 | pretix Commit | `fd565ecdb29c55a3e82dc15d94a848d193664caa` |
-| Python | 3.12.6 (`C:\Python312`), `requires-python = ">=3.11"` laut `pretix/pyproject.toml` |
-| Django | 5.2.16 |
+| Python | **3.11.0 (`C:\Python311`, in Git Bash `/c/Python311/python`)**, `requires-python = ">=3.11"` laut `pretix/pyproject.toml` |
+| Django | 5.2.17 |
 | Celery | 5.6.3 (installiert, aber **kein Broker konfiguriert** — siehe unten) |
-| Node / npm | 20.17.0 / 10.8.3 |
+| Node / npm | 24.16.0 / 11.13.0 |
 | Datenbank | SQLite (`data/db.sqlite3`) — kein PostgreSQL, kein Redis |
 
 Der Klon steht auf einem **Tag**, nicht auf `main`:
@@ -34,6 +34,14 @@ Der Klon steht auf einem **Tag**, nicht auf `main`:
 ```bash
 cd ../pretix && git describe --tags        # -> v2026.6.0
 ```
+
+> **Achtung, flacher Klon:** Beim Neuaufbau am 2026-08-12 wurde mit
+> `git clone --depth 1 --branch v2026.6.0` geklont (schneller, als Lesequelle
+> gleichwertig). `git log` zeigt deshalb nur einen Commit („grafted"). Wer die
+> Historie oder andere Tags braucht:
+> ```bash
+> cd ../pretix && git fetch --unshallow && git fetch --tags
+> ```
 
 Version wechseln (nur bewusst und danach `bash scripts/reset-dev.sh`):
 
@@ -48,12 +56,16 @@ cd ../pretix-reportgenerator && bash scripts/install-plugin.sh
 
 ## Verzeichnisaufbau
 
-Arbeitswurzel ist `D:\Projekte\juki\` (Git Bash: `/d/Projekte/juki/`), also **eine
-Ebene über dem Plugin-Repo**. `~/dev/pretix-work/` aus `SETUP.md` war nur das
-Linux-Beispiel.
+Arbeitswurzel ist `D:\Tobias\Desktop\Projekte\juki\`
+(Git Bash: `/d/Tobias/Desktop/Projekte/juki/`), also **eine Ebene über dem
+Plugin-Repo**. `~/dev/pretix-work/` aus `SETUP.md` war nur das Linux-Beispiel.
+
+Die Skripte in `scripts/_common.sh` berechnen diese Wurzel selbst
+(`REPO_DIR/..`) — ein Umzug des Repos braucht keine Skriptänderung, nur einen
+neuen venv-/Klon-Aufbau daneben.
 
 ```
-D:\Projekte\juki\
+D:\Tobias\Desktop\Projekte\juki\
 ├── venv\                     Python-venv (Windows: venv\Scripts\activate)
 ├── pretix\                   Klon auf v2026.6.0 — Dev-Server UND Lesequelle
 │   ├── src\pretix.cfg        Konfiguration dieser Umgebung (siehe unten)
@@ -92,10 +104,10 @@ Sie wird auf zwei Wegen gefunden:
 > zum cwd an und arbeitet gegen eine **leere** Datenbank. Immer entweder die
 > Skripte benutzen oder:
 > ```bash
-> export PRETIX_CONFIG_FILE=/d/Projekte/juki/pretix/src/pretix.cfg
+> export PRETIX_CONFIG_FILE=/d/Tobias/Desktop/Projekte/juki/pretix/src/pretix.cfg
 > ```
 
-Wichtige Werte: `datadir=D:/Projekte/juki/data`, `backend=sqlite3`,
+Wichtige Werte: `datadir=D:/Tobias/Desktop/Projekte/juki/data`, `backend=sqlite3`,
 `locale default=de`, `timezone=Europe/Berlin`, `url=http://localhost:8000`.
 
 ---
@@ -142,6 +154,13 @@ bash scripts/start-dev.sh 8080     # anderer Port
 | http://localhost:8000/demo/demo-event/ | Shop, Einzeltermin |
 | http://localhost:8000/demo/demo-serie/ | Shop, Veranstaltungsreihe |
 | http://localhost:5173/ | Vite-Dev-Server (startet `runserver` selbst mit) |
+| http://localhost:8000/control/event/demo/demo-event/customreports/ | **Plugin: Report-Liste** (Einzeltermin) |
+| http://localhost:8000/control/event/demo/demo-serie/customreports/ | Plugin: Report-Liste (Reihe) |
+| http://localhost:8000/control/organizer/demo/customreports/templates/ | Plugin: Vorlagen des Veranstalters |
+
+Das Plugin ist in beiden Demo-Events bereits aktiviert (Stand 2026-08-12). Nach
+einem `reset-dev.sh` muss es erneut aktiviert werden:
+`/control/event/demo/demo-event/settings/plugins`.
 
 **Stopp:** `Ctrl+C` im Terminal des Servers. Der Vite-Prozess wird über einen
 `atexit`-Handler mit beendet. Bleibt bei einem harten Abbruch etwas hängen:
@@ -343,7 +362,7 @@ Zusätzlich protokolliert pretix fachliche Änderungen in der Datenbank
 ### 1. `scripts/preflight.sh` meldet auf Windows vier Fehler — drei sind Fehlalarm
 
 ```
-✗ python3 nicht gefunden      -> es gibt python 3.12.6, nur nicht als "python3"
+✗ python3 nicht gefunden      -> es gibt Python 3.11.0 unter C:\Python311
 ✗ make fehlt                  -> nur für die Makefile-Ziele nötig, siehe unten
 ✗ gcc fehlt                   -> nicht nötig, alle Abhängigkeiten hatten Wheels
 ✗ msgfmt fehlt (gettext)      -> echt, betrifft nur Übersetzungen
@@ -352,6 +371,16 @@ Zusätzlich protokolliert pretix fachliche Änderungen in der Datenbank
 Das Preflight ist für Debian/Ubuntu geschrieben. Der Aufbau lief trotz Exit-Code 1
 durch; kein einziges Paket musste kompiliert werden (`libsass`, `lxml`, `Pillow`,
 `psycopg2-binary`, `python-bidi`, `cryptography` kamen alle als Wheel).
+
+**Zusatz aus dem Neuaufbau vom 2026-08-12:** `python` und `python3` im PATH zeigen
+auf dieser Maschine auf den Windows-Store-Alias und finden gar kein Python. Das
+venv deshalb **immer mit dem vollen Interpreterpfad** anlegen:
+
+```bash
+/c/Python311/python -m venv /d/Tobias/Desktop/Projekte/juki/venv
+```
+
+Innerhalb des aktivierten venv ist `python` danach korrekt (3.11.0).
 
 ### 2. `make` fehlt — Ersatzbefehle
 
@@ -395,6 +424,12 @@ Unter Windows gibt es kein `npm.exe`, nur `npm.cmd`. `CreateProcess` ergänzt
 ausschließlich `.exe`, deshalb warf der Aufruf `FileNotFoundError [WinError 2]` und
 **der Server startete gar nicht**.
 
+Der Fehler ist beim Neuaufbau am 2026-08-12 mit Node 24.16.0 / npm 11.13.0 erneut
+aufgetreten und wurde erneut so gelöst. Da `../tools/npm-shim` **nicht** im Git
+liegt, wird es beim Neuaufbau der Umgebung neu erzeugt: ein Modul `npm_shim.py`
+mit einer `main()`, die `node <npm-cli.js>` mit denselben Argumenten aufruft, plus
+`pyproject.toml` mit `[project.scripts] npm = "npm_shim:main"`.
+
 Lösung: das Mini-Paket `../tools/npm-shim` ist im venv installiert und stellt
 `venv/Scripts/npm.exe` bereit, das an das echte npm (`node npm-cli.js`)
 weiterleitet. Damit läuft `runserver` genau wie dokumentiert.
@@ -412,6 +447,11 @@ python -c "import subprocess; print(subprocess.call(['npm','--version']))"
 ```
 
 ### 5. Vite: Node zu alt und eine fehlende Plattform-Binary
+
+> **Stand 2026-08-12 (Neuaufbau):** Mit **Node 24.16.0 / npm 11.13.0** trat weder
+> das Binary-Problem noch die Node-Warnung auf — `npm ci` (2721 Dateien) reichte,
+> Vite startete auf :5173 und optimierte die Abhängigkeiten. Der folgende Absatz
+> gilt nur für ältere Node-/npm-Kombinationen.
 
 `npm ci` installierte `@rolldown/binding-win32-x64-msvc` nicht (bekannter
 npm-Bug mit optionalen Abhängigkeiten), Vite brach mit „Cannot find native
@@ -464,9 +504,11 @@ dem Backend, Benachrichtigungen und **terminierte Exporte**.
 
 ### 9. Pfadlängen
 
-Der Klon liegt bewusst kurz unter `D:\Projekte\juki\pretix`. In tieferen
-Verzeichnissen laufen `node_modules` und `static.dist` in das 260-Zeichen-Limit von
-Windows. Falls doch nötig:
+Der Klon liegt unter `D:\Tobias\Desktop\Projekte\juki\pretix`. Das ist schon
+deutlich tiefer als im ersten Lauf (`D:\Projekte\juki\pretix`); `npm ci`,
+`collectstatic` und der Vite-Start liefen am 2026-08-12 trotzdem fehlerfrei
+durch. Bei noch tieferen Ablagen laufen `node_modules` und `static.dist` in das
+260-Zeichen-Limit von Windows. Dann hilft:
 `git config --global core.longpaths true` und Long Paths in Windows aktivieren.
 
 ### 10. `--add-dir ..` ist Pflicht
@@ -483,7 +525,7 @@ Die Anleitung im Klon gilt; hier steht, wo die Umgebung notwendigerweise abweich
 
 | `setup.rst` | Hier | Grund |
 |---|---|---|
-| `python3 -m venv env` im Klon | `python -m venv` in `../venv` | vorgegebener Zielaufbau; `python3` existiert unter Windows nicht |
+| `python3 -m venv env` im Klon | `/c/Python311/python -m venv` in `../venv` | vorgegebener Zielaufbau; `python`/`python3` im PATH sind hier nur der Windows-Store-Alias |
 | `source env/bin/activate` | `. venv/Scripts/activate` | Windows-Layout |
 | `curl … nodesource \| sudo bash` | übersprungen | Node 20.17.0 ist schon installiert; **kein sudo** |
 | `make npminstall` | `npm ci` | kein `make` auf diesem System |
@@ -505,7 +547,7 @@ Alles davon wurde ausgeführt, nicht behauptet:
 
 | Prüfung | Ergebnis |
 |---|---|
-| `python -c "import pretix; print(pretix.__version__, pretix.__file__)"` | `2026.6.0 D:\Projekte\juki\pretix\src\pretix\__init__.py` |
+| `python -c "import pretix; print(pretix.__version__, pretix.__file__)"` | `2026.6.0 D:\Tobias\Desktop\Projekte\juki\pretix\src\pretix\__init__.py` |
 | `bash scripts/reset-dev.sh -y` komplett | Exit 0, ca. 90 s, identische Datenmengen bei erneutem Lauf |
 | `bash scripts/start-dev.sh` | Server auf 8000, Vite auf 5173 |
 | `GET /control/` ohne Login | 302 → `/control/login?next=/control/` |

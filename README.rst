@@ -17,24 +17,93 @@ exports, exchanged as JSON files and shared as organizer-level templates.
 Screenshots
 -----------
 
-*Placeholders — replace with real screenshots before the first release.*
+.. figure:: docs/img/step-0.png
+   :alt: Install plugin from settings page
 
-.. figure:: docs/img/screenshot-editor.png
-   :alt: The report editor with the field library, the column list and the live preview
+   **Install the plugin** under *Settings → Plugins → Output and export
+   formats*.
 
-   **The report editor.** Field library on the left, columns, filters and
-   sorting in the middle, live preview underneath.
+.. figure:: docs/img/step-1.png
+   :alt: Report overview, empty
 
-.. figure:: docs/img/screenshot-report-list.png
-   :alt: The list of saved reports of one event
+   **Report overview** of an event, before any report has been created.
 
-   **Saved reports of an event**, with import, export and "load a template".
+.. figure:: docs/img/step-2.png
+   :alt: Report editor: name and report base
 
-.. figure:: docs/img/screenshot-scheduled-export.png
-   :alt: pretix' scheduled export dialog with "Custom report" selected
+   **Report editor: name and report base.** A report is either ``order``
+   (one row per order) or ``orderposition`` (one row per position).
 
-   **Scheduling.** A saved report is a regular pretix export, so it appears in
-   the scheduled export dialog of the event and of the organizer.
+.. figure:: docs/img/step-3.png
+   :alt: Report editor: add columns to report
+
+   **Report editor: add columns.** Pick fields from the searchable, grouped
+   field library.
+
+.. figure:: docs/img/step-4.png
+   :alt: Report editor: sorting, options and preview
+
+   **Report editor: sorting, options and preview.** Multi-stage sorting, per
+   column display options and a live preview with real rows.
+
+.. figure:: docs/img/step-5.png
+   :alt: Report editor: definition as JSON
+
+   **Report editor: definition as JSON.** Every report has a plain-JSON view
+   of its definition.
+
+.. figure:: docs/img/step-6.png
+   :alt: Reports are registered with the official export feature
+
+   **Reports are registered with the official export feature** — a saved
+   report is a regular pretix exporter, not a separate download mechanism.
+
+.. figure:: docs/img/step-7.png
+   :alt: Search for custom reports in the export list
+
+   **Search for custom reports** in pretix' own export list, alongside the
+   built-in exporters.
+
+.. figure:: docs/img/step-8.png
+   :alt: Select the report and schedule the export or start immediately
+
+   **Select the report** and either run the export immediately or schedule
+   it through pretix' own scheduled exports.
+
+.. figure:: docs/img/step-9.png
+   :alt: Import a report from a JSON file
+
+   **Import a report from a JSON file**, with field keys resolved against the
+   target event before anything is written.
+
+.. figure:: docs/img/step-10.png
+   :alt: Templates can be defined in the organizer account
+
+   **Templates: defined on the organizer account** and shared across its
+   events.
+
+.. figure:: docs/img/step-11.png
+   :alt: The template editor is the same as the report editor
+
+   **Templates: the same editor.** Templates are built in the same graphical
+   editor as ordinary reports.
+
+.. figure:: docs/img/step-12.png
+   :alt: Reports can be loaded from a template
+
+   **Templates: load into a report.** An event's report editor can load a
+   report from an organizer-level template.
+
+.. figure:: docs/img/step-13.png
+   :alt: Select the template to load
+
+   **Templates: pick which one to load.**
+
+.. figure:: docs/img/step-14.png
+   :alt: A template is copied, so it can still be customized after loading
+
+   **Templates: loading makes a copy.** The event's report stays independent
+   and can be customized further without touching the template.
 
 
 Features
