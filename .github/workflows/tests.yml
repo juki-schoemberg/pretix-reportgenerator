@@ -39,7 +39,7 @@ jobs:
       - name: Install pretix
         run: pip3 install "pretix==2026.6.0"
       - name: Install dependencies
-        run: pip3 install pytest pytest-django -Ue .
+        run: pip3 install pytest pytest-django freezegun -Ue .
       - name: Run tests
         run: pytest tests -m "not performance"
 
