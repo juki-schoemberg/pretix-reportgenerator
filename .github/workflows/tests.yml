@@ -37,7 +37,7 @@ jobs:
       - name: Install system dependencies
         run: sudo apt update && sudo apt install -y gettext
       - name: Install pretix
-        run: pip3 install "pretix==2026.6.0"
+        run: pip3 install "pretix==2026.9.0"
       - name: Install dependencies
         run: pip3 install pytest pytest-django freezegun -Ue .
       - name: Run tests
@@ -54,7 +54,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - name: Install pretix
-        run: pip3 install "pretix==2026.6.0"
+        run: pip3 install "pretix==2026.9.0"
       - name: Install dependencies
         run: pip3 install -Ue .
       # The app label is required: without it Django wants to create a
