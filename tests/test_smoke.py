@@ -10,6 +10,7 @@ import importlib.metadata
 import pytest
 from django.apps import apps
 from django.urls import reverse
+from packaging.requirements import Requirement
 from pretix.base.plugins import get_all_plugins
 from pretix.base.signals import (
     event_copy_data,
@@ -92,14 +93,18 @@ def test_plugin_meta_is_complete():
 
 
 def test_compatibility_matches_installed_pretix():
-    """The pin must be exact and must match the installed pretix.
+    """The requirement must be a lower bound satisfied by the installed pretix.
 
-    A mismatch makes pretix call sys.exit(1) at startup, so a wrong pin
-    does not fail gracefully.
+    A mismatch makes pretix call sys.exit(1) at startup, so a wrong
+    requirement does not fail gracefully. The check mirrors
+    ``PluginConfig.__init__`` in ``pretix/base/plugins.py``.
     """
     meta = apps.get_app_config(MODULE_NAME).PretixPluginMeta
+    req = Requirement(meta.compatibility)
+    assert req.name == "pretix"
+    assert [spec.operator for spec in req.specifier] == [">="]
     installed = importlib.metadata.version("pretix")
-    assert meta.compatibility == f"pretix=={installed}"
+    assert req.specifier.contains(installed, prereleases=True)
 
 
 def test_plugin_appears_in_plugin_list(event):
