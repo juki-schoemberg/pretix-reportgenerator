@@ -1669,7 +1669,7 @@ def test_a_scheduled_export_whose_report_was_deleted_explains_itself(
     assert event.slug in schedule.error_last_message
     assert "Internal Error" not in schedule.error_last_message
     assert len(djmail.outbox) == 1
-    assert djmail.outbox[0].subject == "Export failed"
+    assert djmail.outbox[0].subject == "Scheduled export failed"
     assert "codes" in djmail.outbox[0].body
 
 

@@ -33,7 +33,7 @@ class PluginApp(PluginConfig):
         # Pinned exactly on purpose: PluginConfig.__init__ calls sys.exit(1) on a
         # mismatch, see pretix/base/plugins.py. Widening this pin is a conscious
         # decision, see docs/adr/0000-setup.md.
-        compatibility = "pretix==2026.6.0"
+        compatibility = "pretix==2026.9.0"
         settings_links = []
         # (label, urlname, extra kwargs) -- "organizer" and "event" are injected
         # by pretix, do not pass them here.

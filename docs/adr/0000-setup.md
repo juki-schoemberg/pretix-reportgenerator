@@ -56,6 +56,13 @@ Notausgang für lokale Experimente, ohne die Datei zu ändern:
 damit hier entschieden. `ENVIRONMENT.md` pinnt den Klon zusätzlich auf den Tag
 `v2026.6.0`, Commit `fd565ecdb29c55a3e82dc15d94a848d193664caa`.
 
+> **Nachtrag 2026-11-08:** Pin auf `pretix==2026.9.0` angehoben (neuestes
+> Stable). Verifiziert mit Python 3.13: volle Testsuite inkl. Lasttests grün,
+> `makemigrations --check` ohne Änderungen. Einzige Anpassung: pretix nennt die
+> Fehlermail von Scheduled Exports jetzt „Scheduled export failed"
+> (`pretix/base/services/export.py`), der Test wurde nachgezogen. Die
+> Lesequelle in `docs/pretix-api-notes.md` bezieht sich weiterhin auf 2026.6.0.
+
 ## 2. Python 3.12.6, deklariert als `requires-python = ">=3.11"`
 
 Entwickelt und getestet auf 3.12.6 (`C:\Python312`, das venv unter
