@@ -17,11 +17,11 @@ on:
     paths-ignore:
       - 'pretix_custom_reports/locale/**'
       - 'handoff/**'
+  # No paths-ignore for pull requests: these jobs are required status checks
+  # in the branch ruleset for main, and a required check that never starts
+  # blocks the merge.
   pull_request:
     branches: [ main, master ]
-    paths-ignore:
-      - 'pretix_custom_reports/locale/**'
-      - 'handoff/**'
 
 jobs:
   test:

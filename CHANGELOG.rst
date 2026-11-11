@@ -5,7 +5,17 @@ This project follows `Semantic Versioning <https://semver.org/>`_. The version
 lives in ``pretix_custom_reports/__init__.py``; ``pyproject.toml`` reads it from
 there and ``PretixPluginMeta.version`` reports it to pretix.
 
-0.1.0 (unreleased)
+0.2.0 (2026-11-11)
+------------------
+
+Changed
+~~~~~~~
+
+* Requires **pretix 2026.9.0 or newer** (``pretix>=2026.9.0``). The plugin
+  used to pin ``pretix==2026.6.0`` exactly; it now loads on any newer pretix
+  release. CI tests against the minimum, pretix 2026.9.0.
+
+0.1.0 (2026-08-12)
 ------------------
 
 First feature-complete build.

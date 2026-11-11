@@ -62,6 +62,14 @@ damit hier entschieden. `ENVIRONMENT.md` pinnt den Klon zusätzlich auf den Tag
 > Fehlermail von Scheduled Exports jetzt „Scheduled export failed"
 > (`pretix/base/services/export.py`), der Test wurde nachgezogen. Die
 > Lesequelle in `docs/pretix-api-notes.md` bezieht sich weiterhin auf 2026.6.0.
+>
+> **Nachtrag 2026-11-09:** Auf Wunsch des Maintainers von exakt auf
+> `pretix>=2026.9.0` geöffnet, damit das Plugin neben anderen Plugins mit
+> `>=`-Angabe (z. B. pretix-parentduties) auf neueren pretix-Releases lädt,
+> ohne dass `PluginConfig.__init__` den Server per `sys.exit(1)` stoppt. CI
+> bleibt auf `pretix==2026.9.0` und testet damit die Untergrenze; neuere
+> pretix-Versionen sind erlaubt, aber nicht durch CI abgedeckt. Die Begründung
+> für den exakten Pin oben ist damit überholt.
 
 ## 2. Python 3.12.6, deklariert als `requires-python = ">=3.11"`
 

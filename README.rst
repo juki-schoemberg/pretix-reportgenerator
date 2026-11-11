@@ -203,19 +203,21 @@ Compatibility
 -------------
 
 ============  ==================================================
-pretix        ``2026.9.0`` (pinned exactly, see below)
+pretix        ``>= 2026.9.0`` (CI tests the minimum, see below)
 Python        >= 3.11 (developed and tested on 3.12.6)
-Django        whatever the pinned pretix ships
+Django        whatever the installed pretix ships
 Database      SQLite (tested), PostgreSQL (**not yet verified**,
               see *Known limitations*)
 Formats       XLSX, CSV (comma), CSV (Excel-style), CSV (semicolon)
 Dependencies  none beyond pretix itself
 ============  ==================================================
 
-``PretixPluginMeta.compatibility`` is pinned to ``pretix==2026.9.0``. pretix
+``PretixPluginMeta.compatibility`` is set to ``pretix>=2026.9.0``. pretix
 enforces this at app-config time and calls ``sys.exit(1)`` on a mismatch, which
-takes the whole server down — so the pin is deliberate and must be widened
-consciously (see ``docs/adr/0000-setup.md``).
+takes the whole server down — so the lower bound is deliberate and is raised
+consciously (see ``docs/adr/0000-setup.md``). CI installs exactly
+``pretix==2026.9.0``, i.e. it tests the minimum supported version; newer
+pretix releases are allowed but not covered by CI.
 
 ODS is deliberately missing: pretix' ``ListExporter`` (checked in 2026.9.0)
 knows XLSX and three CSV dialects and nothing else, and hand-rolling a
