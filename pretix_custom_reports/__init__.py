@@ -5,4 +5,4 @@
 # points at this module. pretix itself only evaluates the *module* part of the
 # entry point (pretix/settings.py, ``entry_point.module``), the actual
 # ``PretixPluginMeta`` lives in ``apps.py``.
-__version__ = "0.1.0"
+__version__ = "0.2.0"
